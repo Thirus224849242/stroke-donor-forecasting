@@ -12,7 +12,8 @@ def build_master(
     recurring_path,
     campaigns_path,
     contacts_path,
-    progress_callback=None
+    progress_callback=None,
+    min_period='2019-01'
 ):
     # ── Load lookup tables ────────────────────────────────
     contacts  = clean_contacts(contacts_path)
@@ -29,7 +30,12 @@ def build_master(
     ).dt.to_period('M')
 
     # ── Process payments ──────────────────────────────────
-    payments = clean_payments(payments_path, progress_callback)
+    # Filtered to min_period here (not just at each model's fit step, as
+    # before) -- every downstream model already discards pre-2019 history
+    # as unreliable, so keeping it in memory through the full build was
+    # pure waste. This is what was blowing past the deploy host's RAM
+    # ceiling on the real multi-year Payments.csv.
+    payments = clean_payments(payments_path, progress_callback, min_period=min_period)
 
     # Collapse to donor-month
     payments['donor_month'] = payments['schedule_date'].dt.to_period('M')

@@ -51,9 +51,21 @@ def clean_recurring(path):
     return df
 
 
-def clean_payments(path, progress_callback=None):
+def clean_payments(path, progress_callback=None, min_period=None):
+    """
+    min_period: e.g. '2019-01' -- rows scheduled before this are dropped
+    per-chunk, before they ever join the `chunks` list. Every downstream
+    model (ltv_model, forecast, ml_forecast, stock_flow_forecast,
+    gift_waterfall, component_forecast) already treats pre-2019 history as
+    unreliable and filters it out before fitting -- so on a multi-year
+    Payments.csv, those older rows are pure dead weight sitting in memory
+    for the whole pipeline run and are the main lever for lowering peak
+    RAM (the thing that was OOM-killing the deploy) without touching any
+    model's behavior.
+    """
     chunks = []
     total  = 0
+    cutoff = pd.Timestamp(min_period) if min_period else None
     for chunk in pd.read_csv(
         path, chunksize=500_000,
         dtype={'Success': 'string', 'Amount': 'string'}
@@ -76,8 +88,11 @@ def clean_payments(path, progress_callback=None):
         gap         = (created - sched).dt.days.abs()
         use_created = sched.isna() & (gap <= GAP_THRESHOLD)
         date        = sched.where(~use_created, created)
-        chunk       = chunk[date.notna()].copy()
-        date        = date[date.notna()]
+        keep        = date.notna()
+        if cutoff is not None:
+            keep = keep & (date >= cutoff)
+        chunk       = chunk[keep].copy()
+        date        = date[keep]
         chunk['schedule_date'] = date
         chunk['amount_num']    = pd.to_numeric(chunk['Amount'], errors='coerce').fillna(0)
         ok                     = chunk['Success'].str.strip().str.upper().eq('YES')
