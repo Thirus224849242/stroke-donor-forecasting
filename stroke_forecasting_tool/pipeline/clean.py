@@ -65,6 +65,7 @@ def clean_payments(path, progress_callback=None, min_period=None):
     """
     chunks = []
     total  = 0
+    kept   = 0
     cutoff = pd.Timestamp(min_period) if min_period else None
     for chunk in pd.read_csv(
         path, chunksize=500_000,
@@ -99,7 +100,14 @@ def clean_payments(path, progress_callback=None, min_period=None):
         chunk['is_success']    = ok
         chunk['success_amt']   = chunk['amount_num'].where(ok, 0.0)
         chunks.append(chunk)
+        kept += len(chunk)
+        # TEMP diagnostic (flush=True to defeat stdout buffering on the
+        # deploy host) -- remove once the OOM bottleneck is confirmed.
+        print(f'[diag] payments chunk: {total:,} read so far, {kept:,} kept post-filter', flush=True)
         if progress_callback:
             progress_callback(total)
 
-    return pd.concat(chunks, ignore_index=True)
+    print(f'[diag] all chunks read, concatenating {len(chunks)} chunks ({kept:,} rows)...', flush=True)
+    result = pd.concat(chunks, ignore_index=True)
+    print('[diag] concat done', flush=True)
+    return result

@@ -16,9 +16,16 @@ def build_master(
     min_period='2019-01'
 ):
     # ── Load lookup tables ────────────────────────────────
+    # TEMP diagnostic prints (flush=True to defeat stdout buffering on the
+    # deploy host) -- pinpointing exactly where the app dies before an OOM
+    # kill, since the process leaves no traceback when it happens. Remove
+    # once the real bottleneck is confirmed.
     contacts  = clean_contacts(contacts_path)
+    print(f'[diag] contacts loaded: {len(contacts):,} rows', flush=True)
     campaigns = clean_campaigns(campaigns_path)
+    print(f'[diag] campaigns loaded: {len(campaigns):,} rows', flush=True)
     recurring = clean_recurring(recurring_path)
+    print(f'[diag] recurring loaded: {len(recurring):,} rows', flush=True)
 
     if 'campaign' in recurring.columns:
         recurring = recurring.rename(columns={'campaign': 'campaign_code'})
@@ -35,7 +42,9 @@ def build_master(
     # as unreliable, so keeping it in memory through the full build was
     # pure waste. This is what was blowing past the deploy host's RAM
     # ceiling on the real multi-year Payments.csv.
+    print(f'[diag] starting payments read, min_period={min_period}', flush=True)
     payments = clean_payments(payments_path, progress_callback, min_period=min_period)
+    print(f'[diag] payments loaded: {len(payments):,} rows (post-filter)', flush=True)
 
     # Collapse to donor-month
     payments['donor_month'] = payments['schedule_date'].dt.to_period('M')
@@ -115,6 +124,6 @@ def build_master(
     if 'donation_amount' in panel.columns:
         panel = panel.rename(columns={'donation_amount': 'current_gift_setting'})
 
-    print(f'Master file: {len(panel):,} rows · {panel["recurring_payment_id"].nunique():,} donors · {panel["supplier"].nunique()} suppliers')
+    print(f'Master file: {len(panel):,} rows · {panel["recurring_payment_id"].nunique():,} donors · {panel["supplier"].nunique()} suppliers', flush=True)
 
     return panel
