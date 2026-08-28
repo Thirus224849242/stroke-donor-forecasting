@@ -1,0 +1,54 @@
+[server]
+maxUploadSize = 1024
+
+[theme]
+base = "light"
+primaryColor = "#00897B"
+backgroundColor = "#F7F8FC"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#232338"
+borderColor = "#E8E8F0"
+linkColor = "#00897B"
+linkUnderline = false
+
+greenColor = "#1B7F5A"
+greenBackgroundColor = "#D5F5E3"
+greenTextColor = "#1B7F5A"
+redColor = "#C0392B"
+redBackgroundColor = "#FBEAE8"
+redTextColor = "#C0392B"
+orangeColor = "#C17D0C"
+orangeBackgroundColor = "#FEF9E7"
+orangeTextColor = "#C17D0C"
+blueColor = "#1E1E5F"
+blueBackgroundColor = "#EAEAF8"
+blueTextColor = "#1E1E5F"
+violetColor = "#6B2D8B"
+violetBackgroundColor = "#F5EEF8"
+violetTextColor = "#6B2D8B"
+grayColor = "#8888AA"
+
+chartCategoricalColors = ["#00897B", "#6B2D8B", "#C17D0C", "#C0392B", "#00B5A3", "#1E1E5F"]
+
+font = "'IBM Plex Sans':https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+headingFont = "'Space Grotesk':https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap"
+baseFontSize = 14
+baseFontWeight = 400
+headingFontSizes = ["26px", "21px", "17px", "15px", "13px", "12px"]
+headingFontWeights = [600, 600, 600, 600, 600, 600]
+
+baseRadius = "10px"
+buttonRadius = "8px"
+showWidgetBorder = true
+showSidebarBorder = true
+
+dataframeBorderColor = "#E8E8F0"
+dataframeHeaderBackgroundColor = "#F7F8FC"
+
+[theme.sidebar]
+backgroundColor = "#1E1E5F"
+secondaryBackgroundColor = "#262670"
+textColor = "#FFFFFF"
+borderColor = "rgba(255,255,255,0.08)"
+primaryColor = "#00B5A3"
+linkColor = "#00B5A3"
