@@ -37,30 +37,17 @@ def build_master(
     ).dt.to_period('M')
 
     # ── Process payments ──────────────────────────────────
-    # Filtered to min_period here (not just at each model's fit step, as
-    # before) -- every downstream model already discards pre-2019 history
-    # as unreliable, so keeping it in memory through the full build was
-    # pure waste. This is what was blowing past the deploy host's RAM
-    # ceiling on the real multi-year Payments.csv.
+    # clean_payments() now aggregates to the donor-month panel itself,
+    # per-chunk, as it streams -- it never holds the full raw payments
+    # table in memory. That (not the min_period filter, which turns out
+    # to remove very little of this real dataset) is what was blowing
+    # past the deploy host's RAM ceiling: the old code held every raw row
+    # in a list, then concatenated the whole thing, then grouped it --
+    # three copies of a multi-million-row table alive at once.
     print(f'[diag] starting payments read, min_period={min_period}', flush=True)
-    payments = clean_payments(payments_path, progress_callback, min_period=min_period)
-    print(f'[diag] payments loaded: {len(payments):,} rows (post-filter)', flush=True)
+    panel = clean_payments(payments_path, progress_callback, min_period=min_period)
+    print(f'[diag] payments aggregated: {len(panel):,} donor-month rows', flush=True)
 
-    # Collapse to donor-month
-    payments['donor_month'] = payments['schedule_date'].dt.to_period('M')
-    payments['failures']    = (~payments['is_success']).astype(int)
-    payments['successes']   = payments['is_success'].astype(int)
-
-    panel = (
-        payments.groupby(['recurring_payment_id', 'donor_month'])
-                .agg(
-                    attempts    = ('is_success',  'count'),
-                    successes   = ('successes',   'sum'),
-                    failures    = ('failures',    'sum'),
-                    success_amt = ('success_amt', 'sum'),
-                )
-                .reset_index()
-    )
     panel['paid_flag']    = panel['successes'] > 0
     panel['success_rate'] = panel['successes'] / panel['attempts'].clip(lower=1)
 
