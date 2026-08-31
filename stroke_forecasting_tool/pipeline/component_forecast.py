@@ -42,16 +42,23 @@ def _covid_dummy(periods, covid_start='2020-01', covid_end='2021-06'):
     return np.asarray(mask, dtype=float).reshape(-1, 1)
 
 
-def forecast_recruits_sarima(train, horizon, covid_start='2020-01', covid_end='2021-06',
-                              orders=DEFAULT_SARIMA_ORDERS, seasonal_orders=DEFAULT_SEASONAL_ORDERS):
+def sarima_series_forecast(y, months, horizon, covid_start='2020-01', covid_end='2021-06',
+                            orders=DEFAULT_SARIMA_ORDERS, seasonal_orders=DEFAULT_SEASONAL_ORDERS,
+                            clip_negative=True):
     """
+    Generic monthly-series SARIMA forecaster with a COVID dummy exogenous
+    regressor -- the core of forecast_recruits_sarima below, factored out
+    so any other monthly $ or count series (e.g. gift_waterfall.py's
+    new_volume / churned_volume buckets) can reuse the identical, already-
+    validated fitting logic instead of a second copy drifting out of sync.
+
+    y: array-like of the series' values, same length and order as `months`.
+    months: PeriodIndex (freq='M') matching y, ascending, no gaps.
     Light grid search over a handful of (p,d,q)(P,D,Q,12) combinations,
-    selected by AIC on the training window, with a COVID dummy exogenous
-    regressor. Falls back to a flat trailing average if every candidate
-    fails to fit (e.g. a very short training window).
+    selected by AIC on the training window. Falls back to a flat trailing
+    average if every candidate fails to fit (e.g. a very short window).
     """
-    months = pd.PeriodIndex(pd.to_datetime(train['month']).dt.to_period('M'))
-    y = train['recruits'].astype(float).values
+    y = np.asarray(y, dtype=float)
     exog = _covid_dummy(months, covid_start, covid_end)
 
     best_aic, best_res = np.inf, None
@@ -69,12 +76,22 @@ def forecast_recruits_sarima(train, horizon, covid_start='2020-01', covid_end='2
             continue
 
     if best_res is None:
-        return np.repeat(y[-6:].mean(), horizon)
+        fc = np.repeat(y[-6:].mean(), horizon)
+        return np.clip(fc, a_min=0, a_max=None) if clip_negative else fc
 
     future_months = pd.period_range(months[-1] + 1, periods=horizon, freq='M')
     future_exog = _covid_dummy(future_months, covid_start, covid_end)
-    fc = best_res.get_forecast(steps=horizon, exog=future_exog).predicted_mean
-    return np.clip(np.asarray(fc), a_min=0, a_max=None)
+    fc = np.asarray(best_res.get_forecast(steps=horizon, exog=future_exog).predicted_mean)
+    return np.clip(fc, a_min=0, a_max=None) if clip_negative else fc
+
+
+def forecast_recruits_sarima(train, horizon, covid_start='2020-01', covid_end='2021-06',
+                              orders=DEFAULT_SARIMA_ORDERS, seasonal_orders=DEFAULT_SEASONAL_ORDERS):
+    """Thin wrapper around sarima_series_forecast for walkforward.py's
+    train-DataFrame contract (a 'recruits' column and a 'month' column)."""
+    months = pd.PeriodIndex(pd.to_datetime(train['month']).dt.to_period('M'))
+    y = train['recruits'].astype(float).values
+    return sarima_series_forecast(y, months, horizon, covid_start, covid_end, orders, seasonal_orders)
 
 
 def build_tenure_hazard(panel, cutoff_period, max_tenure=36, min_denom=30):

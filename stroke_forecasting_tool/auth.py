@@ -1,5 +1,7 @@
 import streamlit as st
 
+from branding import logo_data_uri
+
 USERS = {
     'admin@strokefoundation.org.au': {
         'password': 'strokef2f2026',
@@ -32,11 +34,18 @@ SESSION_KEYS = [
     'master', 'forecast_df', 'monthly', 'mape',
     'pipeline_run', 'page', 'authenticated', 'user', 'auth_method',
     'ml_importances', 'ml_trend_slope',
-    'forecast_df_linear', 'mape_linear',
-    'ltv_results', 'ltv_tuning', 'ltv_metrics', 'ltv_error', 'ltv_monthly',
+    'forecast_df_linear', 'mape_linear', 'mape_stockflow',
+    'ltv_results', 'ltv_tuning', 'ltv_metrics', 'ltv_error', 'ltv_monthly', 'ltv_histogram',
     'pipeline_running', 'pipeline_success_message',
     'sf_walkforward', 'sf_components', 'sf_zone12', 'sf_zone3', 'sf_assumptions', 'sf_error',
     'db_error',
+    'data_source', 'data_loaded_at', 'viewing_run_id',
+    'master_rows', 'donor_count', 'total_income',
+    'contact_count', 'supplier_count', 'campaign_type_count',
+    'supplier_summary', 'campaign_summary', 'supplier_monthly', 'campaign_monthly',
+    'retention_by_segment',
+    'sbg_results', 'sbg_monthly', 'bgnbd_monthly', 'sbg_metrics', 'mape_sbg', 'mape_bgnbd', 'sbg_error',
+    'gw_monthly', 'mape_gw', 'gw_metrics', 'gw_error',
 ]
 
 
@@ -134,31 +143,27 @@ def render_login():
     [data-testid="stHeader"] { background: transparent !important; }
     footer, [data-testid="stDecoration"], [data-testid="stAppDeployButton"],
     [data-testid="stMainMenu"] { display: none !important; }
-    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600&family=Inter:wght@400;500;600&display=swap');
     .stApp {
         background:
-            radial-gradient(circle at 1px 1px, rgba(30,30,95,0.07) 1.5px, transparent 0) 0 0/28px 28px,
-            linear-gradient(135deg, #F7F8FC 0%, #EEF0FA 55%, #E4ECEB 100%);
+            radial-gradient(circle at 1px 1px, rgba(30,30,95,0.06) 1px, transparent 1px) 0 0/26px 26px,
+            linear-gradient(135deg, #F0F1F7 0%, #E6F5F2 60%, #D9F0EC 100%);
     }
     .block-container {
         max-width: 440px !important; padding-top: 8vh !important;
         margin-left: auto !important; margin-right: auto !important; float: none !important;
     }
-    .sf-login-logo {
-        width: 56px; height: 56px; border-radius: 14px;
-        background: linear-gradient(135deg, #1E1E5F 0%, #00897B 100%);
-        display: flex; align-items: center; justify-content: center;
-        margin: 0 auto 18px; box-shadow: 0 8px 24px rgba(30,30,95,0.25);
-    }
-    .sf-login-title { text-align:center; font-family:'Space Grotesk', system-ui, sans-serif; font-weight: 600;
-        font-size: 22px; color:#1E1E5F; margin-bottom:2px; letter-spacing: -0.01em; }
-    .sf-login-sub { text-align:center; font-size: 12.5px; color:#8888AA; margin-bottom: 28px;
-        letter-spacing: 0.03em; font-family: 'IBM Plex Sans', system-ui, sans-serif; }
-    .st-key-login_card { background: #FFFFFF; border: 1px solid #E8E8F0;
-        border-radius: 14px; padding: 32px 30px 26px;
-        box-shadow: 0 20px 50px -12px rgba(30,30,95,0.18); }
-    .sf-login-footer { text-align:center; font-size: 11px; color:#8888AA; margin-top: 22px;
-        font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+    /* The real Stroke Foundation logo -- already carries the wordmark, so
+    the old separate "Stroke Foundation" text title underneath is gone
+    (would just repeat what the image already says). */
+    .sf-login-logo { display: block; height: 64px; width: auto; margin: 0 auto 18px; }
+    .sf-login-sub { text-align:center; font-size: 10px; font-weight:500; color:#64748B; margin-bottom: 28px;
+        letter-spacing: 0.18em; text-transform: uppercase; font-family: 'Space Grotesk', system-ui, sans-serif; }
+    .st-key-login_card { background: #FFFFFF; border: 1px solid #E2E8F0;
+        border-radius: 0; padding: 28px 28px 26px;
+        box-shadow: 0 1px 3px rgba(30,30,95,0.06); }
+    .sf-login-footer { text-align:center; font-size: 11px; color:#64748B; margin-top: 22px;
+        font-family: 'Inter', system-ui, sans-serif; }
     .st-key-login_card [data-testid="stForm"] { border: none; padding: 0; }
     .st-key-login_card button[kind="primary"] { width: 100%; margin-top: 6px; }
     .st-key-google_login_btn button {
@@ -174,21 +179,31 @@ def render_login():
         background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0OCA0OCI+PHBhdGggZmlsbD0iI0ZGQzEwNyIgZD0iTTQzLjYxMSwyMC4wODNINDJWMjBIMjR2OGgxMS4zMDNjLTEuNjQ5LDQuNjU3LTYuMDgsOC0xMS4zMDMsOGMtNi42MjcsMC0xMi01LjM3My0xMi0xMmMwLTYuNjI3LDUuMzczLTEyLDEyLTEyYzMuMDU5LDAsNS44NDIsMS4xNTQsNy45NjEsMy4wMzlsNS42NTctNS42NTdDMzQuMDQ2LDYuMDUzLDI5LjI2OCw0LDI0LDRDMTIuOTU1LDQsNCwxMi45NTUsNCwyNGMwLDExLjA0NSw4Ljk1NSwyMCwyMCwyMGMxMS4wNDUsMCwyMC04Ljk1NSwyMC0yMEM0NCwyMi42NTksNDMuODYyLDIxLjM1LDQzLjYxMSwyMC4wODN6Ii8+PHBhdGggZmlsbD0iI0ZGM0QwMCIgZD0iTTYuMzA2LDE0LjY5MWw2LjU3MSw0LjgxOUMxNC42NTUsMTUuMTA4LDE4Ljk2MSwxMiwyNCwxMmMzLjA1OSwwLDUuODQyLDEuMTU0LDcuOTYxLDMuMDM5bDUuNjU3LTUuNjU3QzM0LjA0Niw2LjA1MywyOS4yNjgsNCwyNCw0QzE2LjMxOCw0LDkuNjU2LDguMzM3LDYuMzA2LDE0LjY5MXoiLz48cGF0aCBmaWxsPSIjNENBRjUwIiBkPSJNMjQsNDRjNS4xNjYsMCw5Ljg2LTEuOTc3LDEzLjQwOS01LjE5MmwtNi4xOS01LjIzOEMyOS4yMTEsMzUuMDkxLDI2LjcxNSwzNiwyNCwzNmMtNS4yMDIsMC05LjYxOS0zLjMxNy0xMS4yODMtNy45NDZsLTYuNTIyLDUuMDI1QzkuNTA1LDM5LjU1NiwxNi4yMjcsNDQsMjQsNDR6Ii8+PHBhdGggZmlsbD0iIzE5NzZEMiIgZD0iTTQzLjYxMSwyMC4wODNINDJWMjBIMjR2OGgxMS4zMDNjLTAuNzkyLDIuMjM3LTIuMjMxLDQuMTY2LTQuMDg3LDUuNTcxYzAuMDAxLTAuMDAxLDAuMDAyLTAuMDAxLDAuMDAzLTAuMDAybDYuMTksNS4yMzhDMzYuOTcxLDM5LjIwNSw0NCwzNCw0NCwyNEM0NCwyMi42NTksNDMuODYyLDIxLjM1LDQzLjYxMSwyMC4wODN6Ii8+PC9zdmc+");
     }
     .sf-login-divider { display: flex; align-items: center; gap: 12px; margin: 18px 0;
-        font-size: 11px; color: #8888AA; text-transform: uppercase; letter-spacing: 0.06em; }
-    .sf-login-divider::before, .sf-login-divider::after { content: ''; flex: 1; height: 1px; background: #E8E8F0; }
+        font-size: 10px; font-weight: 500; color: #64748B; text-transform: uppercase; letter-spacing: 0.18em; }
+    .sf-login-divider::before, .sf-login-divider::after { content: ''; flex: 1; height: 1px; background: #E2E8F0; }
     </style>
     """)
 
-    st.markdown("""
-    <div class="sf-login-logo">
-        <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
-             stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-        </svg>
-    </div>
-    <div class="sf-login-title">Stroke Foundation</div>
-    <div class="sf-login-sub">DONOR FORECASTING PLATFORM</div>
-    """, unsafe_allow_html=True)
+    _logo_uri = logo_data_uri()
+    if _logo_uri:
+        st.markdown(f'<img class="sf-login-logo" src="{_logo_uri}" alt="Stroke Foundation">',
+                    unsafe_allow_html=True)
+    else:
+        # Falls back to the old placeholder mark if the asset is ever missing.
+        st.markdown("""
+        <div style="width:56px;height:56px;border-radius:12px;
+            background:linear-gradient(135deg,#1E1E5F 0%,#00897B 100%);
+            display:flex;align-items:center;justify-content:center;margin:0 auto 18px;
+            box-shadow:0 8px 24px rgba(30,30,95,0.25);">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
+                 stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+            </svg>
+        </div>
+        <div style="text-align:center;font-family:'Space Grotesk',sans-serif;font-weight:600;
+            font-size:24px;color:#1E1E5F;margin-bottom:18px;">Stroke Foundation</div>
+        """, unsafe_allow_html=True)
+    st.markdown('<div class="sf-login-sub">DONOR FORECASTING PLATFORM</div>', unsafe_allow_html=True)
 
     with st.container(key='login_card'):
         st.markdown("**Sign in to your account**")
