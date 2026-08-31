@@ -1,5 +1,47 @@
 import os
 import tempfile
+from pathlib import Path
+
+
+def _bootstrap_secrets_from_env():
+    """Streamlit Cloud and local dev provide secrets via a .streamlit/
+    secrets.toml file; hosts like Hugging Face Spaces provide them as plain
+    environment variables (Repository secrets) instead, and st.login()/
+    st.secrets only ever read from the TOML file -- there's no built-in way
+    to point them at env vars directly. If a real secrets.toml already
+    exists, this does nothing. Otherwise, if the expected env vars are
+    present, it writes one -- regenerated fresh on every container start,
+    never committed to git, so real secrets never touch the repo either way.
+    """
+    secrets_path = Path(__file__).parent / '.streamlit' / 'secrets.toml'
+    if secrets_path.exists():
+        return
+    client_id = os.environ.get('GOOGLE_CLIENT_ID', '')
+    database_url = os.environ.get('DATABASE_URL', '')
+    if not client_id and not database_url:
+        return  # nothing to bootstrap; app runs with those features disabled
+    secrets_path.parent.mkdir(parents=True, exist_ok=True)
+    secrets_path.write_text(
+        '[auth]\n'
+        f'redirect_uri = "{os.environ.get("GOOGLE_REDIRECT_URI", "")}"\n'
+        f'cookie_secret = "{os.environ.get("GOOGLE_COOKIE_SECRET", "")}"\n'
+        f'client_id = "{client_id}"\n'
+        f'client_secret = "{os.environ.get("GOOGLE_CLIENT_SECRET", "")}"\n'
+        'server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"\n'
+        '\n'
+        '[database]\n'
+        f'url = "{database_url}"\n'
+    )
+
+
+_bootstrap_secrets_from_env()
+
+import contextlib
+import gzip
+import io
+import json
+import traceback
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -7,7 +49,11 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from auth import handle_google_redirect, init_session_state, render_login
-from db import db_configured, get_run_actuals, get_run_forecasts, get_runs, save_run
+from branding import TITLE_LOGO_PATH
+from db import (
+    db_configured, delete_dashboard_run, list_dashboard_runs,
+    load_dashboard_run, save_dashboard_run,
+)
 from pipeline.build_master import build_master
 from pipeline.forecast import (
     fit_linear_forecast,
@@ -20,9 +66,9 @@ from pipeline.ml_forecast import fit_ml_forecast
 from pipeline.ltv_model import fit_ltv_model
 from pipeline.stock_flow_forecast import build_production_forecast
 from ui import (
-    AMBER, BLUE, COLOURS, LINE, MIST, PURPLE, TEAL, TEXT,
-    card, chart, empty_state, inject_global_css, kpi,
-    page_header, render_sidebar, render_topbar, upload_slot,
+    AMBER, BLUE, COLOURS, GREEN, LINE, MIST, PURPLE, RED, TEAL, TEAL2, TEXT,
+    card, chart, empty_state, inject_global_css, kpi, new_execution_log,
+    overall_progress, page_header, render_sidebar, stage_row, upload_slot,
 )
 
 
@@ -44,12 +90,363 @@ def cached_ml_forecast(monthly, n_forecast=24):
 def cached_linear_forecast(monthly, n_train=24, n_forecast=24):
     return fit_linear_forecast(monthly, n_train=n_train, n_forecast=n_forecast)
 
+
+# Donor LTV (Pareto/NBD + Gamma-Gamma) is by far the slowest fit in the app
+# (~5 min) and nothing on the main pipeline path reads its output — only the
+# separate Donor Lifetime Value page does. It's deliberately NOT part of
+# run_pipeline_models() any more; it's fit lazily, right here, the first
+# time that page is opened, keyed on `master` so revisiting the page or
+# switching pages elsewhere never refits it.
+@st.cache_data(show_spinner=False)
+def cached_ltv_fit(master):
+    return fit_ltv_model(master)
+
+
+def run_pipeline_models(master, stages=None, progress=None, log=None):
+    """Fits the linear, ML and stock-flow models against `master`,
+    computes every page-level breakdown that's derived from it (income by
+    supplier/campaign type, retention curves, ...), and populates the
+    session_state keys the rest of the app reads from. Donor LTV
+    (Pareto/NBD + Gamma-Gamma) is deliberately NOT fit here any more -- it
+    was the slowest stage (~5 min) and only the separate Donor Lifetime
+    Value page reads its output, so it's fit lazily there instead, on
+    first visit (see cached_ltv_fit() near the top of this file). Only
+    called for a LIVE run, on a freshly-built master -- restoring a cached
+    dashboard state populates the same session_state keys directly
+    instead (see restore_dashboard_state() below), it doesn't call this or
+    need `master` at all. That split is what keeps the cache lightweight:
+    `master` itself (1M+ rows on real data) never gets persisted or
+    re-read, only these much smaller derived tables are.
+
+    stages: optional {stage_number: st.empty()} for the Data Pipeline
+    page's numbered stage list (stages 3-5 -- 1/2/6 are updated by the
+    caller around file-build and dashboard-save, which live outside this
+    function). None outside a live pipeline run (e.g. tests) -- every
+    stage_row() call below is guarded on it.
+    progress: optional (placeholder, start_count) for the "OVERALL
+    PROGRESS" bar -- start_count is how many of the 6 total stages are
+    already done by the time this is called (always 2: file ingestion +
+    master build, both handled by the caller before this runs). Updated
+    live, in real fractions (done stages / 6), as each of stages 3-5
+    reaches a real end-state (done/warning/error) -- never incremented on
+    'running', so the bar never claims progress that hasn't happened.
+    log: optional log(msg) callable (see ui.new_execution_log) for the
+    Execution Log panel -- a no-op when not supplied (e.g. tests).
+    """
+    N_STAGES = 6
+    log = log or (lambda msg: None)
+    prog_placeholder, done = progress or (None, 0)
+
+    def stage(n, name, cat, state, detail=''):
+        nonlocal done
+        if stages:
+            stage_row(stages[n], n, name, cat, state, detail)
+        if prog_placeholder and state in ('done', 'warning', 'error'):
+            done += 1
+            overall_progress(prog_placeholder, done, N_STAGES)
+
+    stage(3, 'Linear Trend Baseline', 'Trend', 'running')
+    with st.spinner('Fitting the linear-trend baseline (trained from 2019, 12-month holdout)…'):
+        monthly = get_monthly_actuals(master)
+        forecast_df_linear, mape_linear, linear_slope, _ = cached_linear_forecast(monthly, n_train=24, n_forecast=24)
+        log(f':material/check_circle: Linear baseline fitted — {mape_linear:.1f}% MAPE')
+        stage(3, 'Linear Trend Baseline', 'Trend', 'done', f'{mape_linear:.1f}% MAPE')
+
+    stage(4, 'ML Forecast Model', 'Gradient Boosting', 'running')
+    with st.spinner('Training the gradient-boosting forecast model (direct multi-step, trained from 2019, 12-month holdout)…'):
+        try:
+            forecast_df_ml, mape_ml, importances, trend_slope = cached_ml_forecast(monthly, n_forecast=24)
+            log(f':material/check_circle: ML forecast model trained — {mape_ml:.1f}% MAPE')
+            stage(4, 'ML Forecast Model', 'Gradient Boosting', 'done', f'{mape_ml:.1f}% MAPE')
+        except ValueError:
+            log(':material/warning: Not enough monthly history for the ML model — using the linear baseline instead.')
+            forecast_df_ml, mape_ml, importances, trend_slope = forecast_df_linear, mape_linear, {}, linear_slope
+            stage(4, 'ML Forecast Model', 'Gradient Boosting', 'warning', 'Fell back to linear')
+
+    # Donor LTV (Pareto/NBD + Gamma-Gamma) is no longer fit here -- it was
+    # the slowest stage in the pipeline (~5 min) and nothing downstream of
+    # this function reads its output, only the separate Donor Lifetime
+    # Value page does. It's fit lazily there instead, on first visit (see
+    # cached_ltv_fit() above) -- these session_state keys stay set to None
+    # from a live run so every page's existing `if x_state is None:` checks
+    # and the Run History schema keep working unchanged.
+    ltv_results = ltv_tuning = ltv_metrics = ltv_error = ltv_monthly = None
+
+    stage(5, 'Stock-Flow Model', 'SARIMA + Cohort Survival', 'running')
+    with st.spinner('Fitting the stock-flow model (recruits × retention × gift, SARIMA + cohort survival)…'):
+        def on_sf_progress(msg):
+            stage(5, 'Stock-Flow Model', 'SARIMA + Cohort Survival', 'running', msg)
+
+        try:
+            sf_result = build_production_forecast(master, progress_callback=on_sf_progress)
+            sf_error = None
+            sf_mape = sf_result['walkforward_summary']['income_mape'].mean()
+            log(f':material/check_circle: Stock-flow model fitted — '
+                     f'{sf_mape:.1f}% avg MAPE across 3 walk-forward windows')
+            stage(5, 'Stock-Flow Model', 'SARIMA + Cohort Survival', 'done', f'{sf_mape:.1f}% avg MAPE')
+        except Exception as exc:
+            sf_result = None
+            sf_error = str(exc)
+            log(f':material/warning: Stock-flow model skipped — {sf_error}')
+            log(traceback.format_exc())
+            stage(5, 'Stock-Flow Model', 'SARIMA + Cohort Survival', 'warning', 'Skipped')
+
+    # sBG/BG-NBD and the gift-waterfall bridge are no longer fitted -- the
+    # Income Forecast page only offers ML/Linear/Stock-flow now. These
+    # session_state keys stay set to None (rather than removed) so
+    # build_dashboard_state()/restore_dashboard_state() and the Run History
+    # schema keep working unchanged; they'll just always be empty going
+    # forward.
+    sbg_results = sbg_monthly = bgnbd_monthly = sbg_metrics = sbg_error = None
+    gw_monthly = mape_gw = gw_metrics = gw_error = None
+
+    with st.spinner('Finalising and updating dashboard views…'):
+        st.session_state.master             = master
+        st.session_state.monthly            = monthly
+        st.session_state.forecast_df        = forecast_df_ml
+        st.session_state.mape               = mape_ml
+        st.session_state.ml_importances     = importances
+        st.session_state.ml_trend_slope     = trend_slope
+        st.session_state.forecast_df_linear = forecast_df_linear
+        st.session_state.mape_linear        = mape_linear
+        st.session_state.ltv_results        = ltv_results
+        st.session_state.ltv_tuning         = ltv_tuning
+        st.session_state.ltv_metrics        = ltv_metrics
+        st.session_state.ltv_error          = ltv_error
+        st.session_state.ltv_monthly        = ltv_monthly
+        if ltv_results is not None and not ltv_results.empty:
+            counts, edges = np.histogram(ltv_results['predicted_ltv_24m'].dropna(), bins=30)
+            st.session_state.ltv_histogram = {'bin_edges': edges.tolist(), 'counts': counts.tolist()}
+        else:
+            st.session_state.ltv_histogram = None
+        if sf_result is not None:
+            st.session_state.sf_walkforward = sf_result['walkforward_summary']
+            st.session_state.sf_components  = sf_result['components_df']
+            st.session_state.sf_zone12      = sf_result['zone12_forecast']
+            st.session_state.sf_zone3       = sf_result['zone3_scenarios']
+            st.session_state.sf_assumptions = sf_result['assumptions']
+            st.session_state.mape_stockflow = float(sf_result['walkforward_summary']['income_mape'].mean())
+        else:
+            st.session_state.mape_stockflow = None
+        st.session_state.sf_error           = sf_error
+        st.session_state.sbg_results        = sbg_results
+        st.session_state.sbg_monthly        = sbg_monthly
+        st.session_state.bgnbd_monthly      = bgnbd_monthly
+        st.session_state.sbg_metrics        = sbg_metrics
+        st.session_state.mape_sbg           = sbg_metrics.get('sbg_holdout_mape') if sbg_metrics else None
+        st.session_state.mape_bgnbd         = sbg_metrics.get('bgnbd_holdout_mape') if sbg_metrics else None
+        st.session_state.gw_monthly         = gw_monthly
+        st.session_state.mape_gw            = mape_gw
+        st.session_state.gw_metrics         = gw_metrics
+        st.session_state.gw_error           = gw_error
+        st.session_state.sbg_error          = sbg_error
+        st.session_state.pipeline_run       = True
+
+        # ── Page-level breakdowns derived from `master` -- computed once
+        # here (not on every page rerun, which is what the pages used to do
+        # inline), and this session_state shape is exactly what
+        # build_dashboard_state() below reads from to save the cached
+        # dashboard state -- so a loaded cached state and a live run always
+        # populate pages identically. donor_month is always normalised to a
+        # 'YYYY-MM' string here, matching what JSON round-tripping produces
+        # on the way back out of the cache (a Period column can't survive
+        # JSON serialization as anything but a string anyway).
+        paid = master[master['paid_flag'] == True]
+        st.session_state.master_rows         = len(master)
+        st.session_state.donor_count         = int(master['recurring_payment_id'].nunique())
+        st.session_state.contact_count       = int(master['contact_id'].nunique())
+        st.session_state.supplier_count      = int(master['supplier'].nunique())
+        st.session_state.campaign_type_count = int(master['campaign_type'].nunique())
+        st.session_state.total_income        = float(paid['success_amt'].sum())
+        st.session_state.supplier_summary = (
+            paid.groupby('supplier')
+                .agg(total_income=('success_amt', 'sum'),
+                     active_donors=('recurring_payment_id', 'nunique'),
+                     avg_gift=('success_amt', 'mean'))
+                .reset_index().sort_values('total_income', ascending=False)
+        )
+        st.session_state.campaign_summary = get_campaign_roi(master)
+        supplier_monthly = get_supplier_breakdown(master)
+        supplier_monthly['donor_month'] = supplier_monthly['donor_month'].astype(str)
+        st.session_state.supplier_monthly = supplier_monthly
+        campaign_monthly = (
+            paid.groupby(['campaign_type', 'donor_month'])['success_amt']
+                .sum().reset_index().rename(columns={'success_amt': 'total_income'})
+        )
+        campaign_monthly['donor_month'] = campaign_monthly['donor_month'].astype(str)
+        st.session_state.campaign_monthly = campaign_monthly
+        st.session_state.retention_by_segment = {
+            seg: get_retention_by_segment(master, seg)
+            for seg in ('supplier', 'campaign_type', 'recruit_year')
+        }
+        log(':material/check_circle: Dashboard views updated')
+
+
+def _df_records(df):
+    """DataFrame -> list-of-dicts, JSON-ready. Empty/None -> []."""
+    return df.to_dict('records') if df is not None and not df.empty else []
+
+
+def _df_or_none(records):
+    """list-of-dicts (JSON-loaded) -> DataFrame, or None if empty -- mirrors
+    what a live pipeline run leaves in session_state when a model wasn't
+    available (None, not an empty DataFrame), so every page's existing
+    `if x_state is None:` checks work unchanged either way."""
+    return pd.DataFrame(records) if records else None
+
+
+def build_dashboard_state():
+    """Extracts the display-level data every page renders -- the
+    aggregated summaries, chart series, table rows, and scalar metrics
+    already sitting in session_state after run_pipeline_models() -- into
+    one JSON-ready dict, one key per dashboard page's worth of data. No raw
+    master panel (that's the one thing genuinely too large and not needed
+    by any page -- see run_pipeline_models()'s own docstring), but the full
+    per-donor LTV table IS included: at real scale it compresses to ~2MB,
+    comfortably inside the 5MB per-run budget, and keeping it is what lets
+    a past run's "download all donor predictions" button keep working, not
+    just its top-15/top-50 views.
+    """
+    ss = st.session_state
+
+    return {
+        'scalars': {
+            'master_rows': ss.master_rows, 'donor_count': ss.donor_count,
+            'contact_count': ss.contact_count, 'supplier_count': ss.supplier_count,
+            'campaign_type_count': ss.campaign_type_count, 'total_income': ss.total_income,
+            'mape': ss.mape, 'mape_linear': ss.mape_linear, 'mape_stockflow': ss.mape_stockflow,
+            'mape_sbg': ss.mape_sbg, 'mape_bgnbd': ss.mape_bgnbd, 'mape_gw': ss.mape_gw,
+            'ml_importances': ss.ml_importances, 'ltv_metrics': ss.ltv_metrics,
+            'sf_assumptions': ss.sf_assumptions, 'ltv_histogram': ss.ltv_histogram,
+            'gw_metrics': ss.gw_metrics,
+        },
+        'monthly': _df_records(ss.monthly),
+        'supplier_summary': _df_records(ss.supplier_summary),
+        'campaign_summary': _df_records(ss.campaign_summary),
+        'supplier_monthly': _df_records(ss.supplier_monthly),
+        'campaign_monthly': _df_records(ss.campaign_monthly),
+        'retention_by_segment': {k: _df_records(v) for k, v in (ss.retention_by_segment or {}).items()},
+        'forecasts': {
+            'ml': _df_records(ss.forecast_df), 'linear': _df_records(ss.forecast_df_linear),
+            'ltv': _df_records(ss.ltv_monthly), 'stockflow': _df_records(ss.sf_zone12),
+            'sbg': _df_records(ss.sbg_monthly), 'bgnbd': _df_records(ss.bgnbd_monthly),
+            'gift_waterfall': _df_records(ss.gw_monthly),
+        },
+        'sf_zone3': {k: _df_records(v) for k, v in (ss.sf_zone3 or {}).items()},
+        'ltv_tuning': _df_records(ss.ltv_tuning),
+        'ltv_donors': _df_records(ss.ltv_results),
+        'sbg_results': _df_records(ss.sbg_results),
+        'sbg_metrics': ss.sbg_metrics,
+    }
+
+
+def restore_dashboard_state(state):
+    """The inverse of build_dashboard_state() -- populates every
+    session_state key the pages read from, from a previously-saved cache.
+    Deliberately mirrors run_pipeline_models()'s own assignments key for
+    key, so every page behaves identically whether its data came from a
+    live run or a cached one."""
+    ss = st.session_state
+    scalars = state.get('scalars', {})
+    for key in ('master_rows', 'donor_count', 'contact_count', 'supplier_count',
+                'campaign_type_count', 'total_income', 'mape', 'mape_linear', 'mape_stockflow',
+                'mape_sbg', 'mape_bgnbd', 'mape_gw', 'ml_importances', 'ltv_metrics', 'sf_assumptions',
+                'ltv_histogram', 'gw_metrics'):
+        ss[key] = scalars.get(key)
+
+    ss.monthly           = pd.DataFrame(state.get('monthly', []))
+    ss.supplier_summary  = pd.DataFrame(state.get('supplier_summary', []))
+    ss.campaign_summary  = pd.DataFrame(state.get('campaign_summary', []))
+    ss.supplier_monthly  = pd.DataFrame(state.get('supplier_monthly', []))
+    ss.campaign_monthly  = pd.DataFrame(state.get('campaign_monthly', []))
+    ss.retention_by_segment = {k: pd.DataFrame(v) for k, v in state.get('retention_by_segment', {}).items()}
+
+    forecasts = state.get('forecasts', {})
+    ss.forecast_df        = _df_or_none(forecasts.get('ml'))
+    ss.forecast_df_linear = _df_or_none(forecasts.get('linear'))
+    ss.ltv_monthly        = _df_or_none(forecasts.get('ltv'))
+    ss.sf_zone12          = _df_or_none(forecasts.get('stockflow'))
+    ss.sbg_monthly        = _df_or_none(forecasts.get('sbg'))
+    ss.bgnbd_monthly      = _df_or_none(forecasts.get('bgnbd'))
+    ss.gw_monthly         = _df_or_none(forecasts.get('gift_waterfall'))
+
+    ss.sf_zone3    = {k: pd.DataFrame(v) for k, v in state.get('sf_zone3', {}).items()}
+    ss.ltv_tuning  = _df_or_none(state.get('ltv_tuning'))
+    ss.ltv_results = _df_or_none(state.get('ltv_donors'))
+    ss.sbg_results = _df_or_none(state.get('sbg_results'))
+    ss.sbg_metrics = state.get('sbg_metrics')
+
+    # Not restorable from a lightweight cache (no equivalent stored -- these
+    # are large intermediate/raw objects, not display data): ltv_error,
+    # sf_error, sbg_error, gw_error, ml_trend_slope, sf_walkforward, sf_components.
+    # Every page already falls back to a generic message when these are
+    # None, so leaving them unset is safe.
+    ss.pipeline_run = True
+
+
+def build_page_export_csv(page_name):
+    """Bundles every backing table for `page_name` into one CSV, one table
+    per section (a '## <name>' header line, then that table's own header +
+    rows, then a blank line before the next section) -- a plain-text
+    convention that stays readable in a text editor and re-splits cleanly
+    in Excel/Sheets. Reads the same session_state DataFrames each page's
+    own charts/tables already read from (set by run_pipeline_models() or
+    restore_dashboard_state() -- both populate the same keys, so this
+    works identically for a live run or one reloaded from history) --
+    which is often MORE complete than what any single on-page table shows
+    (e.g. the Donor Lifetime Value page's own table caps at the top 50
+    rows; this exports the full donor table it's drawn from). Returns None
+    if the page has nothing tabular to export, or no data is loaded yet.
+    """
+    ss = st.session_state
+    if not ss.pipeline_run:
+        return None
+
+    tables = {}  # section title -> DataFrame
+    if page_name == 'Overview':
+        tables['Monthly actuals'] = ss.monthly
+        tables['Supplier summary'] = ss.supplier_summary
+        tables['Campaign summary'] = ss.campaign_summary
+    elif page_name == 'Income Forecast':
+        tables['Monthly actuals'] = ss.monthly
+        tables['ML forecast (24m)'] = ss.forecast_df
+        tables['Linear forecast (24m)'] = ss.forecast_df_linear
+        tables['Stock-flow forecast (months 1-18)'] = ss.sf_zone12
+        for name, df in (ss.sf_zone3 or {}).items():
+            tables[f'Stock-flow scenario — {name} (months 19-36)'] = df
+    elif page_name == 'Retention Analysis':
+        for seg, df in (ss.retention_by_segment or {}).items():
+            tables[f'Retention by {seg}'] = df
+    elif page_name == 'Donor Lifetime Value':
+        tables['Donor LTV predictions (full table)'] = ss.ltv_results
+        tables['Model validation (penalizer grid search)'] = ss.ltv_tuning
+    elif page_name == 'Supplier Insights':
+        tables['Supplier summary'] = ss.supplier_summary
+        tables['Supplier monthly income'] = ss.supplier_monthly
+    elif page_name == 'Campaign ROI':
+        tables['Campaign summary'] = ss.campaign_summary
+        tables['Campaign monthly income'] = ss.campaign_monthly
+    elif page_name == 'Run History' and db_configured():
+        tables['Pipeline runs'] = list_dashboard_runs()
+
+    tables = {name: df for name, df in tables.items() if df is not None and not df.empty}
+    if not tables:
+        return None
+
+    buf = io.StringIO()
+    for name, df in tables.items():
+        buf.write(f'## {name}\n')
+        df.to_csv(buf, index=False)
+        buf.write('\n')
+    return buf.getvalue()
+
+
 init_session_state()
 handle_google_redirect()
 
 st.set_page_config(
-    page_title='Stroke Foundation — Donor Forecasting',
-    page_icon='🫀',
+    page_title='Donor Forecasting | Stroke Foundation',
+    page_icon=str(TITLE_LOGO_PATH) if TITLE_LOGO_PATH.exists() else '🫀',
     layout='centered' if not st.session_state.authenticated else 'wide',
     initial_sidebar_state='expanded',
 )
@@ -57,11 +454,57 @@ st.set_page_config(
 if not st.session_state.authenticated:
     render_login()
 
-inject_global_css()
-render_sidebar()
-render_topbar()
+# Auto-load the most recent run once per session -- guarded by pipeline_run
+# so this only ever runs on a session's first script pass, not on every
+# rerun (a widget click reruns the whole script; we don't want a DB
+# round-trip on every single interaction). Run History lets you switch to
+# an older run later; this is just what a fresh session opens to.
+if not st.session_state.pipeline_run and db_configured():
+    _runs = list_dashboard_runs()
+    if not _runs.empty:
+        _latest_id = _runs.iloc[0]['run_id']
+        _cached_state, _cached_at = load_dashboard_run(_latest_id)
+        if _cached_state:
+            restore_dashboard_state(_cached_state)
+            st.session_state.viewing_run_id  = _latest_id
+            st.session_state.data_source     = 'cached'
+            st.session_state.data_loaded_at  = _cached_at
 
 page = st.session_state.page
+# page_header() (called once per page, inside each page's own routing
+# block below) reads these two straight from session_state to render the
+# "Export CSV" button it now carries -- see its docstring in ui.py for
+# why that's a session_state read rather than a param threaded through
+# every one of its eight call sites.
+_export_csv = build_page_export_csv(page)
+st.session_state.page_export_csv = _export_csv
+st.session_state.page_export_filename = (
+    f"sf_{page.lower().replace(' ', '_')}_export.csv" if _export_csv else None
+)
+
+inject_global_css()
+render_sidebar()
+
+if st.session_state.data_source == 'cached':
+    loaded_str = (pd.to_datetime(st.session_state.data_loaded_at).strftime('%d %b %Y, %H:%M')
+                  if st.session_state.data_loaded_at else 'a previous run')
+    st.info(
+        f'Showing the run from **{loaded_str}**, loaded instantly from history — no pipeline run needed. '
+        f'Go to **Run History** to pick a different run, or **Data Pipeline** to run fresh data.',
+        icon=':material/bolt:',
+    )
+
+# Rendered globally (not just on the Data Pipeline page) since a completed
+# run now redirects straight to Overview -- the success message needs to
+# still be visible on whichever page the user lands on.
+if st.session_state.pipeline_success_message and not st.session_state.pipeline_running:
+    st.success(st.session_state.pipeline_success_message, icon=':material/check_circle:')
+    st.session_state.pipeline_success_message = None
+
+# Shared right-aligned page-header metadata (Base44-style "SESSION ..." /
+# "RUN-..." label) -- every dashboard page shows which run it's reading
+# from, live or reloaded from history.
+page_meta = f'RUN {st.session_state.viewing_run_id}' if st.session_state.viewing_run_id else 'LIVE SESSION'
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -70,7 +513,13 @@ page = st.session_state.page
 if page == 'Data Pipeline':
     page_header('Data pipeline', 'Upload Salesforce exports',
                 'Upload all four CSV files below. The pipeline runs automatically once all '
-                'four are received and validated.')
+                'four are received and validated.',
+                meta=f'SESSION {datetime.now().strftime("%d %b %Y").upper()}')
+
+    if st.session_state.data_source == 'cached' and db_configured():
+        st.caption(':material/bolt: Dashboards are currently showing a saved run, loaded instantly from '
+                   'history. Uploading new files below adds a new run without affecting past ones — '
+                   'see the **Run History** page to browse or reload any previous run.')
 
     st.markdown(f"""
     <div class="sf-pipeline">
@@ -129,6 +578,7 @@ if page == 'Data Pipeline':
 
     running = st.session_state.pipeline_running
 
+    st.markdown('<div class="sf-eyebrow">Source files</div>', unsafe_allow_html=True)
     col1, col2 = st.columns(2)
     with col1:
         f_pay, pay_valid = upload_slot('Payments.csv', 'Every card charge attempt · up to 1024 MB',
@@ -143,27 +593,66 @@ if page == 'Data Pipeline':
 
     all_up    = all([f_pay, f_rec, f_con, f_cam])
     all_valid = all([pay_valid, rec_valid, con_valid, cam_valid])
-    n_up = sum(bool(x) for x in [f_pay, f_rec, f_con, f_cam])
 
-    st.markdown('<div style="height:4px;"></div>', unsafe_allow_html=True)
-
-    if not all_up:
-        st.progress(n_up / 4, text=f'{n_up} of 4 files uploaded — upload the remaining files to enable the pipeline')
-    elif not all_valid:
+    if all_up and not all_valid:
         st.error('One or more files don\'t match what\'s expected for their slot — fix the file(s) flagged '
                   'above before running the pipeline.', icon=':material/error:')
-    else:
-        run = st.button('Run pipeline', type='primary', icon=':material/play_arrow:',
-                         width='stretch', disabled=running)
-        if run:
-            st.session_state.pipeline_running = True
-            st.rerun()
 
-    if st.session_state.pipeline_success_message and not running:
-        st.success(st.session_state.pipeline_success_message, icon=':material/check_circle:')
-        st.session_state.pipeline_success_message = None
+    st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
+
+    # Numbered stage list (matches the reference app): a "Forecasting
+    # Pipeline" card with the Start button in its own header, an OVERALL
+    # PROGRESS bar, then all 9 stages -- always rendered (not just while
+    # running), so the page shows the real "ready, 0%" state at rest,
+    # exactly like the reference. Placeholders are created here so both
+    # the at-rest and the live-running code paths below can fill them in.
+    # 6 stages -- sBG/BG-NBD and the gift-waterfall bridge were dropped
+    # along with their Income Forecast options above, since nothing else
+    # reads their output. Donor LTV (Pareto/NBD + Gamma-Gamma) was also
+    # pulled out of this run: it was the slowest stage (~5 min) and only
+    # the separate Donor Lifetime Value page reads its output, so it's now
+    # fit lazily on that page's first visit instead of blocking every
+    # pipeline run (see cached_ltv_fit() near the top of this file).
+    N_STAGES = 6
+    STAGE_DEFS = [
+        (1, 'Ingestion & Schema Validation', 'ETL'),
+        (2, 'Master File Build',             'ETL'),
+        (3, 'Linear Trend Baseline',          'Trend'),
+        (4, 'ML Forecast Model',              'Gradient Boosting'),
+        (5, 'Stock-Flow Model',               'SARIMA + Cohort Survival'),
+        (6, 'Dashboard Publish',              'Export'),
+    ]
+    with st.container(border=True):
+        head_col, btn_col = st.columns([4, 1.4], vertical_alignment='center')
+        with head_col:
+            st.markdown('<div class="sf-card-title">Forecasting pipeline</div>', unsafe_allow_html=True)
+        with btn_col:
+            start_clicked = st.button(
+                'Start pipeline', type='primary', icon=':material/play_arrow:',
+                width='stretch', disabled=running or not all_up or not all_valid,
+            )
+        st.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
+        progress_slot = st.empty()
+        overall_progress(progress_slot, 0, N_STAGES)
+        # Placeholders only -- deliberately NOT pre-rendered as 'pending'.
+        # Each stage's row only appears once its own turn actually comes
+        # (see the running block below), so the card shows stages arriving
+        # one at a time as the run progresses, not a full skeleton upfront.
+        stages = {n: st.empty() for n, _, _ in STAGE_DEFS}
+
+    st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
+    with card('Execution log', 'Real-time, timestamped log of this run'):
+        log_slot = st.empty()
+        log = new_execution_log(log_slot)
+        if not running:
+            log('Pipeline session initialised. Awaiting Start pipeline…')
+
+    if start_clicked:
+        st.session_state.pipeline_running = True
+        st.rerun()
 
     if st.session_state.pipeline_running:
+        run_started = datetime.now()
         tmp = tempfile.mkdtemp()
 
         def save(f, name):
@@ -172,148 +661,98 @@ if page == 'Data Pipeline':
                 out.write(f.getbuffer())
             return path
 
-        with st.status('Running the forecasting pipeline…', expanded=True) as status:
-            with st.spinner('Saving uploads to a secure temporary workspace…'):
-                st.write(':material/check_circle: Files received')
-                p_path  = save(f_pay, 'Payments.csv')
-                r_path  = save(f_rec, 'Recurring Payments.csv')
-                c_path  = save(f_con, 'Contacts.csv')
-                ca_path = save(f_cam, 'Campaigns.csv')
+        stage_row(stages[1], 1, 'Ingestion & Schema Validation', 'ETL', 'running')
+        log(':material/check_circle: Files received')
+        p_path  = save(f_pay, 'Payments.csv')
+        r_path  = save(f_rec, 'Recurring Payments.csv')
+        c_path  = save(f_con, 'Contacts.csv')
+        ca_path = save(f_cam, 'Campaigns.csv')
+        stage_row(stages[1], 1, 'Ingestion & Schema Validation', 'ETL', 'done', '4/4 files')
+        overall_progress(progress_slot, 1, N_STAGES)
 
-            with st.spinner('Cleaning and validating all four files, then building the master donor-month file…'):
-                prog = st.progress(0.0)
+        stage_row(stages[2], 2, 'Master File Build', 'ETL', 'running')
 
-                def on_progress(rows):
-                    pct = min(rows / 6_208_604, 1.0)
-                    prog.progress(pct, text=f'{rows:,} payment rows processed')
+        # Real backend stdout capture -- clean.py/build_master.py already
+        # print(..., flush=True) genuine diagnostic lines ([diag] chunk
+        # counts, row totals) as they work. Redirecting stdout into a
+        # buffer and flushing it into the Execution Log on every progress
+        # tick surfaces the actual terminal output, not a hand-written
+        # narration of it -- this is where nearly all of that output
+        # happens, so it's the highest-value place to capture it.
+        stdout_buf = io.StringIO()
 
-                master = build_master(p_path, r_path, ca_path, c_path, progress_callback=on_progress)
-                prog.progress(1.0, text=f'Master file built — {len(master):,} donor-month rows')
-                st.write(f':material/check_circle: Master file built — {len(master):,} donor-month rows')
+        def flush_stdout():
+            captured = stdout_buf.getvalue()
+            if captured.strip():
+                log(captured.rstrip('\n'))
+            stdout_buf.truncate(0)
+            stdout_buf.seek(0)
 
-            with st.spinner('Fitting the linear-trend baseline (trained from 2019, 12-month holdout)…'):
-                monthly = get_monthly_actuals(master)
-                forecast_df_linear, mape_linear, linear_slope, _ = cached_linear_forecast(monthly, n_train=24, n_forecast=24)
-                st.write(f':material/check_circle: Linear baseline fitted — {mape_linear:.1f}% MAPE')
+        def on_progress(rows):
+            stage_row(stages[2], 2, 'Master File Build', 'ETL', 'running', f'{rows:,} rows processed')
+            flush_stdout()
 
-            with st.spinner('Training the gradient-boosting forecast model (direct multi-step, trained from 2019, 12-month holdout)…'):
-                try:
-                    forecast_df_ml, mape_ml, importances, trend_slope = cached_ml_forecast(monthly, n_forecast=24)
-                    st.write(f':material/check_circle: ML forecast model trained — {mape_ml:.1f}% MAPE')
-                except ValueError:
-                    st.write(':material/warning: Not enough monthly history for the ML model — using the linear baseline instead.')
-                    forecast_df_ml, mape_ml, importances, trend_slope = forecast_df_linear, mape_linear, {}, linear_slope
+        with contextlib.redirect_stdout(stdout_buf):
+            master = build_master(p_path, r_path, ca_path, c_path, progress_callback=on_progress)
+        flush_stdout()
+        log(f':material/check_circle: Master file built — {len(master):,} donor-month rows')
+        stage_row(stages[2], 2, 'Master File Build', 'ETL', 'done', f'{len(master):,} rows')
+        overall_progress(progress_slot, 2, N_STAGES)
 
-            with st.spinner('Fitting Pareto/NBD + Gamma-Gamma donor lifetime-value model…'):
-                ltv_progress = st.empty()
+        run_pipeline_models(master, stages=stages, progress=(progress_slot, 2), log=log)
 
-                def on_ltv_progress(msg):
-                    ltv_progress.caption(msg)
-
-                try:
-                    ltv_results, ltv_tuning, ltv_metrics, ltv_monthly = fit_ltv_model(
-                        master, progress_callback=on_ltv_progress)
-                    ltv_error = None
-                    ltv_progress.empty()
-                    st.write(f':material/check_circle: Donor LTV model fitted — '
-                             f'{ltv_metrics["income_holdout_mape"]:.1f}% MAPE')
-                except ValueError as exc:
-                    ltv_results, ltv_tuning, ltv_metrics, ltv_monthly = None, None, None, None
-                    ltv_error = str(exc)
-                    ltv_progress.empty()
-                    st.write(f':material/warning: Donor LTV model skipped — {ltv_error}')
-
-            with st.spinner('Fitting the stock-flow model (recruits × retention × gift, SARIMA + cohort survival)…'):
-                sf_progress = st.empty()
-
-                def on_sf_progress(msg):
-                    sf_progress.caption(msg)
-
-                try:
-                    sf_result = build_production_forecast(master, progress_callback=on_sf_progress)
-                    sf_error = None
-                    sf_progress.empty()
-                    sf_mape = sf_result['walkforward_summary']['income_mape'].mean()
-                    st.write(f':material/check_circle: Stock-flow model fitted — '
-                             f'{sf_mape:.1f}% avg MAPE across 3 walk-forward windows')
-                except Exception as exc:
-                    sf_result = None
-                    sf_error = str(exc)
-                    sf_progress.empty()
-                    st.write(f':material/warning: Stock-flow model skipped — {sf_error}')
-
-            with st.spinner('Finalising and updating dashboard views…'):
-                st.session_state.master             = master
-                st.session_state.monthly            = monthly
-                st.session_state.forecast_df        = forecast_df_ml
-                st.session_state.mape               = mape_ml
-                st.session_state.ml_importances     = importances
-                st.session_state.ml_trend_slope     = trend_slope
-                st.session_state.forecast_df_linear = forecast_df_linear
-                st.session_state.mape_linear        = mape_linear
-                st.session_state.ltv_results        = ltv_results
-                st.session_state.ltv_tuning         = ltv_tuning
-                st.session_state.ltv_metrics        = ltv_metrics
-                st.session_state.ltv_error          = ltv_error
-                st.session_state.ltv_monthly        = ltv_monthly
-                if sf_result is not None:
-                    st.session_state.sf_walkforward = sf_result['walkforward_summary']
-                    st.session_state.sf_components  = sf_result['components_df']
-                    st.session_state.sf_zone12      = sf_result['zone12_forecast']
-                    st.session_state.sf_zone3       = sf_result['zone3_scenarios']
-                    st.session_state.sf_assumptions = sf_result['assumptions']
-                st.session_state.sf_error           = sf_error
-                st.session_state.pipeline_run       = True
-                forecast_df, mape = forecast_df_ml, mape_ml
-                st.write(':material/check_circle: Dashboard views updated')
-
-            if db_configured():
-                with st.spinner('Saving run to history…'):
-                    # .mean() on a pandas Series returns numpy.float64, which
-                    # psycopg2 can't bind directly (it was raising a bizarre
-                    # "schema np does not exist" error, misreading the repr).
-                    sf_mape = float(sf_result['walkforward_summary']['income_mape'].mean()) if sf_result else None
-                    saved_run_id = save_run(
-                        run_by=(st.session_state.user or {}).get('email'),
-                        master_rows=len(master),
-                        donor_count=int(master['recurring_payment_id'].nunique()),
-                        total_income=float(master[master['paid_flag'] == True]['success_amt'].sum()),
-                        mapes={
-                            'linear': mape_linear, 'ml': mape_ml,
-                            'ltv': ltv_metrics['income_holdout_mape'] if ltv_metrics else None,
-                            'stockflow': sf_mape,
-                        },
-                        forecasts={
-                            'linear': forecast_df_linear, 'ml': forecast_df_ml,
-                            'ltv': ltv_monthly, 'stockflow': sf_result['zone12_forecast'] if sf_result else None,
-                        },
-                        actuals_df=monthly,
-                    )
-                    if saved_run_id:
-                        st.write(f':material/check_circle: Run saved to history — {saved_run_id}')
-                    else:
-                        st.write(f':material/warning: Run history save skipped — {st.session_state.get("db_error", "unknown error")}')
-
-            status.update(label='Pipeline complete', state='complete', expanded=False)
+        stage_row(stages[6], 6, 'Dashboard Publish', 'Export', 'running')
+        if db_configured():
+            dashboard_state = build_dashboard_state()
+            summary = {
+                'run_by': (st.session_state.user or {}).get('email'),
+                'donor_count': st.session_state.donor_count,
+                'total_income': st.session_state.total_income,
+                'mape_ml': st.session_state.mape, 'mape_linear': st.session_state.mape_linear,
+                'mape_ltv': (st.session_state.ltv_metrics['income_holdout_mape']
+                             if st.session_state.ltv_metrics else None),
+                'mape_stockflow': st.session_state.mape_stockflow,
+                'mape_sbg': st.session_state.mape_sbg, 'mape_bgnbd': st.session_state.mape_bgnbd,
+                'mape_gw': st.session_state.mape_gw,
+                'duration_seconds': (datetime.now() - run_started).total_seconds(),
+            }
+            saved_run_id = save_dashboard_run(dashboard_state, summary)
+            if saved_run_id:
+                stored_kb = len(gzip.compress(json.dumps(dashboard_state).encode(), compresslevel=9)) / 1024
+                log(f':material/check_circle: Run saved to history — {saved_run_id} '
+                    f'({stored_kb:.0f} KB) — reload it anytime from Run History, no re-upload needed')
+                stage_row(stages[6], 6, 'Dashboard Publish', 'Export', 'done', f'{stored_kb:.0f} KB saved')
+                st.session_state.viewing_run_id = saved_run_id
+                st.session_state.data_source     = 'live'
+                st.session_state.data_loaded_at  = datetime.now()
+            else:
+                log(f':material/warning: Run history save skipped — '
+                    f'{st.session_state.get("db_error", "unknown error")}')
+                stage_row(stages[6], 6, 'Dashboard Publish', 'Export', 'warning', 'History save skipped')
+        else:
+            log(':material/check_circle: Dashboard views published (no history backend configured)')
+            stage_row(stages[6], 6, 'Dashboard Publish', 'Export', 'done', 'No history backend')
+        overall_progress(progress_slot, N_STAGES, N_STAGES)
+        log('Pipeline complete — dashboards refreshed')
 
         st.session_state.pipeline_success_message = (
             f'Pipeline complete — {len(master):,} rows · '
             f'{master["recurring_payment_id"].nunique():,} donor signups · '
-            f'ML forecast MAPE {mape:.1f}% (linear baseline {mape_linear:.1f}%)'
+            f'ML forecast MAPE {st.session_state.mape:.1f}% (linear baseline {st.session_state.mape_linear:.1f}%)'
         )
         st.session_state.pipeline_running = False
+        st.session_state.page = 'Overview'
         st.rerun()
 
     if st.session_state.pipeline_run:
         st.markdown('<div style="height:2px;"></div>', unsafe_allow_html=True)
-        m = st.session_state.master
         mape_delta = None
         if st.session_state.mape_linear:
             mape_delta = f'{st.session_state.mape - st.session_state.mape_linear:+.1f}pp vs linear'
         with st.container(horizontal=True):
-            kpi('Rows in master file', f'{len(m):,}', icon=':material/table_rows:', accent=TEAL)
-            kpi('Donor signups', f'{m["recurring_payment_id"].nunique():,}', icon=':material/how_to_reg:', accent=BLUE)
-            kpi('Total income reconciled', f'${m["success_amt"].sum():,.0f}', icon=':material/payments:', accent=PURPLE)
+            kpi('Rows in master file', f'{st.session_state.master_rows:,}', icon=':material/table_rows:', accent=TEAL)
+            kpi('Donor signups', f'{st.session_state.donor_count:,}', icon=':material/how_to_reg:', accent=BLUE)
+            kpi('Total income reconciled', f'${st.session_state.total_income:,.0f}', icon=':material/payments:', accent=PURPLE)
             kpi('ML forecast accuracy', f'{st.session_state.mape:.1f}% MAPE', delta=mape_delta,
                 delta_color='inverse', icon=':material/verified:', accent=AMBER)
 
@@ -322,10 +761,22 @@ if page == 'Data Pipeline':
 # OVERVIEW
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == 'Overview':
+    # page_header() (and the account cluster it now carries -- see its
+    # docstring) has to render before the empty_state() guard below can
+    # st.stop() the script, so the subtitle here has to tolerate the
+    # pre-pipeline-run state where these session_state fields are still
+    # None, not just the populated case the f-string below assumed when
+    # this always ran after the guard.
+    overview_sub = (
+        f'{st.session_state.donor_count:,} donor signups · '
+        f'{st.session_state.campaign_type_count} campaign types · '
+        f'{st.session_state.supplier_count} suppliers'
+    ) if st.session_state.pipeline_run else ''
+    page_header('Dashboard', 'Overview', overview_sub, meta=page_meta)
+
     if not st.session_state.pipeline_run:
         empty_state()
 
-    master      = st.session_state.master
     forecast_df = st.session_state.forecast_df
     monthly     = st.session_state.monthly
     mape        = st.session_state.mape
@@ -334,12 +785,7 @@ elif page == 'Overview':
     prev_active    = monthly.iloc[-2]['active_donors']
     current_income = monthly.iloc[-1]['total_income']
     prev_income    = monthly.iloc[-2]['total_income']
-    total_hist   = master[master['paid_flag'] == True]['success_amt'].sum()
-
-    page_header('Dashboard', 'Overview',
-                f'{master["recurring_payment_id"].nunique():,} donor signups · '
-                f'{master["campaign_type"].nunique()} campaign types · '
-                f'{master["supplier"].nunique()} suppliers')
+    total_hist   = st.session_state.total_income
 
     # ── Blended forecast across every independently-validated total-income
     # method (ML, Linear, Stock-flow). Donor rollup is deliberately excluded
@@ -363,8 +809,7 @@ elif page == 'Overview':
         if horizon > len(sf_zone12_state) and sf_zone3_state and 'Base' in sf_zone3_state:
             extra = sf_zone3_state['Base'].head(horizon - len(sf_zone12_state))['predicted_income'].reset_index(drop=True)
             sf_series = pd.concat([sf_series, extra], ignore_index=True)
-        sf_mape = float(sf_walkforward_state['income_mape'].mean()) if sf_walkforward_state is not None else None
-        methods['Stock-flow model'] = (sf_series.head(horizon), sf_mape)
+        methods['Stock-flow model'] = (sf_series.head(horizon), st.session_state.mape_stockflow)
 
     blended = pd.DataFrame({name: series.values for name, (series, _) in methods.items()})
     blended_avg = blended.mean(axis=1)
@@ -427,10 +872,9 @@ elif page == 'Overview':
 
     col1, col2, col3 = st.columns([1, 1, 1])
     with col1:
-        sup = (master[master['paid_flag'] == True].groupby('supplier')['success_amt']
-               .sum().reset_index().sort_values('success_amt', ascending=False))
+        sup = st.session_state.supplier_summary
         fig2 = go.Figure(go.Pie(
-            labels=sup['supplier'], values=sup['success_amt'],
+            labels=sup['supplier'], values=sup['total_income'],
             hole=0.55, marker_colors=COLOURS, textinfo='percent', textfont_size=10,
         ))
         fig2.update_layout(showlegend=True,
@@ -440,10 +884,9 @@ elif page == 'Overview':
             chart(fig2, 240)
 
     with col2:
-        camp = (master[master['paid_flag'] == True].groupby('campaign_type')['success_amt']
-                .sum().reset_index().sort_values('success_amt', ascending=False))
+        camp = st.session_state.campaign_summary
         fig3 = go.Figure(go.Pie(
-            labels=camp['campaign_type'], values=camp['success_amt'],
+            labels=camp['campaign_type'], values=camp['total_income'],
             hole=0.55, marker_colors=COLOURS, textinfo='percent', textfont_size=10,
         ))
         fig3.update_layout(showlegend=True,
@@ -457,11 +900,11 @@ elif page == 'Overview':
             'Metric': ['Total rows', 'Unique signups', 'Unique donors', 'Suppliers',
                        'Campaign types', 'Total income', 'Forecast MAPE'],
             'Value': [
-                f'{len(master):,}',
-                f'{master["recurring_payment_id"].nunique():,}',
-                f'{master["contact_id"].nunique():,}',
-                f'{master["supplier"].nunique()}',
-                f'{master["campaign_type"].nunique()}',
+                f'{st.session_state.master_rows:,}',
+                f'{st.session_state.donor_count:,}',
+                f'{st.session_state.contact_count:,}',
+                f'{st.session_state.supplier_count}',
+                f'{st.session_state.campaign_type_count}',
                 f'${total_hist:,.0f}',
                 f'{mape:.1f}%',
             ],
@@ -469,27 +912,46 @@ elif page == 'Overview':
         with card('Dataset summary'):
             st.dataframe(summary, hide_index=True, width='stretch', height=282)
 
+    if db_configured():
+        _recent_runs = list_dashboard_runs().head(3)
+        if not _recent_runs.empty:
+            _recent_runs = _recent_runs.copy()
+            _recent_runs['run_at'] = pd.to_datetime(_recent_runs['run_at'])
+            with card('Latest pipeline runs', 'Most recent completed runs — see Run History for the full list',
+                      tag='Completed', tag_color='green'):
+                st.dataframe(
+                    _recent_runs[['run_id', 'run_at', 'run_by', 'donor_count', 'total_income']].rename(columns={
+                        'run_id': 'Run ID', 'run_at': 'Completed', 'run_by': 'Run by',
+                        'donor_count': 'Donors', 'total_income': 'Total income',
+                    }),
+                    hide_index=True, width='stretch',
+                    column_config={
+                        'Completed': st.column_config.DatetimeColumn(format='D MMM, HH:mm'),
+                        'Donors': st.column_config.NumberColumn(format='%d'),
+                        'Total income': st.column_config.NumberColumn(format='dollar'),
+                    },
+                )
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # INCOME FORECAST
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == 'Income Forecast':
+    page_header('Forecasting', 'Monthly income forecast',
+                'Three independent methods, validated the same way, forecasting the same thing: '
+                'a top-down trend model, a machine-learning model, and a stock-flow model that '
+                'forecasts recruitment, retention, and gift size separately.',
+                meta=page_meta)
+
     if not st.session_state.pipeline_run:
         empty_state()
 
     monthly           = st.session_state.monthly
-    ltv_monthly_state = st.session_state.ltv_monthly
-    ltv_metrics_state = st.session_state.ltv_metrics
 
     sf_zone12_state      = st.session_state.sf_zone12
     sf_zone3_state       = st.session_state.sf_zone3
     sf_walkforward_state = st.session_state.sf_walkforward
     sf_assumptions_state = st.session_state.sf_assumptions
-
-    page_header('Forecasting', 'Monthly income forecast',
-                'Four independent methods, validated the same way, forecasting the same thing: '
-                'a top-down trend model, a machine-learning model, a bottom-up rollup of every donor, '
-                'and a stock-flow model that forecasts recruitment, retention, and gift size separately.')
 
     comp_rows = []
     with st.spinner('Comparing forecast methods…'):
@@ -512,14 +974,6 @@ elif page == 'Income Forecast':
             'Validation MAPE': cmp_lin_mape,
         })
 
-    if ltv_monthly_state is not None:
-        comp_rows.append({
-            'Method': 'Donor rollup (Pareto/NBD + Gamma-Gamma)',
-            '12-month total': ltv_monthly_state.head(12)['predicted_income'].sum(),
-            '24-month total': ltv_monthly_state['predicted_income'].sum(),
-            'Validation MAPE': ltv_metrics_state['income_holdout_mape'],
-        })
-
     if sf_zone12_state is not None:
         sf_24m = sf_zone12_state['predicted_income'].sum()
         if sf_zone3_state and 'Base' in sf_zone3_state:
@@ -528,7 +982,7 @@ elif page == 'Income Forecast':
             'Method': 'Stock-flow model (recruits × retention × gift)',
             '12-month total': sf_zone12_state.head(12)['predicted_income'].sum(),
             '24-month total': sf_24m,
-            'Validation MAPE': float(sf_walkforward_state['income_mape'].mean()),
+            'Validation MAPE': st.session_state.mape_stockflow,
         })
 
     with card('Method comparison',
@@ -545,7 +999,7 @@ elif page == 'Income Forecast':
             },
         )
 
-    model_options = ['ML forecast', 'Linear trend', 'Donor rollup', 'Stock-flow model']
+    model_options = ['ML forecast', 'Linear trend', 'Stock-flow model']
     fc1, fc2, fc3 = st.columns([1.8, 1.3, 1.9], vertical_alignment='bottom')
     with fc1:
         model_choice = st.segmented_control(
@@ -584,25 +1038,7 @@ elif page == 'Income Forecast':
         forecast_df, mape, slope, _ = cached_linear_forecast(monthly, n_train=n_train, n_forecast=horizon)
         model_desc = f'Linear trend · last {n_train} months (from 2019 onward) · validated on a 12-month holdout'
         holdback_label = '12-month holdout'
-    elif model_choice == 'Donor rollup':
-        with fc3:
-            st.caption('Pareto/NBD predicts how many more months each existing donor gives; Gamma-Gamma '
-                       'predicts their gift size. Existing donors only — assumes zero future recruitment, '
-                       'so it will run below the Linear/ML totals. For total org income including future '
-                       'recruitment, use Linear trend or ML forecast.')
-        n_train = min(36, len(monthly))
-        holdback_label = '12-month holdout'
-        if ltv_monthly_state is None:
-            st.warning(st.session_state.ltv_error or 'The donor lifetime-value model is not available for this dataset.')
-            forecast_df, mape, slope, _ = cached_linear_forecast(monthly, n_train=24, n_forecast=horizon)
-            model_desc = 'Linear trend (fallback — donor rollup unavailable)'
-        else:
-            forecast_df = ltv_monthly_state.head(horizon).copy()
-            mape = ltv_metrics_state['income_holdout_mape']
-            slope = float(np.polyfit(forecast_df['calendar_month'], forecast_df['predicted_income'], 1)[0])
-            model_desc = ('Pareto/NBD + Gamma-Gamma, existing donors only · trained from 2019 · '
-                          'validated on a 12-month holdout, error in $')
-    else:  # Stock-flow model
+    elif model_choice == 'Stock-flow model':
         with fc3:
             st.caption('Forecasts recruits (SARIMA), lapse rate (cohort survival), and gift size (trend) '
                        'separately, then derives income through the accounting identity — never forecasts '
@@ -625,7 +1061,7 @@ elif page == 'Income Forecast':
                 st.caption(f'Months 19–{horizon} above use the Base scenario\'s central assumptions to fill '
                            f'this chart — see the scenario comparison below for the full Conservative/Optimistic range.')
             forecast_df = base_df.head(horizon)
-            mape = float(sf_walkforward_state['income_mape'].mean())
+            mape = st.session_state.mape_stockflow
             slope = float(np.polyfit(forecast_df['calendar_month'], forecast_df['predicted_income'], 1)[0])
             model_desc = ('Recruits × retention × gift, derived via the accounting identity · trained from '
                           '2019 · validated on 3 rolling 12-month walk-forward windows, error in $')
@@ -781,12 +1217,12 @@ elif page == 'Income Forecast':
 # RETENTION ANALYSIS
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == 'Retention Analysis':
+    page_header('Retention analysis', 'Donor retention curves',
+                '% of donors still active at each month since recruitment · observed from historical data.',
+                meta=page_meta)
+
     if not st.session_state.pipeline_run:
         empty_state()
-
-    master = st.session_state.master
-    page_header('Retention analysis', 'Donor retention curves',
-                '% of donors still active at each month since recruitment · observed from historical data.')
 
     rc1, rc2 = st.columns([2, 3], vertical_alignment='bottom')
     with rc1:
@@ -795,10 +1231,12 @@ elif page == 'Retention Analysis':
             format_func=lambda x: x.replace('_', ' ').title(), key='ret_seg',
         )
     with rc2:
-        max_m = st.slider('Months to show', 12, 60, 36, key='ret_m')
+        max_m = st.segmented_control('Months to show', [12, 24, 36, 48, 60], default=36,
+                                      key='ret_m', format_func=lambda x: f'{x} months')
     segment = segment or 'supplier'
+    max_m = max_m or 36
 
-    ret_df = get_retention_by_segment(master, segment)
+    ret_df = st.session_state.retention_by_segment.get(segment, pd.DataFrame())
 
     if ret_df.empty:
         with card():
@@ -845,18 +1283,42 @@ elif page == 'Retention Analysis':
 # DONOR LIFETIME VALUE
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == 'Donor Lifetime Value':
-    if not st.session_state.pipeline_run:
-        empty_state()
-
     page_header('Donor value', 'Donor lifetime value',
                 'Pareto/NBD predicts how many more months each existing donor will keep giving; '
                 'Gamma-Gamma predicts their expected donation size — a per-donor $ forecast, not an '
                 'aggregate average. Scoped to today\'s donor base only (assumes zero future '
-                'recruitment) — see Income forecast for total org income including recruitment.')
+                'recruitment) — see Income forecast for total org income including recruitment.',
+                meta=page_meta)
+
+    if not st.session_state.pipeline_run:
+        empty_state()
 
     ltv_results = st.session_state.ltv_results
     ltv_tuning  = st.session_state.ltv_tuning
     ltv_metrics = st.session_state.ltv_metrics
+
+    # Fit lazily, right here, on first visit -- this model is no longer
+    # fit as part of "Run pipeline" (it was the slowest stage, ~5 min, and
+    # this is the only page that reads its output; see cached_ltv_fit()
+    # near the top of this file). Cached on `master`, so navigating away
+    # and back doesn't refit. Only possible in the same session that ran
+    # the pipeline live -- `master` itself is never persisted to Run
+    # History (too large to store) -- so a reloaded historical run can't
+    # refit it after the fact and falls through to the message below.
+    if ltv_results is None and st.session_state.get('master') is not None:
+        with st.spinner('Fitting Pareto/NBD + Gamma-Gamma donor lifetime-value model…'):
+            try:
+                ltv_results, ltv_tuning, ltv_metrics, ltv_monthly = cached_ltv_fit(st.session_state.master)
+                st.session_state.ltv_results = ltv_results
+                st.session_state.ltv_tuning  = ltv_tuning
+                st.session_state.ltv_metrics = ltv_metrics
+                st.session_state.ltv_monthly = ltv_monthly
+                st.session_state.ltv_error   = None
+                counts, edges = np.histogram(ltv_results['predicted_ltv_24m'].dropna(), bins=30)
+                st.session_state.ltv_histogram = {'bin_edges': edges.tolist(), 'counts': counts.tolist()}
+            except ValueError as exc:
+                ltv_results = None
+                st.session_state.ltv_error = str(exc)
 
     if ltv_results is None:
         with card():
@@ -866,7 +1328,8 @@ elif page == 'Donor Lifetime Value':
                     Donor lifetime value model unavailable
                 </div>
                 <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
-                    {st.session_state.ltv_error or 'The model could not be fit on this dataset.'}
+                    {st.session_state.ltv_error or 'Run a fresh pipeline in this session to compute this model — '
+                     'it isn\'t stored with saved runs from history.'}
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -901,9 +1364,23 @@ elif page == 'Donor Lifetime Value':
                 chart(fig, 380)
 
         with col2:
-            fig2 = go.Figure(go.Histogram(
-                x=ltv_results['predicted_ltv_24m'], marker_color=TEXT, nbinsx=30,
-            ))
+            # Pre-binned (not a raw-value go.Histogram) so this chart works
+            # identically whether ltv_results is the live full donor table
+            # or just the cached top-50 -- the bin counts themselves are
+            # computed once in run_pipeline_models() from the full table
+            # and cached directly, since 30 (edge, count) pairs is tiny
+            # regardless of donor count, unlike the raw per-donor values.
+            hist = st.session_state.ltv_histogram or {'bin_edges': [], 'counts': []}
+            edges, counts = hist['bin_edges'], hist['counts']
+            centers = [(edges[i] + edges[i + 1]) / 2 for i in range(len(counts))]
+            widths = [edges[i + 1] - edges[i] for i in range(len(counts))]
+            # TEAL, not TEXT -- TEXT is the text-colour variable, not a
+            # decoration colour; using it here made this chart's bars a
+            # flat, mismatched navy next to the teal "Top 15 donors"
+            # chart beside it (and, being TEXT specifically, an odd
+            # near-white in dark mode too, since that variable tracks
+            # whatever the current body text colour is, not an accent).
+            fig2 = go.Figure(go.Bar(x=centers, y=counts, width=widths, marker_color=TEAL))
             fig2.update_layout(
                 xaxis=dict(title='Predicted 24-month value ($)', tickformat='$,.0f'),
                 yaxis=dict(title='Number of donors'), showlegend=False,
@@ -962,19 +1439,14 @@ elif page == 'Donor Lifetime Value':
 # SUPPLIER INSIGHTS
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == 'Supplier Insights':
+    page_header('Supplier insights', 'Which recruiting firms perform best',
+                'Retention, lifetime value and income contribution by supplier.',
+                meta=page_meta)
+
     if not st.session_state.pipeline_run:
         empty_state()
 
-    master = st.session_state.master
-    page_header('Supplier insights', 'Which recruiting firms perform best',
-                'Retention, lifetime value and income contribution by supplier.')
-
-    sup = (master[master['paid_flag'] == True]
-           .groupby('supplier')
-           .agg(total_income=('success_amt', 'sum'),
-                active_donors=('recurring_payment_id', 'nunique'),
-                avg_gift=('success_amt', 'mean'))
-           .reset_index().sort_values('total_income', ascending=False))
+    sup = st.session_state.supplier_summary
     top = sup.iloc[0]
 
     with st.container(horizontal=True):
@@ -1010,9 +1482,8 @@ elif page == 'Supplier Insights':
         with card('Active donors by supplier'):
             chart(fig2, 280)
 
-    sup_monthly = get_supplier_breakdown(master)
-    sup_monthly['donor_month'] = sup_monthly['donor_month'].astype(str)
-    all_sups = [s for s in master['supplier'].dropna().unique() if s != 'Unknown']
+    sup_monthly = st.session_state.supplier_monthly
+    all_sups = [s for s in sup['supplier'].dropna().unique() if s != 'Unknown']
 
     with card('Monthly income trend by supplier',
               'Select suppliers to compare their monthly income trajectory'):
@@ -1052,14 +1523,14 @@ elif page == 'Supplier Insights':
 # CAMPAIGN ROI
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == 'Campaign ROI':
+    page_header('Campaign insights', 'Which campaigns perform best',
+                'Retention, income and return on acquisition cost by campaign type.',
+                meta=page_meta)
+
     if not st.session_state.pipeline_run:
         empty_state()
 
-    master = st.session_state.master
-    roi = get_campaign_roi(master)
-
-    page_header('Campaign insights', 'Which campaigns perform best',
-                'Retention, income and return on acquisition cost by campaign type.')
+    roi = st.session_state.campaign_summary
 
     best = roi.sort_values('total_income', ascending=False).iloc[0]
     has_cpa = 'avg_cpa' in roi.columns
@@ -1105,14 +1576,12 @@ elif page == 'Campaign ROI':
                 st.markdown(f'<div style="text-align:center;padding:24px;color:{MIST};">'
                             f'CPA data not found in Campaigns file.</div>', unsafe_allow_html=True)
 
-    cm = (master[master['paid_flag'] == True]
-          .groupby(['campaign_type', 'donor_month'])['success_amt'].sum().reset_index())
-    cm['donor_month'] = cm['donor_month'].astype(str)
+    cm = st.session_state.campaign_monthly
     fig3 = go.Figure()
     for i, ct in enumerate(cm['campaign_type'].dropna().unique()):
         grp = cm[cm['campaign_type'] == ct]
         fig3.add_trace(go.Scatter(
-            x=grp['donor_month'], y=grp['success_amt'],
+            x=grp['donor_month'], y=grp['total_income'],
             mode='lines', name=ct,
             line=dict(color=COLOURS[i % len(COLOURS)], width=2),
         ))
@@ -1139,116 +1608,186 @@ elif page == 'Campaign ROI':
 # RUN HISTORY
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == 'Run History':
-    page_header('History', 'Pipeline run history',
-                'Every completed pipeline run is snapshotted with a timestamp — not the source data '
-                'itself (it changes too often for that to be worth caching), just what each run '
-                'produced: summary MAPEs, each model\'s forecast, and the actuals series as they '
-                'looked at that moment.')
+    page_header('Run history', 'Past pipeline runs',
+                'Every completed pipeline run is saved automatically. Reload any past run '
+                'to explore its dashboards in full, without re-uploading data.',
+                meta=f'ACTIVE: {st.session_state.viewing_run_id or "NONE"}')
 
     if not db_configured():
         with card():
             st.markdown(f"""
-            <div style="text-align:center;padding:36px 20px;">
-                <div style="font-size:15px;font-weight:700;color:{TEXT};margin-bottom:6px;">
-                    Run history isn't set up yet
+            <div style="text-align:center;padding:28px;">
+                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                    Run history isn't available
                 </div>
-                <div style="font-size:12.5px;color:{MIST};max-width:420px;margin:0 auto;">
-                    Add a Supabase connection string to .streamlit/secrets.toml under [database] —
-                    every pipeline run will start saving automatically, no other setup needed.
+                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                    No database connection is configured, so past runs aren't saved. Every
+                    pipeline run still works — it just won't be reloadable later.
                 </div>
             </div>
             """, unsafe_allow_html=True)
-    else:
-        runs = get_runs()
-        if runs.empty:
-            with card():
-                st.markdown(f"""
-                <div style="text-align:center;padding:36px 20px;">
-                    <div style="font-size:15px;font-weight:700;color:{TEXT};margin-bottom:6px;">
-                        No runs saved yet
-                    </div>
-                    <div style="font-size:12.5px;color:{MIST};max-width:420px;margin:0 auto;">
-                        Run the pipeline on the Data Pipeline page — every completed run is saved
-                        here automatically from now on.
-                    </div>
+        st.stop()
+
+    runs = list_dashboard_runs()
+
+    if runs.empty:
+        with card():
+            st.markdown(f"""
+            <div style="text-align:center;padding:28px;">
+                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                    No runs saved yet
                 </div>
-                """, unsafe_allow_html=True)
+                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                    Run the pipeline from the Data Pipeline page — it'll be saved here
+                    automatically once it finishes.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        st.stop()
+
+    runs['run_at'] = pd.to_datetime(runs['run_at'])
+    total_run_count = len(runs)
+    runs = runs.head(10)  # only the 10 most recent runs are shown/searchable
+    latest = runs.iloc[0]
+    viewing_id = st.session_state.viewing_run_id
+
+    def _fmt_duration(secs):
+        if pd.isna(secs):
+            return 'N/A'
+        secs = int(secs)
+        return f'{secs // 60}m {secs % 60}s' if secs >= 60 else f'{secs}s'
+
+    with st.container(horizontal=True):
+        kpi('Total runs', str(total_run_count),
+            delta=f'Showing {len(runs)} most recent' if total_run_count > len(runs) else 'Saved to history',
+            icon=':material/history:', accent=TEAL, delta_color='off')
+        kpi('Latest run', latest['run_at'].strftime('%d %b, %H:%M'),
+            delta=latest['run_by'] or 'Unknown user', icon=':material/schedule:',
+            accent=BLUE, delta_color='off')
+        kpi('Donors (latest)', f'{int(latest["donor_count"]):,}' if pd.notna(latest['donor_count']) else 'N/A',
+            delta='In most recent run', icon=':material/groups:', accent=PURPLE, delta_color='off')
+        kpi('Income (latest)', f'${latest["total_income"]:,.0f}' if pd.notna(latest['total_income']) else 'N/A',
+            delta='Total, most recent run', icon=':material/payments:', accent=AMBER, delta_color='off')
+        if 'duration_seconds' in runs.columns and runs['duration_seconds'].notna().any():
+            kpi('Avg run duration', _fmt_duration(runs['duration_seconds'].mean()),
+                delta=f'Latest: {_fmt_duration(latest.get("duration_seconds"))}',
+                icon=':material/timer:', accent=TEAL2, delta_color='off')
+
+    chrono = runs.sort_values('run_at')
+    col1, col2 = st.columns(2)
+    with col1:
+        fig = go.Figure(go.Scatter(
+            x=chrono['run_at'], y=chrono['total_income'], mode='lines+markers',
+            line=dict(color=TEAL, width=2), marker=dict(size=7),
+        ))
+        fig.update_layout(yaxis=dict(tickformat='$,.0f', title='Total income ($)'), xaxis_title='Run')
+        with card('Total income by run'):
+            chart(fig, 260)
+
+    with col2:
+        fig2 = go.Figure()
+        mape_cols = [
+            ('mape_ml', 'ML forecast', TEAL), ('mape_linear', 'Linear trend', PURPLE),
+            ('mape_ltv', 'Donor rollup', AMBER), ('mape_stockflow', 'Stock-flow', BLUE),
+        ]
+        for col, label, colour in mape_cols:
+            if col in chrono.columns and chrono[col].notna().any():
+                fig2.add_trace(go.Scatter(
+                    x=chrono['run_at'], y=chrono[col], mode='lines+markers', name=label,
+                    line=dict(color=colour, width=2), marker=dict(size=6),
+                ))
+        fig2.update_layout(yaxis=dict(ticksuffix='%', title='Holdout MAPE'), xaxis_title='Run')
+        with card('Model accuracy by run'):
+            chart(fig2, 260)
+
+    runs_display = runs.copy()
+    # st.dataframe can't colour individual cells conditionally, so a
+    # checkmark glyph stands in for the reference app's green check icon --
+    # every saved run got here by completing successfully, so this is
+    # always "done", never a fabricated status.
+    runs_display['status'] = '✓ Completed'
+    if 'duration_seconds' in runs_display.columns:
+        runs_display['duration_seconds'] = runs_display['duration_seconds'].apply(_fmt_duration)
+    runs_display = runs_display.rename(columns={
+        'status': 'Status', 'run_id': 'Run ID', 'run_at': 'Run time', 'run_by': 'Run by',
+        'duration_seconds': 'Duration',
+        'donor_count': 'Donors', 'total_income': 'Total income',
+        'mape_ml': 'ML MAPE', 'mape_linear': 'Linear MAPE', 'mape_ltv': 'Rollup MAPE',
+        'mape_stockflow': 'Stock-flow MAPE',
+    })
+    col_order = ['Status', 'Run ID', 'Run time', 'Run by', 'Duration', 'Donors', 'Total income',
+                 'ML MAPE', 'Linear MAPE', 'Rollup MAPE', 'Stock-flow MAPE']
+    runs_display = runs_display[[c for c in col_order if c in runs_display.columns]]
+    with card('All runs'):
+        st.dataframe(
+            runs_display, hide_index=True, width='stretch',
+            column_config={
+                'Status': st.column_config.TextColumn(),
+                'Run time': st.column_config.DatetimeColumn(format='D MMM YYYY, HH:mm'),
+                'Donors': st.column_config.NumberColumn(format='%d'),
+                'Total income': st.column_config.NumberColumn(format='dollar'),
+                'ML MAPE': st.column_config.NumberColumn(format='%.1f%%'),
+                'Linear MAPE': st.column_config.NumberColumn(format='%.1f%%'),
+                'Rollup MAPE': st.column_config.NumberColumn(format='%.1f%%'),
+                'Stock-flow MAPE': st.column_config.NumberColumn(format='%.1f%%'),
+            },
+        )
+
+    with card('Load or delete a run', f'Searching the {len(runs)} most recent runs'):
+        search = st.text_input(
+            'Search by Run ID', placeholder='Search by Run ID…', icon=':material/search:',
+        )
+        filtered = runs[runs['run_id'].str.contains(search.strip(), case=False, na=False)] if search.strip() else runs
+
+        if filtered.empty:
+            st.caption(f'No runs match "{search}".')
         else:
-            latest = runs.iloc[0]
-            with st.container(horizontal=True):
-                kpi('Runs saved', f'{len(runs):,}', icon=':material/history:', accent=TEAL, delta_color='off')
-                kpi('Latest run', pd.to_datetime(latest['run_at']).strftime('%d %b, %H:%M'),
-                    icon=':material/schedule:', accent=BLUE, delta_color='off')
-                if pd.notna(latest['mape_ml']):
-                    kpi('Latest ML MAPE', f"{latest['mape_ml']:.1f}%", icon=':material/verified:',
-                        accent=PURPLE, delta_color='off')
-                if pd.notna(latest['mape_stockflow']):
-                    kpi('Latest stock-flow MAPE', f"{latest['mape_stockflow']:.1f}%",
-                        icon=':material/insights:', accent=AMBER, delta_color='off')
+            # Run ID only, per instruction -- "currently viewing" is already
+            # communicated separately below (disabled Load button + caption),
+            # so it doesn't need to be baked into the option text too.
+            run_labels = {row['run_id']: row['run_id'] for _, row in filtered.iterrows()}
+            picked_id = st.selectbox(
+                'Choose a run', options=list(run_labels.keys()),
+                format_func=lambda rid: run_labels[rid], label_visibility='collapsed',
+            )
 
-            model_cols = [('mape_linear', 'Linear', TEAL), ('mape_ml', 'ML', BLUE),
-                          ('mape_ltv', 'Donor rollup', PURPLE), ('mape_stockflow', 'Stock-flow', AMBER)]
-            trend = runs.sort_values('run_at')
-            fig = go.Figure()
-            for col, name, color in model_cols:
-                if trend[col].notna().any():
-                    fig.add_trace(go.Scatter(
-                        x=trend['run_at'], y=trend[col], mode='lines+markers', name=name,
-                        line=dict(color=color, width=2),
-                    ))
-            fig.update_layout(yaxis=dict(title='MAPE (%)', ticksuffix='%'), xaxis=dict(title='Run'))
-            with card('Validation accuracy over time', 'Every model\'s MAPE, one point per pipeline run',
-                      tag=f'{len(runs)} runs', tag_color='blue'):
-                chart(fig, 260)
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                load_disabled = picked_id == viewing_id
+                if st.button('Load this run for full analysis', icon=':material/bolt:',
+                             type='primary', width='stretch', disabled=load_disabled):
+                    with st.spinner('Loading run…'):
+                        picked_state, picked_at = load_dashboard_run(picked_id)
+                    if picked_state:
+                        restore_dashboard_state(picked_state)
+                        st.session_state.viewing_run_id = picked_id
+                        st.session_state.data_source    = 'cached'
+                        st.session_state.data_loaded_at = picked_at
+                        st.session_state.page = 'Overview'
+                        st.rerun()
+                    else:
+                        st.error('Could not load that run — it may have been deleted, or the '
+                                  'database is unreachable.')
+                if load_disabled:
+                    st.caption('This is the run currently shown across the dashboards.')
 
-            runs_display = runs.rename(columns={
-                'run_at': 'Run at', 'run_by': 'Run by', 'master_rows': 'Rows',
-                'donor_count': 'Donors', 'total_income': 'Total income',
-                'mape_linear': 'Linear MAPE', 'mape_ml': 'ML MAPE',
-                'mape_ltv': 'LTV MAPE', 'mape_stockflow': 'Stock-flow MAPE',
-            })
-            with card('All runs'):
-                st.dataframe(
-                    runs_display, hide_index=True, width='stretch',
-                    column_config={
-                        'Total income': st.column_config.NumberColumn(format='dollar'),
-                        'Linear MAPE': st.column_config.NumberColumn(format='%.1f%%'),
-                        'ML MAPE': st.column_config.NumberColumn(format='%.1f%%'),
-                        'LTV MAPE': st.column_config.NumberColumn(format='%.1f%%'),
-                        'Stock-flow MAPE': st.column_config.NumberColumn(format='%.1f%%'),
-                    },
-                )
+            with c2:
+                confirm_key = f'confirm_delete_{picked_id}'
+                if st.session_state.get(confirm_key):
+                    if st.button('Confirm delete', icon=':material/delete_forever:',
+                                  width='stretch'):
+                        delete_dashboard_run(picked_id)
+                        st.session_state.pop(confirm_key, None)
+                        if picked_id == viewing_id:
+                            st.session_state.pipeline_run = False
+                            st.session_state.viewing_run_id = None
+                            st.session_state.data_source = None
+                        st.rerun()
+                    if st.button('Cancel', width='stretch'):
+                        st.session_state.pop(confirm_key, None)
+                        st.rerun()
+                else:
+                    if st.button('Delete this run', icon=':material/delete:', width='stretch'):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
 
-            run_options = [f"{r['run_id']} — {pd.to_datetime(r['run_at']).strftime('%d %b %Y, %H:%M')}"
-                           for _, r in runs.iterrows()]
-            picked = st.selectbox('View a specific run', run_options)
-            picked_run_id = picked.split(' — ')[0]
-
-            run_forecasts = get_run_forecasts(picked_run_id)
-            run_actuals = get_run_actuals(picked_run_id)
-
-            if not run_forecasts.empty:
-                model_labels = {'linear': 'Linear', 'ml': 'ML', 'ltv': 'Donor rollup', 'stockflow': 'Stock-flow'}
-                model_colors = {'linear': TEAL, 'ml': BLUE, 'ltv': PURPLE, 'stockflow': AMBER}
-
-                fig2 = go.Figure()
-                n_act = 0
-                if not run_actuals.empty:
-                    run_actuals = run_actuals.sort_values('donor_month')
-                    n_act = len(run_actuals)
-                    fig2.add_trace(go.Scatter(
-                        x=list(range(1, n_act + 1)), y=run_actuals['total_income'],
-                        mode='lines+markers', name='Actual', line=dict(color=TEXT, width=2.5),
-                    ))
-                for model_name in run_forecasts['model'].unique():
-                    sub = run_forecasts[run_forecasts['model'] == model_name].sort_values('calendar_month')
-                    t_fore = list(range(n_act + 1, n_act + len(sub) + 1))
-                    fig2.add_trace(go.Scatter(
-                        x=t_fore, y=sub['predicted_income'], mode='lines+markers',
-                        name=model_labels.get(model_name, model_name),
-                        line=dict(color=model_colors.get(model_name, MIST), width=2, dash='dash'),
-                    ))
-                fig2.update_layout(yaxis=dict(tickformat='$,.0f', title='Monthly income ($)'),
-                                    xaxis=dict(title='Month number'))
-                with card(f'Snapshot — {picked}', 'Reconstructed exactly as it looked when this run completed'):
-                    chart(fig2, 300)
