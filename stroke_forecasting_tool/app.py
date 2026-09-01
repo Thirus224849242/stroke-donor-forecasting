@@ -149,17 +149,17 @@ def run_pipeline_models(master, stages=None, progress=None, log=None):
     with st.spinner('Fitting the linear-trend baseline (trained from 2019, 12-month holdout)…'):
         monthly = get_monthly_actuals(master)
         forecast_df_linear, mape_linear, linear_slope, _ = cached_linear_forecast(monthly, n_train=24, n_forecast=24)
-        log(f':material/check_circle: Linear baseline fitted — {mape_linear:.1f}% MAPE')
+        log(f':material/check_circle: Linear baseline fitted, {mape_linear:.1f}% MAPE')
         stage(3, 'Linear Trend Baseline', 'Trend', 'done', f'{mape_linear:.1f}% MAPE')
 
     stage(4, 'ML Forecast Model', 'Gradient Boosting', 'running')
     with st.spinner('Training the gradient-boosting forecast model (direct multi-step, trained from 2019, 12-month holdout)…'):
         try:
             forecast_df_ml, mape_ml, importances, trend_slope = cached_ml_forecast(monthly, n_forecast=24)
-            log(f':material/check_circle: ML forecast model trained — {mape_ml:.1f}% MAPE')
+            log(f':material/check_circle: ML forecast model trained, {mape_ml:.1f}% MAPE')
             stage(4, 'ML Forecast Model', 'Gradient Boosting', 'done', f'{mape_ml:.1f}% MAPE')
         except ValueError:
-            log(':material/warning: Not enough monthly history for the ML model — using the linear baseline instead.')
+            log(':material/warning: Not enough monthly history for the ML model, using the linear baseline instead.')
             forecast_df_ml, mape_ml, importances, trend_slope = forecast_df_linear, mape_linear, {}, linear_slope
             stage(4, 'ML Forecast Model', 'Gradient Boosting', 'warning', 'Fell back to linear')
 
@@ -181,13 +181,13 @@ def run_pipeline_models(master, stages=None, progress=None, log=None):
             sf_result = build_production_forecast(master, progress_callback=on_sf_progress)
             sf_error = None
             sf_mape = sf_result['walkforward_summary']['income_mape'].mean()
-            log(f':material/check_circle: Stock-flow model fitted — '
+            log(f':material/check_circle: Stock-flow model fitted, '
                      f'{sf_mape:.1f}% avg MAPE across 3 walk-forward windows')
             stage(5, 'Stock-Flow Model', 'SARIMA + Cohort Survival', 'done', f'{sf_mape:.1f}% avg MAPE')
         except Exception as exc:
             sf_result = None
             sf_error = str(exc)
-            log(f':material/warning: Stock-flow model skipped — {sf_error}')
+            log(f':material/warning: Stock-flow model skipped, {sf_error}')
             log(traceback.format_exc())
             stage(5, 'Stock-Flow Model', 'SARIMA + Cohort Survival', 'warning', 'Skipped')
 
@@ -413,7 +413,7 @@ def build_page_export_csv(page_name):
         tables['Linear forecast (24m)'] = ss.forecast_df_linear
         tables['Stock-flow forecast (months 1-18)'] = ss.sf_zone12
         for name, df in (ss.sf_zone3 or {}).items():
-            tables[f'Stock-flow scenario — {name} (months 19-36)'] = df
+            tables[f'Stock-flow scenario: {name} (months 19-36)'] = df
     elif page_name == 'Retention Analysis':
         for seg, df in (ss.retention_by_segment or {}).items():
             tables[f'Retention by {seg}'] = df
@@ -489,7 +489,7 @@ if st.session_state.data_source == 'cached':
     loaded_str = (pd.to_datetime(st.session_state.data_loaded_at).strftime('%d %b %Y, %H:%M')
                   if st.session_state.data_loaded_at else 'a previous run')
     st.info(
-        f'Showing the run from **{loaded_str}**, loaded instantly from history — no pipeline run needed. '
+        f'Showing the run from **{loaded_str}**, loaded instantly from history, no pipeline run needed. '
         f'Go to **Run History** to pick a different run, or **Data Pipeline** to run fresh data.',
         icon=':material/bolt:',
     )
@@ -518,8 +518,8 @@ if page == 'Data Pipeline':
 
     if st.session_state.data_source == 'cached' and db_configured():
         st.caption(':material/bolt: Dashboards are currently showing a saved run, loaded instantly from '
-                   'history. Uploading new files below adds a new run without affecting past ones — '
-                   'see the **Run History** page to browse or reload any previous run.')
+                   'history. Uploading new files below adds a new run without affecting past ones. '
+                   'See the **Run History** page to browse or reload any previous run.')
 
     st.markdown(f"""
     <div class="sf-pipeline">
@@ -595,7 +595,7 @@ if page == 'Data Pipeline':
     all_valid = all([pay_valid, rec_valid, con_valid, cam_valid])
 
     if all_up and not all_valid:
-        st.error('One or more files don\'t match what\'s expected for their slot — fix the file(s) flagged '
+        st.error('One or more files don\'t match what\'s expected for their slot. Fix the file(s) flagged '
                   'above before running the pipeline.', icon=':material/error:')
 
     st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
@@ -695,7 +695,7 @@ if page == 'Data Pipeline':
         with contextlib.redirect_stdout(stdout_buf):
             master = build_master(p_path, r_path, ca_path, c_path, progress_callback=on_progress)
         flush_stdout()
-        log(f':material/check_circle: Master file built — {len(master):,} donor-month rows')
+        log(f':material/check_circle: Master file built, {len(master):,} donor-month rows')
         stage_row(stages[2], 2, 'Master File Build', 'ETL', 'done', f'{len(master):,} rows')
         overall_progress(progress_slot, 2, N_STAGES)
 
@@ -719,24 +719,24 @@ if page == 'Data Pipeline':
             saved_run_id = save_dashboard_run(dashboard_state, summary)
             if saved_run_id:
                 stored_kb = len(gzip.compress(json.dumps(dashboard_state).encode(), compresslevel=9)) / 1024
-                log(f':material/check_circle: Run saved to history — {saved_run_id} '
-                    f'({stored_kb:.0f} KB) — reload it anytime from Run History, no re-upload needed')
+                log(f':material/check_circle: Run saved to history, {saved_run_id} '
+                    f'({stored_kb:.0f} KB), reload it anytime from Run History, no re-upload needed')
                 stage_row(stages[6], 6, 'Dashboard Publish', 'Export', 'done', f'{stored_kb:.0f} KB saved')
                 st.session_state.viewing_run_id = saved_run_id
                 st.session_state.data_source     = 'live'
                 st.session_state.data_loaded_at  = datetime.now()
             else:
-                log(f':material/warning: Run history save skipped — '
+                log(f':material/warning: Run history save skipped, '
                     f'{st.session_state.get("db_error", "unknown error")}')
                 stage_row(stages[6], 6, 'Dashboard Publish', 'Export', 'warning', 'History save skipped')
         else:
             log(':material/check_circle: Dashboard views published (no history backend configured)')
             stage_row(stages[6], 6, 'Dashboard Publish', 'Export', 'done', 'No history backend')
         overall_progress(progress_slot, N_STAGES, N_STAGES)
-        log('Pipeline complete — dashboards refreshed')
+        log('Pipeline complete, dashboards refreshed')
 
         st.session_state.pipeline_success_message = (
-            f'Pipeline complete — {len(master):,} rows · '
+            f'Pipeline complete, {len(master):,} rows · '
             f'{master["recurring_payment_id"].nunique():,} donor signups · '
             f'ML forecast MAPE {st.session_state.mape:.1f}% (linear baseline {st.session_state.mape_linear:.1f}%)'
         )
@@ -864,7 +864,7 @@ elif page == 'Overview':
     fig.add_vline(x=len(recent) + 0.5, line_dash='dot', line_color=LINE, opacity=0.8)
     fig.update_layout(yaxis=dict(tickformat='$,.0f'))
 
-    with card('Monthly income — actual vs blended forecast',
+    with card('Monthly income: actual vs blended forecast',
               f'Last 24 months actual · average of {", ".join(methods.keys())} · '
               f'shaded band shows where the methods disagree',
               tag=f'{len(methods)} methods blended', tag_color='green'):
@@ -917,7 +917,7 @@ elif page == 'Overview':
         if not _recent_runs.empty:
             _recent_runs = _recent_runs.copy()
             _recent_runs['run_at'] = pd.to_datetime(_recent_runs['run_at'])
-            with card('Latest pipeline runs', 'Most recent completed runs — see Run History for the full list',
+            with card('Latest pipeline runs', 'Most recent completed runs, see Run History for the full list',
                       tag='Completed', tag_color='green'):
                 st.dataframe(
                     _recent_runs[['run_id', 'run_at', 'run_by', 'donor_count', 'total_income']].rename(columns={
@@ -986,9 +986,9 @@ elif page == 'Income Forecast':
         })
 
     with card('Method comparison',
-              'Trained on 2019 onward · error measured in $ — not just a vibe check. The stock-flow '
-              'model is validated on 3 rolling 12-month walk-forward windows; the others on one fixed '
-              '12-month holdout, so its MAPE is not directly comparable, just directionally so.',
+              'Trained on 2019 onward · error measured in $, not just a vibe check. The stock-flow '
+              'model is validated on 3 rolling 12-month walk-forward windows, while the others use one '
+              'fixed 12-month holdout, so its MAPE is not directly comparable, just directionally so.',
               tag=f'{len(comp_rows)} methods', tag_color='blue'):
         st.dataframe(
             pd.DataFrame(comp_rows), hide_index=True, width='stretch',
@@ -1026,7 +1026,7 @@ elif page == 'Income Forecast':
         except ValueError as exc:
             st.warning(str(exc))
             forecast_df, mape, slope, _ = cached_linear_forecast(monthly, n_train=24, n_forecast=horizon)
-            model_desc = 'Linear trend (fallback — not enough history for the ML model)'
+            model_desc = 'Linear trend (fallback, not enough history for the ML model)'
             holdback_label = '12-month holdout'
             use_ml = False
         n_train = min(36, len(monthly))
@@ -1041,15 +1041,15 @@ elif page == 'Income Forecast':
     elif model_choice == 'Stock-flow model':
         with fc3:
             st.caption('Forecasts recruits (SARIMA), lapse rate (cohort survival), and gift size (trend) '
-                       'separately, then derives income through the accounting identity — never forecasts '
-                       'income directly. Statistical range is months 1–18; months 19–36 are shown as named '
+                       'separately, then derives income through the accounting identity, never forecasts '
+                       'income directly. Statistical range is months 1–18. Months 19–36 are shown as named '
                        'scenarios further down this page, not a point forecast.')
         n_train = min(36, len(monthly))
         holdback_label = '3-window walk-forward avg'
         if sf_zone12_state is None:
             st.warning(st.session_state.sf_error or 'The stock-flow model is not available for this dataset.')
             forecast_df, mape, slope, _ = cached_linear_forecast(monthly, n_train=24, n_forecast=horizon)
-            model_desc = 'Linear trend (fallback — stock-flow model unavailable)'
+            model_desc = 'Linear trend (fallback, stock-flow model unavailable)'
         else:
             base_df = sf_zone12_state[['calendar_month', 'predicted_income', 'band_low', 'band_high']].copy()
             if horizon > len(base_df) and sf_zone3_state and 'Base' in sf_zone3_state:
@@ -1059,7 +1059,7 @@ elif page == 'Income Forecast':
                 extra['band_high'] = extra['predicted_income'] * 1.20
                 base_df = pd.concat([base_df, extra], ignore_index=True)
                 st.caption(f'Months 19–{horizon} above use the Base scenario\'s central assumptions to fill '
-                           f'this chart — see the scenario comparison below for the full Conservative/Optimistic range.')
+                           f'this chart. See the scenario comparison below for the full Conservative/Optimistic range.')
             forecast_df = base_df.head(horizon)
             mape = st.session_state.mape_stockflow
             slope = float(np.polyfit(forecast_df['calendar_month'], forecast_df['predicted_income'], 1)[0])
@@ -1194,10 +1194,10 @@ elif page == 'Income Forecast':
             yaxis=dict(tickformat='$,.0f', title='Monthly income ($)'),
             xaxis=dict(title='Month number'),
         )
-        with card('Zone 3 — strategic scenarios (months 19–36)',
+        with card('Zone 3: strategic scenarios (months 19–36)',
                   'Not a statistical point forecast: confidence beyond 18 months is too low for that. '
                   'Three named scenarios, each built by scaling the same fitted recruitment, retention, '
-                  'and gift models — the organisation should own which of these it plans around.',
+                  'and gift models. The organisation should own which of these it plans around.',
                   tag='Named scenarios', tag_color='orange'):
             chart(zone3_fig, 320)
 
@@ -1284,10 +1284,10 @@ elif page == 'Retention Analysis':
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == 'Donor Lifetime Value':
     page_header('Donor value', 'Donor lifetime value',
-                'Pareto/NBD predicts how many more months each existing donor will keep giving; '
-                'Gamma-Gamma predicts their expected donation size — a per-donor $ forecast, not an '
+                'Pareto/NBD predicts how many more months each existing donor will keep giving. '
+                'Gamma-Gamma predicts their expected donation size, a per-donor $ forecast, not an '
                 'aggregate average. Scoped to today\'s donor base only (assumes zero future '
-                'recruitment) — see Income forecast for total org income including recruitment.',
+                'recruitment). See Income forecast for total org income including recruitment.',
                 meta=page_meta)
 
     if not st.session_state.pipeline_run:
@@ -1328,7 +1328,7 @@ elif page == 'Donor Lifetime Value':
                     Donor lifetime value model unavailable
                 </div>
                 <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
-                    {st.session_state.ltv_error or 'Run a fresh pipeline in this session to compute this model — '
+                    {st.session_state.ltv_error or 'Run a fresh pipeline in this session to compute this model, '
                      'it isn\'t stored with saved runs from history.'}
                 </div>
             </div>
@@ -1622,7 +1622,7 @@ elif page == 'Run History':
                 </div>
                 <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
                     No database connection is configured, so past runs aren't saved. Every
-                    pipeline run still works — it just won't be reloadable later.
+                    pipeline run still works, it just won't be reloadable later.
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -1638,7 +1638,7 @@ elif page == 'Run History':
                     No runs saved yet
                 </div>
                 <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
-                    Run the pipeline from the Data Pipeline page — it'll be saved here
+                    Run the pipeline from the Data Pipeline page. It'll be saved here
                     automatically once it finishes.
                 </div>
             </div>
@@ -1766,7 +1766,7 @@ elif page == 'Run History':
                         st.session_state.page = 'Overview'
                         st.rerun()
                     else:
-                        st.error('Could not load that run — it may have been deleted, or the '
+                        st.error('Could not load that run. It may have been deleted, or the '
                                   'database is unreachable.')
                 if load_disabled:
                     st.caption('This is the run currently shown across the dashboards.')

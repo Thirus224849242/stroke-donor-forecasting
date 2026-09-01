@@ -152,6 +152,19 @@ def inject_global_css():
     own explicit override too. */
     [data-testid="stHeader"] {{ background: transparent; pointer-events: none !important; }}
     [data-testid="stToolbar"] {{ pointer-events: none !important; }}
+    /* One genuine exception: the "expand sidebar" control that appears in
+    the main content area once the sidebar's been collapsed also lives
+    inside stToolbar -- confirmed live a real mouse click on it was
+    silently swallowed by the blanket pointer-events:none above (only a
+    programmatic .click() got through, since that bypasses pointer-events
+    entirely), which would have made a collapsed sidebar impossible to
+    ever reopen. Icon colour is a fixed navy from config.toml's static
+    (non-dynamic) theme, same class of issue as every other native-widget
+    dark-mode fix elsewhere in this file -- confirmed live it was near
+    invisible against a dark main content area, so it needs the dynamic
+    {{TEXT}} colour here too. */
+    [data-testid="stExpandSidebarButton"] {{ pointer-events: auto !important; }}
+    [data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"] {{ color: {TEXT} !important; }}
 
     /* ── Loading overlay (page navigation only) ── */
     /* Streamlit's own indicator during a script run is a tiny top-right
@@ -282,14 +295,21 @@ def inject_global_css():
     [data-testid="stMetricLabel"] [data-testid^="stIcon"] {{ display: none !important; }}
 
     /* ── Sidebar ── */
-    /* Streamlit's native sidebar header (the collapse-arrow row above the
-    real content) -- confirmed via its actual computed style
-    (st-emotion-cache-10p9htt: height:3.75rem, margin-bottom:-4rem) that
-    it still reserves/overlaps space near the top of the sidebar. The
-    reference app has no collapse control at all, so this is dropped
-    entirely -- trade-off: the sidebar can no longer be collapsed via
-    that button. */
-    [data-testid="stSidebarHeader"] {{ display: none !important; }}
+    /* Streamlit's native sidebar header -- the collapse-arrow row above
+    the real content -- used to be hidden entirely (display:none) on the
+    assumption it reserved/overlapped space awkwardly. Re-tested live on
+    the current Streamlit version per request ("make the sidebar
+    collapsible") and that's no longer true: its computed layout is now a
+    clean height:52.5px + margin-bottom:14px, with zero overlap into
+    stSidebarUserContent below -- collapsing and re-expanding both work
+    correctly out of the box, so this is left to render normally rather
+    than rebuilding a custom collapse control. The arrow itself already
+    reads fine unstyled (a fixed white from config.toml's [theme.sidebar]
+    textColor, which matches this sidebar's own fixed-navy design anyway
+    -- see the "expand sidebar" fix further up this file for the one
+    genuine follow-on issue this surfaced: that control's counterpart,
+    shown once collapsed, needed its own pointer-events and dark-mode
+    colour fix). */
     /* Streamlit's own default here is padding-bottom: 6rem (96px) --
     confirmed via its actual computed style -- which was never actually
     zeroed before (only padding-top was), leaving a large reserved gap
@@ -684,7 +704,7 @@ def render_sidebar():
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                      stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"/>
                 <path d="M12 7v5l3 3"/></svg>
-                Navigation locked — pipeline running
+                Navigation locked, pipeline running
             </div>
             """, unsafe_allow_html=True)
 
