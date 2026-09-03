@@ -51,8 +51,8 @@ import streamlit as st
 from auth import handle_google_redirect, init_session_state, render_login
 from branding import TITLE_LOGO_PATH
 from db import (
-    db_configured, delete_dashboard_run, list_dashboard_runs,
-    load_dashboard_run, save_dashboard_run,
+    db_configured, decide_access_request, delete_dashboard_run, list_dashboard_runs,
+    list_pending_requests, load_dashboard_run, mark_runs_seen, save_dashboard_run,
 )
 from pipeline.build_master import build_master
 from pipeline.forecast import (
@@ -68,7 +68,8 @@ from pipeline.stock_flow_forecast import build_production_forecast
 from ui import (
     AMBER, BLUE, COLOURS, GREEN, LINE, MIST, PURPLE, RED, TEAL, TEAL2, TEXT,
     card, chart, empty_state, inject_global_css, kpi, new_execution_log,
-    overall_progress, page_header, render_sidebar, stage_row, upload_slot,
+    overall_progress, page_header, render_cached_run_banner, render_sidebar,
+    stage_row, upload_slot,
 )
 
 
@@ -475,12 +476,25 @@ page = st.session_state.page
 # block below) reads these two straight from session_state to render the
 # "Export CSV" button it now carries -- see its docstring in ui.py for
 # why that's a session_state read rather than a param threaded through
-# every one of its eight call sites.
-_export_csv = build_page_export_csv(page)
+# every one of its eight call sites. Administrator-only: these tables can
+# include raw per-donor detail (e.g. the Donor Lifetime Value page's
+# export), not just aggregates, same reasoning as the LTV page's own
+# "download all donor predictions" button and the Data Pipeline/delete-run
+# gates. Gated here, once, rather than in page_header() itself, so this
+# stays the one place that decides who gets it.
+_is_admin = (st.session_state.user or {}).get('role') == 'Administrator'
+_export_csv = build_page_export_csv(page) if _is_admin else None
 st.session_state.page_export_csv = _export_csv
 st.session_state.page_export_filename = (
     f"sf_{page.lower().replace(' ', '_')}_export.csv" if _export_csv else None
 )
+
+# Read BEFORE inject_global_css() -- it consumes and clears this same
+# one-shot nav_loading flag itself (for the nav-only loading overlay),
+# so by the time render_cached_run_banner() below would try to read it,
+# inject_global_css() has already reset it to False. Captured here and
+# handed down as a plain argument instead.
+_nav_just_happened = bool(st.session_state.get('nav_loading'))
 
 inject_global_css()
 render_sidebar()
@@ -488,11 +502,7 @@ render_sidebar()
 if st.session_state.data_source == 'cached':
     loaded_str = (pd.to_datetime(st.session_state.data_loaded_at).strftime('%d %b %Y, %H:%M')
                   if st.session_state.data_loaded_at else 'a previous run')
-    st.info(
-        f'Showing the run from **{loaded_str}**, loaded instantly from history, no pipeline run needed. '
-        f'Go to **Run History** to pick a different run, or **Data Pipeline** to run fresh data.',
-        icon=':material/bolt:',
-    )
+    render_cached_run_banner(loaded_str, nav_triggered=_nav_just_happened)
 
 # Rendered globally (not just on the Data Pipeline page) since a completed
 # run now redirects straight to Overview -- the success message needs to
@@ -515,6 +525,29 @@ if page == 'Data Pipeline':
                 'Upload all four CSV files below. The pipeline runs automatically once all '
                 'four are received and validated.',
                 meta=f'SESSION {datetime.now().strftime("%d %b %Y").upper()}')
+
+    # Administrator-only -- running the pipeline mutates the shared
+    # dashboard state every viewer sees next, so this is gated the same
+    # way delete-run and Export CSV are. The sidebar already hides this
+    # page's nav entry for non-admins (see render_sidebar()); this is the
+    # defense-in-depth backstop in case session_state.page ever ends up
+    # 'Data Pipeline' some other way. page_header() still has to render
+    # first, same reason as every other page's empty_state() guard -- see
+    # its own docstring.
+    if (st.session_state.user or {}).get('role') != 'Administrator':
+        with card():
+            st.markdown(f"""
+            <div style="text-align:center;padding:28px;">
+                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                    Administrators only
+                </div>
+                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                    Running the pipeline updates the shared dashboard data everyone sees, so it's
+                    restricted to Administrators. Contact your admin if you need a fresh run.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        st.stop()
 
     if st.session_state.data_source == 'cached' and db_configured():
         st.caption(':material/bolt: Dashboards are currently showing a saved run, loaded instantly from '
@@ -772,7 +805,14 @@ elif page == 'Overview':
         f'{st.session_state.campaign_type_count} campaign types · '
         f'{st.session_state.supplier_count} suppliers'
     ) if st.session_state.pipeline_run else ''
-    page_header('Dashboard', 'Overview', overview_sub, meta=page_meta)
+    page_header('Dashboard', 'Overview', overview_sub, meta=page_meta, info=(
+        'The 12-month forecast KPI and the chart below are both a BLEND of every available '
+        'total-income method (ML, linear trend, stock-flow) -- the dashed line is the average '
+        'across methods, and the shaded band is how far those methods disagree, not a statistical '
+        'confidence interval. Donor Lifetime Value answers a different question (what today\'s '
+        'existing donors are worth, assuming no further recruitment) and is deliberately excluded '
+        'from this blend -- see that page for the LTV view.'
+    ))
 
     if not st.session_state.pipeline_run:
         empty_state()
@@ -867,7 +907,13 @@ elif page == 'Overview':
     with card('Monthly income: actual vs blended forecast',
               f'Last 24 months actual · average of {", ".join(methods.keys())} · '
               f'shaded band shows where the methods disagree',
-              tag=f'{len(methods)} methods blended', tag_color='green'):
+              tag=f'{len(methods)} methods blended', tag_color='green', info=(
+                  'Solid line (months to the left of the dotted vertical line) is real historical '
+                  'income. Dashed line (to the right) is the forecast: the average across every '
+                  'available method. The shaded teal band is NOT a confidence interval -- it is the '
+                  'spread between the methods\' own predictions, so a wide band means the methods '
+                  'disagree more about that month, not that any one of them is less certain.'
+              )):
         chart(fig, 280)
 
     col1, col2, col3 = st.columns([1, 1, 1])
@@ -880,7 +926,11 @@ elif page == 'Overview':
         fig2.update_layout(showlegend=True,
                             legend=dict(orientation='v', x=1, y=0.5, font=dict(size=9)),
                             margin=dict(l=0, r=0, t=0, b=0))
-        with card('Income by supplier'):
+        with card('Income by supplier', info=(
+            'Each slice is one supplier\'s share of total historical income, not a forecast. '
+            'Hover a slice for its exact dollar total; see Supplier Insights for retention and '
+            'lifetime-value comparisons, not just income share.'
+        )):
             chart(fig2, 240)
 
     with col2:
@@ -892,7 +942,11 @@ elif page == 'Overview':
         fig3.update_layout(showlegend=True,
                             legend=dict(orientation='v', x=1, y=0.5, font=dict(size=9)),
                             margin=dict(l=0, r=0, t=0, b=0))
-        with card('Income by campaign type'):
+        with card('Income by campaign type', info=(
+            'Each slice is one campaign type\'s share of total historical income, not a forecast. '
+            'See Campaign ROI for cost-per-acquisition and retention by campaign type, not just '
+            'income share.'
+        )):
             chart(fig3, 240)
 
     with col3:
@@ -909,7 +963,11 @@ elif page == 'Overview':
                 f'{mape:.1f}%',
             ],
         })
-        with card('Dataset summary'):
+        with card('Dataset summary', info=(
+            'Snapshot of the currently loaded dataset -- raw payment rows, unique signups/donors, '
+            'and the ML forecast\'s own validation MAPE. Not a forecast itself, just what this run '
+            'was built from.'
+        )):
             st.dataframe(summary, hide_index=True, width='stretch', height=282)
 
     if db_configured():
@@ -918,7 +976,11 @@ elif page == 'Overview':
             _recent_runs = _recent_runs.copy()
             _recent_runs['run_at'] = pd.to_datetime(_recent_runs['run_at'])
             with card('Latest pipeline runs', 'Most recent completed runs, see Run History for the full list',
-                      tag='Completed', tag_color='green'):
+                      tag='Completed', tag_color='green', info=(
+                          'Each row is one completed pipeline run, most recent first. Click Run History '
+                          'in the sidebar to reload any of these (or an older one) and view every '
+                          'dashboard exactly as it looked at that point, without re-uploading data.'
+                      )):
                 st.dataframe(
                     _recent_runs[['run_id', 'run_at', 'run_by', 'donor_count', 'total_income']].rename(columns={
                         'run_id': 'Run ID', 'run_at': 'Completed', 'run_by': 'Run by',
@@ -941,7 +1003,16 @@ elif page == 'Income Forecast':
                 'Three independent methods, validated the same way, forecasting the same thing: '
                 'a top-down trend model, a machine-learning model, and a stock-flow model that '
                 'forecasts recruitment, retention, and gift size separately.',
-                meta=page_meta)
+                meta=page_meta, info=(
+                    'These three methods are shown for COMPARISON, not blended into one number here '
+                    '(see Overview for the blended view). Linear trend is a simple baseline. ML '
+                    '(gradient boosting) predicts each month directly rather than chaining one-step '
+                    'predictions that compound their own error. Stock-flow never forecasts income '
+                    'directly -- it forecasts recruits, lapse rate and average gift separately, then '
+                    'derives income from those via Income = Active donors x Average gift. The '
+                    'stock-flow MAPE comes from 3 rolling walk-forward windows, the other two use one '
+                    'fixed 12-month holdout, so it is not directly comparable in absolute terms.'
+                ))
 
     if not st.session_state.pipeline_run:
         empty_state()
@@ -989,7 +1060,13 @@ elif page == 'Income Forecast':
               'Trained on 2019 onward · error measured in $, not just a vibe check. The stock-flow '
               'model is validated on 3 rolling 12-month walk-forward windows, while the others use one '
               'fixed 12-month holdout, so its MAPE is not directly comparable, just directionally so.',
-              tag=f'{len(comp_rows)} methods', tag_color='blue'):
+              tag=f'{len(comp_rows)} methods', tag_color='blue', info=(
+                  'One row per method, each trained and validated independently -- not a leaderboard '
+                  'to just pick the lowest MAPE from. Compare the 12/24-month totals across rows to '
+                  'see how much the methods actually agree on, and remember the stock-flow row\'s '
+                  'MAPE is measured differently (3 rolling windows vs one fixed holdout for the '
+                  'others), so it is only directionally comparable.'
+              )):
         st.dataframe(
             pd.DataFrame(comp_rows), hide_index=True, width='stretch',
             column_config={
@@ -1119,7 +1196,13 @@ elif page == 'Income Forecast':
     )
 
     with card(f'{horizon}-month income forecast', model_desc,
-              tag=f'MAPE {mape:.1f}%', tag_color='green'):
+              tag=f'MAPE {mape:.1f}%', tag_color='green', info=(
+                  'Solid line is real historical income (the training window shown depends on the '
+                  'model selected above). Dashed line, right of the "Forecast start" marker, is this '
+                  'ONE selected method\'s own prediction -- not blended with the other methods (see '
+                  'Overview for that). The shaded band widens further out because near-term months '
+                  'are always more certain than distant ones.'
+              )):
         chart(fig, 340)
 
     if use_ml and importances:
@@ -1148,14 +1231,23 @@ elif page == 'Income Forecast':
         )
         with card('What is driving this forecast',
                   'Relative importance of each engineered feature in the gradient-boosting model',
-                  tag='Model transparency', tag_color='blue'):
+                  tag='Model transparency', tag_color='blue', info=(
+                      'Longer bars mean the model relied on that input more when making its '
+                      'predictions -- e.g. "3-month rolling average" being longest means recent '
+                      'income trend drives most of the forecast, not seasonality or older history. '
+                      'This shows relative weighting inside the model, not proof any one factor '
+                      'causes income to move.'
+                  )):
             chart(fig_imp, 240)
 
     col1, col2 = st.columns([3, 1])
     with col1:
         table = fore[['calendar_month', 'predicted_income']].rename(
             columns={'calendar_month': 'Month', 'predicted_income': 'Predicted income'})
-        with card('Forecast table'):
+        with card('Forecast table', info=(
+            'The exact predicted income for every month in the chart above, month 1 being the '
+            'first month after "Forecast start" -- use this for the precise numbers behind the line.'
+        )):
             st.dataframe(
                 table, hide_index=True, width='stretch', height=300,
                 column_config={
@@ -1174,7 +1266,11 @@ elif page == 'Income Forecast':
                 f'${fore.iloc[-1]["predicted_income"]:,.0f}',
             ],
         })
-        with card('Summary'):
+        with card('Summary', info=(
+            'Quick totals for this forecast: the 12- and 24-month sums, plus the very first and '
+            'last month\'s predicted income, so you can see the trajectory without reading the '
+            'whole table.'
+        )):
             st.dataframe(summary, hide_index=True, width='stretch', height=180)
             st.download_button('Download CSV', data=fore.to_csv(index=False),
                                 file_name='sf_forecast.csv', mime='text/csv',
@@ -1198,7 +1294,13 @@ elif page == 'Income Forecast':
                   'Not a statistical point forecast: confidence beyond 18 months is too low for that. '
                   'Three named scenarios, each built by scaling the same fitted recruitment, retention, '
                   'and gift models. The organisation should own which of these it plans around.',
-                  tag='Named scenarios', tag_color='orange'):
+                  tag='Named scenarios', tag_color='orange', info=(
+                      'Three separate lines, each a distinct assumption set (Conservative/Base/'
+                      'Optimistic), not three individually-fitted models and not a range around one '
+                      'central prediction. Pick which scenario the organisation is planning around; '
+                      'the table below each line shows the actual assumptions (recruitment, '
+                      'retention, gift growth) behind it.'
+                  )):
             chart(zone3_fig, 320)
 
             assum_rows = []
@@ -1219,7 +1321,14 @@ elif page == 'Income Forecast':
 elif page == 'Retention Analysis':
     page_header('Retention analysis', 'Donor retention curves',
                 '% of donors still active at each month since recruitment · observed from historical data.',
-                meta=page_meta)
+                meta=page_meta, info=(
+                    'Each line is the % of donors from one segment still actively giving at each '
+                    'month since they were recruited -- observed directly from historical payment '
+                    'data, not modeled or forecast. A line that drops faster means that segment '
+                    'loses donors sooner after recruitment. Use the controls above the chart to '
+                    'segment by supplier, campaign type, or recruitment year, and to change how '
+                    'many months of tenure are shown.'
+                ))
 
     if not st.session_state.pipeline_run:
         empty_state()
@@ -1260,7 +1369,13 @@ elif page == 'Retention Analysis':
         )
         with card(f'Retention by {segment.replace("_", " ").title()}',
                   '% of donors still active at each tenure month',
-                  tag='Observed', tag_color='blue'):
+                  tag='Observed', tag_color='blue', info=(
+                      'Each colored line is one group in the segment selected above -- e.g. one '
+                      'supplier, or one campaign type. The y-axis is % of that group\'s donors still '
+                      'giving at each month since recruitment; a line that drops faster loses donors '
+                      'sooner. The dotted horizontal line marks 50% retention as a reference point, '
+                      'not a target.'
+                  )):
             chart(fig, 360)
 
         milestones = [3, 6, 12, 18, 24]
@@ -1275,7 +1390,11 @@ elif page == 'Retention Analysis':
         milestone_df = pd.DataFrame(rows)
 
         col_cfg = {f'Month {m}': st.column_config.NumberColumn(format='%.1f%%') for m in milestones}
-        with card('Retention at key milestones'):
+        with card('Retention at key milestones', info=(
+            'The same retention curve above, read off at fixed tenure milestones (3/6/12/18/24 '
+            'months) for exact numbers instead of eyeballing the chart. A blank cell means that '
+            'group has no donors who have reached that many months of tenure yet.'
+        )):
             st.dataframe(milestone_df, hide_index=True, width='stretch', column_config=col_cfg)
 
 
@@ -1288,7 +1407,16 @@ elif page == 'Donor Lifetime Value':
                 'Gamma-Gamma predicts their expected donation size, a per-donor $ forecast, not an '
                 'aggregate average. Scoped to today\'s donor base only (assumes zero future '
                 'recruitment). See Income forecast for total org income including recruitment.',
-                meta=page_meta)
+                meta=page_meta, info=(
+                    'This answers a DIFFERENT question from Income Forecast: not "what will the '
+                    'organisation earn," but "what are today\'s existing donors worth going forward," '
+                    'assuming no further recruitment. The Predicted 12/24-month value KPIs are the '
+                    'individual per-donor predictions summed across the whole donor base. The bar '
+                    'chart ranks the highest-value individual donors; the histogram shows how '
+                    'predicted value is distributed across everyone. Fit fresh each live session, not '
+                    'saved with historical runs -- reload a past run from Run History and this page '
+                    'won\'t have a value to show.'
+                ))
 
     if not st.session_state.pipeline_run:
         empty_state()
@@ -1360,7 +1488,12 @@ elif page == 'Donor Lifetime Value':
                 yaxis=dict(title='', autorange='reversed'), showlegend=False,
             )
             with card('Top 15 donors by predicted value',
-                      'Highest predicted lifetime value over the next 24 months', tag='Ranked'):
+                      'Highest predicted lifetime value over the next 24 months', tag='Ranked', info=(
+                          'Each bar is one individual donor (by contact ID), ranked by their own '
+                          'predicted 24-month value -- not a segment or supplier average. Use this to '
+                          'identify specific high-value donors worth prioritising, e.g. for '
+                          'stewardship outreach.'
+                      )):
                 chart(fig, 380)
 
         with col2:
@@ -1386,7 +1519,13 @@ elif page == 'Donor Lifetime Value':
                 yaxis=dict(title='Number of donors'), showlegend=False,
             )
             with card('Distribution of predicted value',
-                      'How predicted 24-month value is spread across all donors'):
+                      'How predicted 24-month value is spread across all donors', info=(
+                          'A histogram, not a ranking: each bar is a $ range, and its height is how '
+                          'many donors fall in that range. A tall bar near $0 with a long low tail to '
+                          'the right means most donors are predicted to give modestly, with a small '
+                          'number of high-value outliers -- the same donors shown individually in '
+                          '"Top 15 donors" to the left.'
+                      )):
                 chart(fig2, 380)
 
         col3, col4 = st.columns([3, 2])
@@ -1398,7 +1537,12 @@ elif page == 'Donor Lifetime Value':
                 'predicted_ltv_12m': 'Predicted 12m value', 'predicted_ltv_24m': 'Predicted 24m value',
             })[['Signup ID', 'Contact', 'Repeat gifts', 'Avg gift ($)', 'Expected next gift ($)',
                 'Predicted 12m value', 'Predicted 24m value']]
-            with card('Top 50 donors', 'Ranked by predicted 24-month value', tag='Actionable list', tag_color='blue'):
+            with card('Top 50 donors', 'Ranked by predicted 24-month value', tag='Actionable list', tag_color='blue', info=(
+                'One row per donor. "Repeat gifts" is how many donations Pareto/NBD has actually '
+                'observed from them (more repeat gifts generally means a more confident prediction). '
+                '"Expected next gift" and the 12/24-month value columns are per-donor forecasts, not '
+                'historical totals.'
+            )):
                 st.dataframe(
                     table, hide_index=True, width='stretch', height=340,
                     column_config={
@@ -1408,19 +1552,29 @@ elif page == 'Donor Lifetime Value':
                         'Predicted 24m value': st.column_config.NumberColumn(format='dollar'),
                     },
                 )
-                st.download_button(
-                    'Download all donor predictions (CSV)',
-                    data=ltv_results.to_csv(index=False),
-                    file_name='sf_donor_ltv_predictions.csv', mime='text/csv',
-                    icon=':material/download:', width='stretch',
-                )
+                # Administrator-only -- this is the full per-donor table
+                # (contact_id-level), not an aggregate, same reasoning as
+                # the page-wide Export CSV button (see page_header()).
+                if (st.session_state.user or {}).get('role') == 'Administrator':
+                    st.download_button(
+                        'Download all donor predictions (CSV)',
+                        data=ltv_results.to_csv(index=False),
+                        file_name='sf_donor_ltv_predictions.csv', mime='text/csv',
+                        icon=':material/download:', width='stretch',
+                    )
 
         with col4:
             tune_table = ltv_tuning.rename(columns={
                 'penalizer': 'Penalizer', 'mape': 'Holdout MAPE (%)',
                 'mae': 'Holdout MAE', 'aggregate_error': 'Aggregate error (%)',
             })
-            with card('Model validation', 'Penalizer grid search on a 12-month holdout, trained from 2019', tag='Tuning', tag_color='orange'):
+            with card('Model validation', 'Penalizer grid search on a 12-month holdout, trained from 2019', tag='Tuning', tag_color='orange', info=(
+                'Each row tried a different penalizer (a regularization setting) for Pareto/NBD; the '
+                'one used elsewhere on this page is whichever row had the lowest holdout MAPE, shown '
+                'in the "Holdout MAPE" KPI above. The caption below the table compares the '
+                'Gamma-Gamma model\'s predicted average gift to what was actually observed -- the '
+                'closer those two numbers, the better calibrated the gift-size prediction is.'
+            )):
                 st.dataframe(
                     tune_table, hide_index=True, width='stretch', height=200,
                     column_config={
@@ -1441,7 +1595,13 @@ elif page == 'Donor Lifetime Value':
 elif page == 'Supplier Insights':
     page_header('Supplier insights', 'Which recruiting firms perform best',
                 'Retention, lifetime value and income contribution by supplier.',
-                meta=page_meta)
+                meta=page_meta, info=(
+                    'Compares suppliers by more than raw signup volume: retention (do their donors '
+                    'stick around), average gift size, and total income contribution. A supplier '
+                    'with fewer signups but stronger retention or gift size can outperform one that '
+                    'recruits more donors who lapse quickly. Use the monthly trend chart to select '
+                    'suppliers and compare their income trajectory over time.'
+                ))
 
     if not st.session_state.pipeline_run:
         empty_state()
@@ -1468,7 +1628,12 @@ elif page == 'Supplier Insights':
             textposition='outside', textfont=dict(size=11, color=TEXT),
         ))
         fig.update_layout(yaxis=dict(tickformat='$,.0f', title='Total income ($)'), showlegend=False)
-        with card('Total income by supplier'):
+        with card('Total income by supplier', info=(
+            'Total historical income attributed to donors each supplier recruited, not a per-donor '
+            'average -- a supplier with more signups will tend to rank higher here even if its '
+            'individual donors give less. Compare against "Active donors by supplier" and the '
+            'summary table\'s "Avg gift" column for the fuller picture.'
+        )):
             chart(fig, 280)
 
     with col2:
@@ -1479,14 +1644,23 @@ elif page == 'Supplier Insights':
             textposition='outside', textfont=dict(size=11, color=TEXT),
         ))
         fig2.update_layout(yaxis=dict(title='Active donors'), showlegend=False)
-        with card('Active donors by supplier'):
+        with card('Active donors by supplier', info=(
+            'How many currently-active donors each supplier has recruited in total, not how many '
+            'they recruited this month. A supplier can look strong here purely on volume even if a '
+            'large share of those donors give small amounts -- see Retention Analysis to check how '
+            'well each supplier\'s donors are retained over time.'
+        )):
             chart(fig2, 280)
 
     sup_monthly = st.session_state.supplier_monthly
     all_sups = [s for s in sup['supplier'].dropna().unique() if s != 'Unknown']
 
     with card('Monthly income trend by supplier',
-              'Select suppliers to compare their monthly income trajectory'):
+              'Select suppliers to compare their monthly income trajectory', info=(
+                  'Real historical monthly income, not a forecast -- one line per supplier selected '
+                  'in the box below. Use this to spot which suppliers are trending up or down over '
+                  'time, not just their all-time totals shown in the bar charts above.'
+              )):
         selected = st.multiselect('Compare suppliers', options=all_sups, default=all_sups[:3],
                                    label_visibility='collapsed')
         if selected:
@@ -1508,7 +1682,11 @@ elif page == 'Supplier Insights':
         'supplier': 'Supplier', 'total_income': 'Total income',
         'active_donors': 'Active donors', 'avg_gift': 'Avg gift',
     })
-    with card('Supplier summary'):
+    with card('Supplier summary', info=(
+        'One row per supplier with the exact numbers behind the charts above. "Avg gift" is per '
+        'payment, not per donor -- a useful check against "Total income" and "Active donors" for '
+        'whether a supplier\'s strength is volume, gift size, or both.'
+    )):
         st.dataframe(
             sup_display, hide_index=True, width='stretch',
             column_config={
@@ -1525,7 +1703,14 @@ elif page == 'Supplier Insights':
 elif page == 'Campaign ROI':
     page_header('Campaign insights', 'Which campaigns perform best',
                 'Retention, income and return on acquisition cost by campaign type.',
-                meta=page_meta)
+                meta=page_meta, info=(
+                    'Compares campaign types by income AND cost per acquisition (CPA), not just which '
+                    'recruited the most donors. A campaign with a higher CPA can still be worth it if '
+                    'it recruits donors who give more or stay longer -- check this page alongside '
+                    'Retention Analysis and Supplier Insights for that fuller picture. "Free Sales" '
+                    'campaigns (CPA of $0) are shown separately since a $/donor cost comparison '
+                    'doesn\'t apply to them.'
+                ))
 
     if not st.session_state.pipeline_run:
         empty_state()
@@ -1557,7 +1742,12 @@ elif page == 'Campaign ROI':
             textposition='outside', textfont=dict(size=11, color=TEXT),
         ))
         fig.update_layout(yaxis=dict(tickformat='$,.0f', title='Total income ($)'), showlegend=False)
-        with card('Total income by campaign type'):
+        with card('Total income by campaign type', info=(
+            'Total historical income from donors each campaign type recruited -- driven by both how '
+            'many donors it recruited and how much they give, not cost-efficiency. Check against '
+            '"Average cost per acquisition" to see whether a high-income campaign type was also '
+            'expensive to run.'
+        )):
             chart(fig, 280)
 
     with col2:
@@ -1569,7 +1759,11 @@ elif page == 'Campaign ROI':
                 textposition='outside', textfont=dict(size=11, color=TEXT),
             ))
             fig2.update_layout(yaxis=dict(tickformat='$,.0f', title='Avg CPA ($)'), showlegend=False)
-            with card('Average cost per acquisition', tag='CPA data', tag_color='orange'):
+            with card('Average cost per acquisition', tag='CPA data', tag_color='orange', info=(
+                'Average $ spent to recruit one donor, by campaign type -- "Free" bars are $0-cost '
+                'channels (e.g. organic Sales campaigns). A lower CPA is not automatically better: '
+                'weigh it against that same campaign type\'s income and retention, not on its own.'
+            )):
                 chart(fig2, 280)
         else:
             with card('Average cost per acquisition'):
@@ -1586,7 +1780,11 @@ elif page == 'Campaign ROI':
             line=dict(color=COLOURS[i % len(COLOURS)], width=2),
         ))
     fig3.update_layout(yaxis=dict(tickformat='$,.0f', title='Monthly income ($)'), xaxis_title='Month')
-    with card('Monthly income by campaign type'):
+    with card('Monthly income by campaign type', info=(
+        'Real historical monthly income, not a forecast -- one line per campaign type. Use this to '
+        'spot which campaign types are trending up or down, not just their all-time totals shown in '
+        'the bar chart above.'
+    )):
         chart(fig3, 260)
 
     roi_display = roi.sort_values('total_income', ascending=False).rename(columns={
@@ -1600,7 +1798,11 @@ elif page == 'Campaign ROI':
     }
     if has_cpa:
         col_cfg['Avg CPA'] = st.column_config.NumberColumn(format='dollar')
-    with card('Campaign summary'):
+    with card('Campaign summary', info=(
+        'One row per campaign type with the exact numbers behind the charts above -- income, active '
+        'donors, average gift, and average CPA side by side, for comparing cost against return '
+        'directly instead of switching between charts.'
+    )):
         st.dataframe(roi_display, hide_index=True, width='stretch', column_config=col_cfg)
 
 
@@ -1612,6 +1814,13 @@ elif page == 'Run History':
                 'Every completed pipeline run is saved automatically. Reload any past run '
                 'to explore its dashboards in full, without re-uploading data.',
                 meta=f'ACTIVE: {st.session_state.viewing_run_id or "NONE"}')
+    # Resets the sidebar's "new run" badge baseline to now -- see
+    # count_new_runs()/mark_runs_seen() in db.py. Called on every render of
+    # this page (cheap no-op UPDATE, and db.py already fails soft if
+    # unreachable), not just the first, so the badge can never re-appear
+    # for runs that were already visible the last time this page was open.
+    if (_u := st.session_state.user) and _u.get('email'):
+        mark_runs_seen(_u['email'])
 
     if not db_configured():
         with card():
@@ -1772,22 +1981,123 @@ elif page == 'Run History':
                     st.caption('This is the run currently shown across the dashboards.')
 
             with c2:
-                confirm_key = f'confirm_delete_{picked_id}'
-                if st.session_state.get(confirm_key):
-                    if st.button('Confirm delete', icon=':material/delete_forever:',
-                                  width='stretch'):
-                        delete_dashboard_run(picked_id)
-                        st.session_state.pop(confirm_key, None)
-                        if picked_id == viewing_id:
-                            st.session_state.pipeline_run = False
-                            st.session_state.viewing_run_id = None
-                            st.session_state.data_source = None
-                        st.rerun()
-                    if st.button('Cancel', width='stretch'):
-                        st.session_state.pop(confirm_key, None)
-                        st.rerun()
+                # Administrator-only -- permanent deletion, same reasoning
+                # as the Data Pipeline page-access gate above. Not a
+                # st.stop() here -- this sits inside a `with c2:` column
+                # context, and st.stop() halts the ENTIRE script, not
+                # just this column, which would silently truncate
+                # anything a later edit adds below this block. A plain
+                # if/else keeps the gate scoped to just this column.
+                if (st.session_state.user or {}).get('role') != 'Administrator':
+                    st.caption('Only Administrators can delete runs.')
                 else:
-                    if st.button('Delete this run', icon=':material/delete:', width='stretch'):
-                        st.session_state[confirm_key] = True
-                        st.rerun()
+                    confirm_key = f'confirm_delete_{picked_id}'
+                    if st.session_state.get(confirm_key):
+                        if st.button('Confirm delete', icon=':material/delete_forever:',
+                                      width='stretch'):
+                            delete_dashboard_run(picked_id)
+                            st.session_state.pop(confirm_key, None)
+                            if picked_id == viewing_id:
+                                st.session_state.pipeline_run = False
+                                st.session_state.viewing_run_id = None
+                                st.session_state.data_source = None
+                            st.rerun()
+                        if st.button('Cancel', width='stretch'):
+                            st.session_state.pop(confirm_key, None)
+                            st.rerun()
+                    else:
+                        if st.button('Delete this run', icon=':material/delete:', width='stretch'):
+                            st.session_state[confirm_key] = True
+                            st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACCESS REQUESTS
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == 'Access Requests':
+    page_header('Administration', 'Access requests',
+                'Review pending Google sign-in requests from allowed domains -- approve to '
+                'create an Analyst account, or deny.',
+                meta=page_meta)
+
+    # Administrator-only -- grants account access, same reasoning as the
+    # Data Pipeline page-access gate. The sidebar already hides this
+    # page's nav entry for non-admins (see render_sidebar()); this is
+    # the defense-in-depth backstop in case session_state.page ever ends
+    # up here some other way.
+    if (st.session_state.user or {}).get('role') != 'Administrator':
+        with card():
+            st.markdown(f"""
+            <div style="text-align:center;padding:28px;">
+                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                    Administrators only
+                </div>
+                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                    Approving or denying access requests is restricted to Administrators.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        st.stop()
+
+    if not db_configured():
+        with card():
+            st.markdown(f"""
+            <div style="text-align:center;padding:28px;">
+                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                    Access requests aren't available
+                </div>
+                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                    No database connection is configured, so there's no request queue to review.
+                    Anyone on an allowed Google domain can sign in directly until one is set up
+                    (see handle_google_redirect() in auth.py).
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        st.stop()
+
+    pending = list_pending_requests()
+
+    if pending.empty:
+        with card():
+            st.markdown(f"""
+            <div style="text-align:center;padding:28px;">
+                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                    No pending requests
+                </div>
+                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                    New Google sign-in requests from allowed domains will show up here.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        pending['requested_at'] = pd.to_datetime(pending['requested_at'])
+        with card(f'{len(pending)} pending', 'Oldest first'):
+            for i, row in pending.iterrows():
+                rc1, rc2, rc3 = st.columns([3, 2, 2], vertical_alignment='center')
+                with rc1:
+                    st.markdown(f"**{row['name'] or row['email']}**")
+                    st.caption(row['email'])
+                with rc2:
+                    st.caption(f"Requested {row['requested_at'].strftime('%d %b %Y, %H:%M')}")
+                with rc3:
+                    ac1, ac2 = st.columns(2)
+                    with ac1:
+                        if st.button('Approve', key=f"approve_{row['email']}", icon=':material/check:',
+                                     type='primary', width='stretch'):
+                            decide_access_request(
+                                row['email'], approve=True,
+                                decided_by=(st.session_state.user or {}).get('email', ''),
+                            )
+                            st.rerun()
+                    with ac2:
+                        if st.button('Deny', key=f"deny_{row['email']}", icon=':material/close:',
+                                     width='stretch'):
+                            decide_access_request(
+                                row['email'], approve=False,
+                                decided_by=(st.session_state.user or {}).get('email', ''),
+                            )
+                            st.rerun()
+                if i != pending.index[-1]:
+                    st.markdown(f'<div style="height:1px;background:{LINE};margin:10px 0;"></div>',
+                                unsafe_allow_html=True)
 
