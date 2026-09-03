@@ -26,13 +26,46 @@ upload flow. Same pattern as auth.py's google_auth_configured().
 """
 
 import gzip
+import hashlib
+import hmac
 import json
+import secrets
 import traceback
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
+
+# ── Local (email+password) account credentials ──────────────────────────────
+# Used only by auth.py's local-login form -- Google sign-in never touches
+# this. Previously two accounts (admin@/analyst@strokefoundation.org.au)
+# lived as plaintext passwords directly in auth.py's source (flagged in the
+# security review as the Critical finding). Moved here, into this table,
+# hashed -- same two accounts, same passwords, just no longer sitting in
+# plaintext in source control.
+PBKDF2_ITERATIONS = 260_000  # current OWASP-recommended floor for PBKDF2-SHA256
+
+
+def hash_password(password: str) -> str:
+    """Returns 'salt_hex$hash_hex' -- both parts fit in one TEXT column, and
+    the salt travels with its own hash rather than needing a second column."""
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, PBKDF2_ITERATIONS)
+    return f'{salt.hex()}${digest.hex()}'
+
+
+def verify_password(password: str, stored: str) -> bool:
+    """Recomputes the hash using the STORED salt and compares digests with
+    hmac.compare_digest (constant-time, avoids leaking timing info about how
+    much of the hash matched)."""
+    try:
+        salt_hex, digest_hex = stored.split('$', 1)
+    except (ValueError, AttributeError):
+        return False
+    candidate = hashlib.pbkdf2_hmac('sha256', password.encode(), bytes.fromhex(salt_hex), PBKDF2_ITERATIONS)
+    return hmac.compare_digest(candidate.hex(), digest_hex)
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS dashboard_runs (
@@ -81,7 +114,44 @@ CREATE TABLE IF NOT EXISTS users (
 -- who's simply never opened the page sees everything since they joined,
 -- not the app's entire run history.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_runs_at TIMESTAMP;
+
+-- Local (email+password) login accounts, alongside Google sign-in -- see
+-- hash_password()/verify_password() above and get_local_account() below.
+-- Seeded once, idempotently, by _seed_local_accounts() right after this
+-- schema runs (needs Python to compute each password's hash, which plain
+-- DDL can't do inline).
+CREATE TABLE IF NOT EXISTS local_accounts (
+    email         TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'Analyst',
+    password_hash TEXT NOT NULL,
+    created_at    TIMESTAMP NOT NULL DEFAULT now()
+);
 """
+
+# Seeded into local_accounts on first connect (see _seed_local_accounts()) --
+# the exact same two accounts, same passwords, that used to live as
+# plaintext in auth.py's USERS dict. Only ever read once, at seed time; the
+# real credential store from then on is the local_accounts table itself.
+_DEMO_ACCOUNTS = [
+    {'email': 'admin@strokefoundation.org.au', 'password': 'strokef2f2026',
+     'name': 'Admin User', 'role': 'Administrator'},
+    {'email': 'analyst@strokefoundation.org.au', 'password': 'strokef2f2026',
+     'name': 'Data Analyst', 'role': 'Analyst'},
+]
+
+
+def _seed_local_accounts(conn) -> None:
+    """Idempotent -- ON CONFLICT DO NOTHING means this is a no-op every run
+    after the first. Runs inside get_engine()'s own connection/transaction,
+    right after SCHEMA, so a brand-new database self-provisions the two demo
+    accounts with no manual step, same as every other table here."""
+    for acct in _DEMO_ACCOUNTS:
+        conn.execute(text("""
+            INSERT INTO local_accounts (email, name, role, password_hash)
+            VALUES (:email, :name, :role, :password_hash)
+            ON CONFLICT (email) DO NOTHING
+        """), {**acct, 'password_hash': hash_password(acct['password'])})
 
 
 def db_configured() -> bool:
@@ -108,6 +178,7 @@ def get_engine():
         engine = create_engine(st.secrets['database']['url'], pool_pre_ping=True)
         with engine.connect() as conn:
             conn.execute(text(SCHEMA))
+            _seed_local_accounts(conn)
             conn.commit()
         return engine
     except Exception as exc:
@@ -272,6 +343,29 @@ def delete_dashboard_run(run_id: str) -> bool:
 
 
 # ── Access control (Google sign-in request/approve queue) ──────────────────
+
+def get_local_account(email: str) -> dict | None:
+    """One local (email+password) account's row -- email/name/role/
+    password_hash -- or None if that email has no local account at all.
+    auth.py's render_login() calls this then checks the password against
+    password_hash with verify_password(); DB unreachable or no matching
+    row both just mean the login attempt fails, same as a wrong password
+    would (no separate "account doesn't exist" message, so this can't be
+    used to enumerate which emails have accounts)."""
+    engine = get_engine()
+    if engine is None:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT email, name, role, password_hash FROM local_accounts WHERE email = :email
+            """), {'email': email}).mappings().fetchone()
+        return dict(row) if row else None
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return None
+
 
 def get_user(email: str) -> dict | None:
     """One user's access record, or None if they've never requested (or
