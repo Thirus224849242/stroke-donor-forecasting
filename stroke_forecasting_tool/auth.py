@@ -1,6 +1,7 @@
 import streamlit as st
 
 from branding import logo_data_uri
+from db import db_configured, get_user, request_access, upsert_approved_user
 
 USERS = {
     'admin@strokefoundation.org.au': {
@@ -22,7 +23,7 @@ USERS = {
 # else on an allowed domain lands as Analyst. There's no user database
 # backing OAuth logins, so this allow-list is the only thing standing in
 # for one.
-ALLOWED_GOOGLE_DOMAINS = {'strokefoundation.org.au', 'deakin.edu.au'}
+ALLOWED_GOOGLE_DOMAINS = {'strokefoundation.org.au', 'deakin.edu.au', 'gmail.com'}
 GOOGLE_ADMIN_EMAILS = {'admin@strokefoundation.org.au', 'thirumalreddyenugu@gmail.com'}
 # Individual exceptions to the domain restriction -- for dev/demo access
 # from an account that isn't on either allowed domain (e.g. a personal
@@ -80,7 +81,19 @@ def handle_google_redirect():
     Streamlit's own OIDC cookie (st.user) is separate from our
     session_state; this is what bridges the two right after a user comes
     back from Google's redirect. Rejects anyone outside the allowed
-    domain immediately rather than letting them into the app."""
+    domain immediately, same as before.
+
+    For everyone else, being on an allowed domain is necessary but no
+    longer SUFFICIENT on its own for a non-admin: they also need an
+    'approved' row in the `users` DB table (db.py) -- requested via
+    render_request_access() below and granted by an Administrator on the
+    Access Requests page (app.py). Admins (GOOGLE_ADMIN_EMAILS) skip that
+    queue entirely -- they're the ones reviewing it, gating them behind
+    their own approval would be circular -- but still get upserted into
+    `users` via upsert_approved_user(), so that table stays a complete
+    record of everyone with access, not just the analysts who went
+    through the request flow.
+    """
     if not google_auth_configured():
         return
     if st.session_state.authenticated or not st.user.is_logged_in:
@@ -88,6 +101,7 @@ def handle_google_redirect():
 
     email = (st.user.email or '').strip().lower()
     domain = email.rsplit('@', 1)[-1] if '@' in email else ''
+    name = st.user.get('name') or (email.split('@')[0].replace('.', ' ').title() if email else 'User')
 
     allowed = domain in ALLOWED_GOOGLE_DOMAINS or email in GOOGLE_EXTRA_ALLOWED_EMAILS
     if not email or not allowed:
@@ -104,12 +118,43 @@ def handle_google_redirect():
             st.logout()
         st.stop()
 
+    if email in GOOGLE_ADMIN_EMAILS:
+        if db_configured():
+            upsert_approved_user(email, name, role='Administrator', decided_by=email)
+        st.session_state.authenticated = True
+        st.session_state.auth_method = 'google'
+        st.session_state.user = {'email': email, 'name': name, 'role': 'Administrator'}
+        return
+
+    # No DB configured means there's nowhere to persist a request queue --
+    # falls back to the original allow-list-only behaviour rather than
+    # lock everyone out just because persistence isn't set up. Same
+    # "fails soft" pattern every other DB-backed feature in this app
+    # follows (see db.py's own module docstring).
+    if not db_configured():
+        st.session_state.authenticated = True
+        st.session_state.auth_method = 'google'
+        st.session_state.user = {'email': email, 'name': name, 'role': 'Analyst'}
+        return
+
+    record = get_user(email)
+    if record is None:
+        render_request_access(email, name)
+        return
+    if record['status'] == 'pending':
+        render_pending_access(email)
+        return
+    if record['status'] == 'denied':
+        render_denied_access(email, name)
+        return
+
+    # approved
     st.session_state.authenticated = True
     st.session_state.auth_method = 'google'
     st.session_state.user = {
         'email': email,
-        'name': st.user.get('name') or email.split('@')[0].replace('.', ' ').title(),
-        'role': 'Administrator' if email in GOOGLE_ADMIN_EMAILS else 'Analyst',
+        'name': record.get('name') or name,
+        'role': record.get('role') or 'Analyst',
     }
 
 
@@ -135,8 +180,14 @@ def sign_out():
         st.rerun()
 
 
-def render_login():
-    """Full-screen sign-in page. Renders and stops the script."""
+def _render_auth_shell():
+    """Shared CSS + logo + subtitle for every full-screen auth state
+    (sign in, request access, pending, denied) -- factored out of what
+    used to be render_login()'s own opening so the request-access
+    screens below share its exact visual chrome without duplicating this
+    whole block for each one. `.st-key-login_card` styling is reused as-
+    is by every one of them too -- they're all just a differently-worded
+    card inside the same shell."""
     st.html("""
     <style>
     [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] { display: none !important; }
@@ -205,6 +256,19 @@ def render_login():
         """, unsafe_allow_html=True)
     st.markdown('<div class="sf-login-sub">DONOR FORECASTING PLATFORM</div>', unsafe_allow_html=True)
 
+
+def _render_auth_footer():
+    st.markdown(
+        '<div class="sf-login-footer">Stroke Foundation of Australia · '
+        'Face-to-Face Regular Giving Program</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_login():
+    """Full-screen sign-in page. Renders and stops the script."""
+    _render_auth_shell()
+
     with st.container(key='login_card'):
         st.markdown("**Sign in to your account**")
         st.caption('Enter your credentials to access the F2F forecasting dashboard.')
@@ -242,9 +306,67 @@ def render_login():
             else:
                 st.error('Incorrect email or password. Please try again.', icon=':material/error:')
 
-    st.markdown(
-        '<div class="sf-login-footer">Stroke Foundation of Australia · '
-        'Face-to-Face Regular Giving Program</div>',
-        unsafe_allow_html=True,
-    )
+    _render_auth_footer()
+    st.stop()
+
+
+def render_request_access(email: str, name: str):
+    """Shown when a Google sign-in is from an allowed domain but has no
+    `users` DB row at all yet -- offers to submit an access request,
+    which shows up on the Administrator-only Access Requests page
+    (app.py) for someone to approve or deny. Renders and stops the
+    script, same as render_login()."""
+    _render_auth_shell()
+
+    with st.container(key='login_card'):
+        st.markdown("**Request access**")
+        st.caption(f'{email} isn\'t set up yet. Submit a request below and an '
+                   f'administrator will review it -- you\'ll be able to sign in as '
+                   f'soon as it\'s approved.')
+        if st.button('Request access', type='primary', icon=':material/send:', width='stretch'):
+            request_access(email, name)
+            st.rerun()
+        if st.button('Back to sign in', width='stretch'):
+            st.logout()
+
+    _render_auth_footer()
+    st.stop()
+
+
+def render_pending_access(email: str):
+    """Shown on every sign-in attempt while a request is still awaiting
+    an administrator's decision -- no action to take here but wait, or
+    back out. Renders and stops the script, same as render_login()."""
+    _render_auth_shell()
+
+    with st.container(key='login_card'):
+        st.markdown("**Request pending**")
+        st.caption(f'Your access request for {email} is waiting on an administrator '
+                   f'to review it. You\'ll be able to sign in as soon as it\'s approved '
+                   f'-- check back soon.')
+        if st.button('Back to sign in', width='stretch'):
+            st.logout()
+
+    _render_auth_footer()
+    st.stop()
+
+
+def render_denied_access(email: str, name: str):
+    """Shown when an administrator has declined the request -- offers to
+    submit a fresh one (request_access() resets a 'denied' row back to
+    'pending', see its own docstring in db.py). Renders and stops the
+    script, same as render_login()."""
+    _render_auth_shell()
+
+    with st.container(key='login_card'):
+        st.markdown("**Access denied**")
+        st.caption(f'Your access request for {email} was declined by an administrator. '
+                   f'If you believe this was a mistake, you can submit a new request.')
+        if st.button('Request access again', icon=':material/send:', width='stretch'):
+            request_access(email, name)
+            st.rerun()
+        if st.button('Back to sign in', width='stretch'):
+            st.logout()
+
+    _render_auth_footer()
     st.stop()
