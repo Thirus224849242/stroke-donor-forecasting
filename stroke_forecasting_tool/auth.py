@@ -1,20 +1,16 @@
 import streamlit as st
 
 from branding import logo_data_uri
-from db import db_configured, get_user, request_access, upsert_approved_user
+from db import db_configured, get_local_account, get_user, request_access, upsert_approved_user, verify_password
 
-USERS = {
-    'admin@strokefoundation.org.au': {
-        'password': 'strokef2f2026',
-        'name': 'Admin User',
-        'role': 'Administrator',
-    },
-    'analyst@strokefoundation.org.au': {
-        'password': 'strokef2f2026',
-        'name': 'Data Analyst',
-        'role': 'Analyst',
-    },
-}
+# Local (email+password) login credentials used to live here as a plaintext
+# USERS dict -- the Critical finding from the security review. Moved to a
+# new local_accounts table in the same Supabase database db.py already
+# uses (hashed via db.py's hash_password()/verify_password()), alongside
+# Google sign-in, not replacing it -- see render_login()'s local-form
+# handler below, which now calls get_local_account() + verify_password()
+# instead of checking a dict. Same two accounts, same passwords, seeded
+# automatically by db.py's _seed_local_accounts() on first connect.
 
 # Google sign-in: only these domains may complete login (this is an
 # internal tool, not a public one) -- the org's real domain plus the dev
@@ -23,7 +19,7 @@ USERS = {
 # else on an allowed domain lands as Analyst. There's no user database
 # backing OAuth logins, so this allow-list is the only thing standing in
 # for one.
-ALLOWED_GOOGLE_DOMAINS = {'strokefoundation.org.au', 'deakin.edu.au', 'gmail.com'}
+ALLOWED_GOOGLE_DOMAINS = {'strokefoundation.org.au', 'deakin.edu.au'}
 GOOGLE_ADMIN_EMAILS = {'admin@strokefoundation.org.au', 'thirumalreddyenugu@gmail.com'}
 # Individual exceptions to the domain restriction -- for dev/demo access
 # from an account that isn't on either allowed domain (e.g. a personal
@@ -293,18 +289,44 @@ def render_login():
             )
 
         if submitted:
-            user = USERS.get(email.strip().lower())
-            if user and user['password'] == password:
-                st.session_state.authenticated = True
-                st.session_state.auth_method = 'password'
-                st.session_state.user = {
-                    'email': email.strip().lower(),
-                    'name': user['name'],
-                    'role': user['role'],
-                }
-                st.rerun()
+            clean_email = email.strip().lower()
+            if not db_configured():
+                # Distinct from a wrong password -- this means local login
+                # can't work at all right now (local_accounts lives in the
+                # same Supabase database as everything else in db.py), not
+                # that this particular attempt failed.
+                st.error('Local sign-in is unavailable right now (no database configured). '
+                          'Try Google sign-in instead, or contact an administrator.',
+                          icon=':material/error:')
             else:
-                st.error('Incorrect email or password. Please try again.', icon=':material/error:')
+                account = get_local_account(clean_email)
+                if account and verify_password(password, account['password_hash']):
+                    # Same domain restriction Google sign-in enforces
+                    # (handle_google_redirect() below) -- applied here too
+                    # per explicit request, as a defense-in-depth check.
+                    # Local accounts are admin-provisioned (there's no
+                    # self-service sign-up for this login path), so this
+                    # should never actually trip in normal use; it's a
+                    # safety net, not the primary gate.
+                    domain = clean_email.rsplit('@', 1)[-1] if '@' in clean_email else ''
+                    if domain not in ALLOWED_GOOGLE_DOMAINS and clean_email not in GOOGLE_EXTRA_ALLOWED_EMAILS:
+                        st.error('This account is not on an authorised domain. Contact an administrator.',
+                                  icon=':material/block:')
+                    else:
+                        st.session_state.authenticated = True
+                        st.session_state.auth_method = 'password'
+                        st.session_state.user = {
+                            'email': clean_email,
+                            'name': account['name'],
+                            'role': account['role'],
+                        }
+                        st.rerun()
+                else:
+                    # Deliberately the SAME message whether the email has no
+                    # local account at all or the password was just wrong --
+                    # distinguishing them would let this form be used to
+                    # enumerate which emails have accounts.
+                    st.error('Incorrect email or password. Please try again.', icon=':material/error:')
 
     _render_auth_footer()
     st.stop()
