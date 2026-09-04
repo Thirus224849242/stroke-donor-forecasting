@@ -39,11 +39,18 @@ from sqlalchemy import create_engine, text
 
 # ── Local (email+password) account credentials ──────────────────────────────
 # Used only by auth.py's local-login form -- Google sign-in never touches
-# this. Previously two accounts (admin@/analyst@strokefoundation.org.au)
-# lived as plaintext passwords directly in auth.py's source (flagged in the
-# security review as the Critical finding). Moved here, into this table,
-# hashed -- same two accounts, same passwords, just no longer sitting in
-# plaintext in source control.
+# this. Two accounts (admin@/analyst@strokefoundation.org.au) originally
+# lived as plaintext passwords directly in auth.py's source (the Critical
+# finding from the first security review). A later pass moved them into
+# this table, hashed -- but the ACTUAL password value used to seed that
+# hash was still a hardcoded literal in this file's own source (the same
+# finding, one file over): storing a hash of a publicly-known, committed
+# password is no safer than storing the password itself, since anyone who
+# can read the source already knows what to type in. Fixed properly now:
+# the real password values live ONLY in secrets.toml (gitignored, same
+# pattern as [auth] and [database] below), read at connect time, never
+# committed anywhere. No secrets.toml entry for an account means that
+# account simply isn't seeded -- opt-in, not on by default.
 PBKDF2_ITERATIONS = 260_000  # current OWASP-recommended floor for PBKDF2-SHA256
 
 
@@ -117,9 +124,11 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_runs_at TIMESTAMP;
 
 -- Local (email+password) login accounts, alongside Google sign-in -- see
 -- hash_password()/verify_password() above and get_local_account() below.
--- Seeded once, idempotently, by _seed_local_accounts() right after this
--- schema runs (needs Python to compute each password's hash, which plain
--- DDL can't do inline).
+-- Seeded/rotated from secrets.toml's [local_accounts] section by
+-- _seed_local_accounts() right after this schema runs, on every connect
+-- (needs Python to compute each password's hash, which plain DDL can't do
+-- inline) -- opt-in per account, and re-syncing the hash on every connect
+-- is what makes a secrets.toml password change an actual rotation.
 CREATE TABLE IF NOT EXISTS local_accounts (
     email         TEXT PRIMARY KEY,
     name          TEXT NOT NULL,
@@ -129,29 +138,44 @@ CREATE TABLE IF NOT EXISTS local_accounts (
 );
 """
 
-# Seeded into local_accounts on first connect (see _seed_local_accounts()) --
-# the exact same two accounts, same passwords, that used to live as
-# plaintext in auth.py's USERS dict. Only ever read once, at seed time; the
-# real credential store from then on is the local_accounts table itself.
+# Static metadata (email/name/role) for the two accounts -- NOT the
+# password, which now comes only from secrets.toml's [local_accounts]
+# section at seed time (see _seed_local_accounts()). Splitting it this way
+# means this list can stay in source safely: an email address and a role
+# name are not secrets.
 _DEMO_ACCOUNTS = [
-    {'email': 'admin@strokefoundation.org.au', 'password': 'strokef2f2026',
+    {'email': 'admin@strokefoundation.org.au', 'secret_key': 'admin_password',
      'name': 'Admin User', 'role': 'Administrator'},
-    {'email': 'analyst@strokefoundation.org.au', 'password': 'strokef2f2026',
+    {'email': 'analyst@strokefoundation.org.au', 'secret_key': 'analyst_password',
      'name': 'Data Analyst', 'role': 'Analyst'},
 ]
 
 
 def _seed_local_accounts(conn) -> None:
-    """Idempotent -- ON CONFLICT DO NOTHING means this is a no-op every run
-    after the first. Runs inside get_engine()'s own connection/transaction,
-    right after SCHEMA, so a brand-new database self-provisions the two demo
-    accounts with no manual step, same as every other table here."""
+    """Seeds/rotates local_accounts from secrets.toml's [local_accounts]
+    section -- e.g. admin_password = "..." for admin@strokefoundation.org.au.
+    An account with no matching key in secrets.toml is skipped entirely
+    (opt-in, not seeded by default). ON CONFLICT DO UPDATE (not DO NOTHING)
+    deliberately: this makes changing a password in secrets.toml and
+    restarting the app an actual, working rotation path -- including for
+    an account that was already seeded with an old value (e.g. this fixes,
+    on next connect, any database that was already seeded by the earlier,
+    hardcoded-password version of this function)."""
+    configured = st.secrets.get('local_accounts', {})
     for acct in _DEMO_ACCOUNTS:
+        password = configured.get(acct['secret_key'])
+        if not password:
+            continue  # no secrets.toml entry for this account -- don't seed it
         conn.execute(text("""
             INSERT INTO local_accounts (email, name, role, password_hash)
             VALUES (:email, :name, :role, :password_hash)
-            ON CONFLICT (email) DO NOTHING
-        """), {**acct, 'password_hash': hash_password(acct['password'])})
+            ON CONFLICT (email) DO UPDATE SET
+                password_hash = EXCLUDED.password_hash,
+                name = EXCLUDED.name, role = EXCLUDED.role
+        """), {
+            'email': acct['email'], 'name': acct['name'], 'role': acct['role'],
+            'password_hash': hash_password(password),
+        })
 
 
 def db_configured() -> bool:
