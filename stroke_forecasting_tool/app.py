@@ -52,9 +52,10 @@ from auth import handle_google_redirect, init_session_state, render_login
 from branding import TITLE_LOGO_PATH
 from db import (
     create_local_account, db_configured, decide_access_request, delete_dashboard_run,
-    delete_local_account, list_dashboard_runs, list_local_accounts, list_pending_requests,
-    load_dashboard_run, mark_runs_seen, save_dashboard_run, update_local_account_password,
-    update_local_account_role,
+    delete_local_account, list_approved_users, list_dashboard_runs, list_local_accounts,
+    list_pending_requests, load_dashboard_run, mark_runs_seen, revoke_user_access,
+    save_dashboard_run, update_local_account_password, update_local_account_role,
+    update_user_role,
 )
 from pipeline.build_master import build_master
 from pipeline.forecast import (
@@ -2019,7 +2020,8 @@ elif page == 'Run History':
 elif page == 'Access Requests':
     page_header('Administration', 'Access requests',
                 'Review pending Google sign-in requests from allowed domains -- approve to '
-                'create an Analyst account, or deny.',
+                'create an Analyst account, or deny. Change an existing user\'s role or '
+                'revoke their access below.',
                 meta=page_meta)
 
     # Administrator-only -- grants account access, same reasoning as the
@@ -2100,6 +2102,86 @@ elif page == 'Access Requests':
                             )
                             st.rerun()
                 if i != pending.index[-1]:
+                    st.markdown(f'<div style="height:1px;background:{LINE};margin:10px 0;"></div>',
+                                unsafe_allow_html=True)
+
+    st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
+
+    approved = list_approved_users()
+    current_email = (st.session_state.user or {}).get('email', '')
+
+    if approved.empty:
+        with card('Users', 'Approved Google sign-ins'):
+            st.markdown(f"""
+            <div style="text-align:center;padding:28px;">
+                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                    No approved users yet
+                </div>
+                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                    Approved Google sign-ins will show up here, with controls to change their
+                    role or revoke their access.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        with card(f'{len(approved)} users', 'Approved Google sign-ins -- change role or revoke access'):
+            for i, row in approved.iterrows():
+                uc1, uc2, uc3 = st.columns([3, 2, 3], vertical_alignment='center')
+                with uc1:
+                    label = row['name'] or row['email']
+                    if row['email'] == current_email:
+                        label += ' (you)'
+                    st.markdown(f"**{label}**")
+                    st.caption(row['email'])
+                with uc2:
+                    decided = pd.to_datetime(row['decided_at']) if pd.notna(row['decided_at']) else None
+                    detail = f"{row['role']} · since {decided.strftime('%d %b %Y')}" if decided else row['role']
+                    st.caption(detail)
+                with uc3:
+                    is_self = row['email'] == current_email
+                    vc1, vc2 = st.columns(2)
+                    with vc1:
+                        with st.popover('Role', icon=':material/settings:', width='stretch',
+                                          disabled=is_self):
+                            role_options = ['Analyst', 'Administrator']
+                            new_role_pick = st.selectbox(
+                                'Role', role_options,
+                                index=role_options.index(row['role']) if row['role'] in role_options else 0,
+                                key=f"user_role_pick_{row['email']}",
+                            )
+                            if new_role_pick != row['role']:
+                                if st.button('Update role', key=f"user_role_update_{row['email']}",
+                                             icon=':material/check:', width='stretch'):
+                                    if update_user_role(row['email'], new_role_pick):
+                                        st.success('Role updated.', icon=':material/check_circle:')
+                                        st.rerun()
+                                    else:
+                                        st.error('Could not update that role.', icon=':material/error:')
+                    with vc2:
+                        # Same two-step confirm pattern as Local Accounts'
+                        # delete action -- revoking access is destructive
+                        # (see revoke_user_access()'s own docstring for why
+                        # this sets status='denied' rather than deleting the
+                        # row), not a single misclick away. Can't revoke your
+                        # own access from here -- same reasoning as not being
+                        # able to change your own role, avoids locking
+                        # yourself out by accident.
+                        confirm_key = f"confirm_revoke_{row['email']}"
+                        if is_self:
+                            st.button('Revoke', key=f"revoke_btn_{row['email']}",
+                                      icon=':material/block:', width='stretch', disabled=True)
+                        elif st.session_state.get(confirm_key):
+                            if st.button('Confirm', key=f"confirm_revoke_btn_{row['email']}",
+                                         icon=':material/block:', width='stretch'):
+                                revoke_user_access(row['email'], decided_by=current_email)
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+                        else:
+                            if st.button('Revoke', key=f"revoke_btn_{row['email']}",
+                                         icon=':material/block:', width='stretch'):
+                                st.session_state[confirm_key] = True
+                                st.rerun()
+                if i != approved.index[-1]:
                     st.markdown(f'<div style="height:1px;background:{LINE};margin:10px 0;"></div>',
                                 unsafe_allow_html=True)
 
