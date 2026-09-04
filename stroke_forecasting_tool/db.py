@@ -620,6 +620,77 @@ def decide_access_request(email: str, approve: bool, decided_by: str) -> bool:
         return False
 
 
+def list_approved_users() -> pd.DataFrame:
+    """Every currently-approved Google-sign-in user (both people who went
+    through the request queue and the GOOGLE_ADMIN_EMAILS bootstrap seed --
+    see handle_google_redirect() in auth.py) -- for the Administrator-only
+    user-management view, where their role can be changed or their access
+    revoked. Local (email+password) accounts are a completely separate
+    table/page (local_accounts / Local Accounts) -- this is Google
+    sign-in access only."""
+    engine = get_engine()
+    if engine is None:
+        return pd.DataFrame()
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(text("""
+                SELECT email, name, role, decided_at FROM users
+                WHERE status = 'approved' ORDER BY decided_at DESC NULLS LAST
+            """), conn)
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return pd.DataFrame()
+
+
+def update_user_role(email: str, role: str) -> bool:
+    """Promotes/demotes an approved Google-sign-in user -- this is what
+    makes GOOGLE_ADMIN_EMAILS a one-time bootstrap seed rather than a
+    standing override (see handle_google_redirect()'s docstring in
+    auth.py): once a `users` row exists, this is the only thing that can
+    change its role, and it takes effect on that person's very next
+    login regardless of what GOOGLE_ADMIN_EMAILS still says."""
+    engine = get_engine()
+    if engine is None:
+        return False
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text("""
+                UPDATE users SET role = :role WHERE email = :email AND status = 'approved'
+            """), {'email': email, 'role': role})
+        return result.rowcount > 0
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return False
+
+
+def revoke_user_access(email: str, decided_by: str) -> bool:
+    """Revokes an approved user's Google-sign-in access. Sets status back
+    to 'denied' -- deliberately NOT a hard delete: handle_google_redirect()
+    only ever consults GOOGLE_ADMIN_EMAILS when a `users` row is entirely
+    absent (record is None), so deleting a bootstrap admin's row would
+    make them look brand-new again and silently RE-GRANT them Administrator
+    on their next login if their email is still in that list -- keeping
+    the row present with status='denied' is what actually, permanently
+    blocks them (same mechanism decide_access_request()'s deny path
+    already relies on for the ordinary request-queue case)."""
+    engine = get_engine()
+    if engine is None:
+        return False
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text("""
+                UPDATE users SET status = 'denied', decided_at = :now, decided_by = :decided_by
+                WHERE email = :email AND status = 'approved'
+            """), {'email': email, 'now': datetime.now(), 'decided_by': decided_by})
+        return result.rowcount > 0
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return False
+
+
 def upsert_approved_user(email: str, name: str, role: str, decided_by: str) -> bool:
     """Used for admin logins, which skip the request-access queue
     entirely -- keeps `users` a complete record of everyone with access,

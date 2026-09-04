@@ -83,12 +83,17 @@ def handle_google_redirect():
     longer SUFFICIENT on its own for a non-admin: they also need an
     'approved' row in the `users` DB table (db.py) -- requested via
     render_request_access() below and granted by an Administrator on the
-    Access Requests page (app.py). Admins (GOOGLE_ADMIN_EMAILS) skip that
-    queue entirely -- they're the ones reviewing it, gating them behind
-    their own approval would be circular -- but still get upserted into
-    `users` via upsert_approved_user(), so that table stays a complete
-    record of everyone with access, not just the analysts who went
-    through the request flow.
+    Access Requests page (app.py).
+
+    GOOGLE_ADMIN_EMAILS is a ONE-TIME BOOTSTRAP SEED, not a standing
+    override -- it's only ever consulted the very first time an email
+    signs in (record is None below), to create their initial 'users' row
+    as an auto-approved Administrator, skipping the request queue (they're
+    the ones who'd review it; gating them behind their own approval would
+    be circular). From then on the database is the sole source of truth:
+    an admin can promote, demote, or remove that person's access entirely
+    through the app's own UI, and it takes effect on their very next
+    login -- editing this list again has no further effect on them.
     """
     if not google_auth_configured():
         return
@@ -114,27 +119,44 @@ def handle_google_redirect():
             st.logout()
         st.stop()
 
-    if email in GOOGLE_ADMIN_EMAILS:
-        if db_configured():
-            upsert_approved_user(email, name, role='Administrator', decided_by=email)
-        st.session_state.authenticated = True
-        st.session_state.auth_method = 'google'
-        st.session_state.user = {'email': email, 'name': name, 'role': 'Administrator'}
-        return
-
-    # No DB configured means there's nowhere to persist a request queue --
-    # falls back to the original allow-list-only behaviour rather than
-    # lock everyone out just because persistence isn't set up. Same
-    # "fails soft" pattern every other DB-backed feature in this app
-    # follows (see db.py's own module docstring).
+    # No DB configured means there's nowhere to persist a request queue OR
+    # to check for an existing record at all -- GOOGLE_ADMIN_EMAILS is the
+    # only signal available in that case, same "fails soft" pattern every
+    # other DB-backed feature in this app follows (see db.py's own module
+    # docstring).
     if not db_configured():
+        role = 'Administrator' if email in GOOGLE_ADMIN_EMAILS else 'Analyst'
         st.session_state.authenticated = True
         st.session_state.auth_method = 'google'
-        st.session_state.user = {'email': email, 'name': name, 'role': 'Analyst'}
+        st.session_state.user = {'email': email, 'name': name, 'role': role}
         return
 
+    # THE DATABASE IS THE SOURCE OF TRUTH ONCE A RECORD EXISTS. GOOGLE_ADMIN_EMAILS
+    # is checked ONLY in the record-is-None branch below -- a one-time bootstrap
+    # seed for a brand-new email that's never signed in before, not a standing
+    # override. Previously this list was checked FIRST and re-applied
+    # role='Administrator' on every single login for these emails, permanently
+    # overwriting whatever an admin had set for them in the `users` table via
+    # the Local/Access management UIs -- a real bug (reported live), not just a
+    # style issue: it meant an email on this list could never actually be
+    # demoted, and meant this hardcoded list was a permanent, undocumented
+    # backdoor with no way to revoke it short of editing this file and
+    # redeploying. Checking the database FIRST fixes both: once a row exists
+    # for an email (created either by this bootstrap path or by the ordinary
+    # request-access flow), every later login reads its role/status from
+    # there -- an admin can promote, demote, or remove that access entirely
+    # through the UI, and it takes effect on that person's very next login,
+    # with zero code change and zero redeploy, regardless of what this list
+    # still says.
     record = get_user(email)
+
     if record is None:
+        if email in GOOGLE_ADMIN_EMAILS:
+            upsert_approved_user(email, name, role='Administrator', decided_by=email)
+            st.session_state.authenticated = True
+            st.session_state.auth_method = 'google'
+            st.session_state.user = {'email': email, 'name': name, 'role': 'Administrator'}
+            return
         render_request_access(email, name)
         return
     if record['status'] == 'pending':
@@ -144,7 +166,8 @@ def handle_google_redirect():
         render_denied_access(email, name)
         return
 
-    # approved
+    # approved -- role comes from the database, full stop, even for an
+    # email that's also in GOOGLE_ADMIN_EMAILS.
     st.session_state.authenticated = True
     st.session_state.auth_method = 'google'
     st.session_state.user = {
