@@ -485,7 +485,7 @@ page = st.session_state.page
 # "download all donor predictions" button and the Data Pipeline/delete-run
 # gates. Gated here, once, rather than in page_header() itself, so this
 # stays the one place that decides who gets it.
-_is_admin = (st.session_state.user or {}).get('role') == 'Administrator'
+_is_admin = (st.session_state.user or {}).get('role') in ('Administrator', 'Super Admin')
 _export_csv = build_page_export_csv(page) if _is_admin else None
 st.session_state.page_export_csv = _export_csv
 st.session_state.page_export_filename = (
@@ -546,8 +546,10 @@ if page == 'Data Pipeline':
     # defense-in-depth backstop in case session_state.page ever ends up
     # 'Data Pipeline' some other way. page_header() still has to render
     # first, same reason as every other page's empty_state() guard -- see
-    # its own docstring.
-    if (st.session_state.user or {}).get('role') != 'Administrator':
+    # its own docstring. Administrator-or-above -- unlike Access Requests/
+    # Local Accounts, running the pipeline isn't account-management, an
+    # ordinary Administrator keeps this.
+    if (st.session_state.user or {}).get('role') not in ('Administrator', 'Super Admin'):
         with card():
             st.markdown(f"""
             <div style="text-align:center;padding:28px;">
@@ -1592,10 +1594,10 @@ elif page == 'Donor Lifetime Value':
                         'Predicted 24m value': st.column_config.NumberColumn(format='dollar'),
                     },
                 )
-                # Administrator-only -- this is the full per-donor table
+                # Administrator-or-above -- this is the full per-donor table
                 # (contact_id-level), not an aggregate, same reasoning as
                 # the page-wide Export CSV button (see page_header()).
-                if (st.session_state.user or {}).get('role') == 'Administrator':
+                if (st.session_state.user or {}).get('role') in ('Administrator', 'Super Admin'):
                     st.download_button(
                         'Download all donor predictions (CSV)',
                         data=ltv_results.to_csv(index=False),
@@ -2028,7 +2030,8 @@ elif page == 'Run History':
                 # just this column, which would silently truncate
                 # anything a later edit adds below this block. A plain
                 # if/else keeps the gate scoped to just this column.
-                if (st.session_state.user or {}).get('role') != 'Administrator':
+                # Administrator-or-above.
+                if (st.session_state.user or {}).get('role') not in ('Administrator', 'Super Admin'):
                     st.caption('Only Administrators can delete runs.')
                 else:
                     confirm_key = f'confirm_delete_{picked_id}'
@@ -2061,20 +2064,23 @@ elif page == 'Access Requests':
                 'revoke their access below.',
                 meta=page_meta)
 
-    # Administrator-only -- grants account access, same reasoning as the
-    # Data Pipeline page-access gate. The sidebar already hides this
-    # page's nav entry for non-admins (see render_sidebar()); this is
-    # the defense-in-depth backstop in case session_state.page ever ends
-    # up here some other way.
-    if (st.session_state.user or {}).get('role') != 'Administrator':
+    # Super-Admin-only -- grants/revokes/promotes account access, the same
+    # account-management tier as Local Accounts. Not just Administrator
+    # any more: this page can hand out Administrator (and Super Admin)
+    # itself, so an ordinary Administrator having access to it would let
+    # them promote themselves or anyone else. The sidebar already hides
+    # this page's nav entry accordingly (see render_sidebar()'s
+    # is_super_admin filter); this is the defense-in-depth backstop in
+    # case session_state.page ever ends up here some other way.
+    if (st.session_state.user or {}).get('role') != 'Super Admin':
         with card():
             st.markdown(f"""
             <div style="text-align:center;padding:28px;">
                 <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
-                    Administrators only
+                    Super Admins only
                 </div>
                 <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
-                    Approving or denying access requests is restricted to Administrators.
+                    Approving, denying, or managing access requests is restricted to Super Admins.
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -2180,7 +2186,7 @@ elif page == 'Access Requests':
                     with vc1:
                         with st.popover('Role', icon=':material/settings:', width='stretch',
                                           disabled=is_self):
-                            role_options = ['Analyst', 'Administrator']
+                            role_options = ['Analyst', 'Administrator', 'Super Admin']
                             new_role_pick = st.selectbox(
                                 'Role', role_options,
                                 index=role_options.index(row['role']) if row['role'] in role_options else 0,
@@ -2233,17 +2239,18 @@ elif page == 'Local Accounts':
                 'in the page header.',
                 meta=page_meta)
 
-    # Administrator-only -- grants/revokes account access, same reasoning
-    # as Data Pipeline and Access Requests above.
-    if (st.session_state.user or {}).get('role') != 'Administrator':
+    # Super-Admin-only -- grants/revokes account access, including
+    # Administrator and Super Admin itself, same reasoning as Access
+    # Requests above.
+    if (st.session_state.user or {}).get('role') != 'Super Admin':
         with card():
             st.markdown(f"""
             <div style="text-align:center;padding:28px;">
                 <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
-                    Administrators only
+                    Super Admins only
                 </div>
                 <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
-                    Creating or managing local sign-in accounts is restricted to Administrators.
+                    Creating or managing local sign-in accounts is restricted to Super Admins.
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -2270,7 +2277,7 @@ elif page == 'Local Accounts':
                 new_email = st.text_input('Email', placeholder='name@strokefoundation.org.au')
                 new_name = st.text_input('Name')
             with cc2:
-                new_role = st.selectbox('Role', ['Analyst', 'Administrator'])
+                new_role = st.selectbox('Role', ['Analyst', 'Administrator', 'Super Admin'])
                 new_password = st.text_input('Password', type='password',
                                               help='At least 8 characters. Share this with them directly, '
                                                    'not over an insecure channel -- they can change it '
@@ -2344,7 +2351,7 @@ elif page == 'Local Accounts':
                             st.markdown(f'<div style="height:1px;background:{LINE};margin:10px 0;"></div>',
                                         unsafe_allow_html=True)
 
-                            role_options = ['Analyst', 'Administrator']
+                            role_options = ['Analyst', 'Administrator', 'Super Admin']
                             new_role_pick = st.selectbox(
                                 'Role', role_options, index=role_options.index(row['role'])
                                 if row['role'] in role_options else 0,

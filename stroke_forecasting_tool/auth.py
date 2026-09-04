@@ -82,18 +82,29 @@ def handle_google_redirect():
     For everyone else, being on an allowed domain is necessary but no
     longer SUFFICIENT on its own for a non-admin: they also need an
     'approved' row in the `users` DB table (db.py) -- requested via
-    render_request_access() below and granted by an Administrator on the
+    render_request_access() below and granted by a Super Admin on the
     Access Requests page (app.py).
+
+    Three roles now, not two -- 'Super Admin' > 'Administrator' >
+    'Analyst'. Only Super Admin can create/delete accounts, approve/deny/
+    revoke Google access, and promote/demote anyone's role (Local
+    Accounts + Access Requests pages, app.py). Administrator keeps
+    everything else it always had (Data Pipeline, CSV exports, deleting a
+    run) but no account-management power at all -- back to how it worked
+    before those two pages existed. Every role can change their own
+    password from the account menu if they're signed in locally.
 
     GOOGLE_ADMIN_EMAILS is a ONE-TIME BOOTSTRAP SEED, not a standing
     override -- it's only ever consulted the very first time an email
     signs in (record is None below), to create their initial 'users' row
-    as an auto-approved Administrator, skipping the request queue (they're
-    the ones who'd review it; gating them behind their own approval would
-    be circular). From then on the database is the sole source of truth:
-    an admin can promote, demote, or remove that person's access entirely
-    through the app's own UI, and it takes effect on their very next
-    login -- editing this list again has no further effect on them.
+    as an auto-approved Super Admin (the highest tier, not just
+    Administrator -- someone has to be able to set everyone else up),
+    skipping the request queue (they're the ones who'd review it; gating
+    them behind their own approval would be circular). From then on the
+    database is the sole source of truth: a Super Admin can promote,
+    demote, or remove that person's access entirely through the app's own
+    UI, and it takes effect on their very next login -- editing this list
+    again has no further effect on them.
     """
     if not google_auth_configured():
         return
@@ -125,7 +136,7 @@ def handle_google_redirect():
     # other DB-backed feature in this app follows (see db.py's own module
     # docstring).
     if not db_configured():
-        role = 'Administrator' if email in GOOGLE_ADMIN_EMAILS else 'Analyst'
+        role = 'Super Admin' if email in GOOGLE_ADMIN_EMAILS else 'Analyst'
         st.session_state.authenticated = True
         st.session_state.auth_method = 'google'
         st.session_state.user = {'email': email, 'name': name, 'role': role}
@@ -152,10 +163,10 @@ def handle_google_redirect():
 
     if record is None:
         if email in GOOGLE_ADMIN_EMAILS:
-            upsert_approved_user(email, name, role='Administrator', decided_by=email)
+            upsert_approved_user(email, name, role='Super Admin', decided_by=email)
             st.session_state.authenticated = True
             st.session_state.auth_method = 'google'
-            st.session_state.user = {'email': email, 'name': name, 'role': 'Administrator'}
+            st.session_state.user = {'email': email, 'name': name, 'role': 'Super Admin'}
             return
         render_request_access(email, name)
         return

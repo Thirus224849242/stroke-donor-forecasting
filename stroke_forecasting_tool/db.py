@@ -142,10 +142,14 @@ CREATE TABLE IF NOT EXISTS local_accounts (
 # password, which now comes only from secrets.toml's [local_accounts]
 # section at seed time (see _seed_local_accounts()). Splitting it this way
 # means this list can stay in source safely: an email address and a role
-# name are not secrets.
+# name are not secrets. admin@ seeds as Super Admin, not just
+# Administrator -- the local-login bootstrap path needs to land someone
+# with enough power to actually set everyone else up (Local Accounts +
+# Access Requests are Super-Admin-only, see app.py), same reasoning as
+# GOOGLE_ADMIN_EMAILS bootstrapping Super Admin in auth.py.
 _DEMO_ACCOUNTS = [
     {'email': 'admin@strokefoundation.org.au', 'secret_key': 'admin_password',
-     'name': 'Admin User', 'role': 'Administrator'},
+     'name': 'Admin User', 'role': 'Super Admin'},
     {'email': 'analyst@strokefoundation.org.au', 'secret_key': 'analyst_password',
      'name': 'Data Analyst', 'role': 'Analyst'},
 ]
@@ -160,7 +164,18 @@ def _seed_local_accounts(conn) -> None:
     restarting the app an actual, working rotation path -- including for
     an account that was already seeded with an old value (e.g. this fixes,
     on next connect, any database that was already seeded by the earlier,
-    hardcoded-password version of this function)."""
+    hardcoded-password version of this function).
+
+    role is deliberately NOT in that UPDATE SET list -- same reasoning as
+    the GOOGLE_ADMIN_EMAILS fix in auth.py's handle_google_redirect():
+    this list is only the role's source of truth for the very first
+    INSERT (a brand-new email, which the VALUES clause below still
+    handles normally). Re-syncing role on every reconnect would silently
+    re-promote/re-demote an account back to whatever's hardcoded here
+    every time the app restarts, undoing anything a Super Admin set
+    through the Local Accounts page -- the exact same standing-override
+    bug, just for local accounts instead of Google ones. Once a row
+    exists, its role is the database's alone to manage."""
     configured = st.secrets.get('local_accounts', {})
     for acct in _DEMO_ACCOUNTS:
         password = configured.get(acct['secret_key'])
@@ -171,7 +186,7 @@ def _seed_local_accounts(conn) -> None:
             VALUES (:email, :name, :role, :password_hash)
             ON CONFLICT (email) DO UPDATE SET
                 password_hash = EXCLUDED.password_hash,
-                name = EXCLUDED.name, role = EXCLUDED.role
+                name = EXCLUDED.name
         """), {
             'email': acct['email'], 'name': acct['name'], 'role': acct['role'],
             'password_hash': hash_password(password),
