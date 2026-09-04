@@ -51,8 +51,10 @@ import streamlit as st
 from auth import handle_google_redirect, init_session_state, render_login
 from branding import TITLE_LOGO_PATH
 from db import (
-    db_configured, decide_access_request, delete_dashboard_run, list_dashboard_runs,
-    list_pending_requests, load_dashboard_run, mark_runs_seen, save_dashboard_run,
+    create_local_account, db_configured, decide_access_request, delete_dashboard_run,
+    delete_local_account, list_dashboard_runs, list_local_accounts, list_pending_requests,
+    load_dashboard_run, mark_runs_seen, save_dashboard_run, update_local_account_password,
+    update_local_account_role,
 )
 from pipeline.build_master import build_master
 from pipeline.forecast import (
@@ -2098,6 +2100,162 @@ elif page == 'Access Requests':
                             )
                             st.rerun()
                 if i != pending.index[-1]:
+                    st.markdown(f'<div style="height:1px;background:{LINE};margin:10px 0;"></div>',
+                                unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LOCAL ACCOUNTS
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == 'Local Accounts':
+    page_header('Administration', 'Local accounts',
+                'Create and manage email+password sign-in accounts, alongside Google. '
+                'A signed-in user can change their own password from the account menu '
+                'in the page header.',
+                meta=page_meta)
+
+    # Administrator-only -- grants/revokes account access, same reasoning
+    # as Data Pipeline and Access Requests above.
+    if (st.session_state.user or {}).get('role') != 'Administrator':
+        with card():
+            st.markdown(f"""
+            <div style="text-align:center;padding:28px;">
+                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                    Administrators only
+                </div>
+                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                    Creating or managing local sign-in accounts is restricted to Administrators.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        st.stop()
+
+    if not db_configured():
+        with card():
+            st.markdown(f"""
+            <div style="text-align:center;padding:28px;">
+                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                    Local accounts aren't available
+                </div>
+                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                    No database connection is configured, so there's no account store to manage.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        st.stop()
+
+    with card('Create account', 'A new email + password sign-in'):
+        with st.form('create_local_account_form', border=False):
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                new_email = st.text_input('Email', placeholder='name@strokefoundation.org.au')
+                new_name = st.text_input('Name')
+            with cc2:
+                new_role = st.selectbox('Role', ['Analyst', 'Administrator'])
+                new_password = st.text_input('Password', type='password',
+                                              help='At least 8 characters. Share this with them directly, '
+                                                   'not over an insecure channel -- they can change it '
+                                                   'themselves afterward from the account menu.')
+            create_submitted = st.form_submit_button('Create account', icon=':material/person_add:',
+                                                       type='primary')
+        if create_submitted:
+            clean_email = new_email.strip().lower()
+            clean_name = new_name.strip()
+            if not clean_email or '@' not in clean_email:
+                st.error('Enter a valid email address.', icon=':material/error:')
+            elif not clean_name:
+                st.error('Enter a name.', icon=':material/error:')
+            elif len(new_password) < 8:
+                st.error('Password must be at least 8 characters.', icon=':material/error:')
+            elif create_local_account(clean_email, clean_name, new_role, new_password):
+                st.success(f'Account created for {clean_email}.', icon=':material/check_circle:')
+                st.rerun()
+            else:
+                st.error('Could not create that account -- that email may already have one.',
+                          icon=':material/error:')
+
+    st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
+
+    accounts = list_local_accounts()
+
+    if accounts.empty:
+        with card():
+            st.markdown(f"""
+            <div style="text-align:center;padding:28px;">
+                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                    No local accounts yet
+                </div>
+                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                    Create one above, or use Google sign-in instead.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        accounts['created_at'] = pd.to_datetime(accounts['created_at'])
+        current_email = (st.session_state.user or {}).get('email', '')
+        with card(f'{len(accounts)} accounts', 'Most recently created first'):
+            for i, row in accounts.iterrows():
+                rc1, rc2, rc3 = st.columns([3, 2, 3], vertical_alignment='center')
+                with rc1:
+                    label = row['name']
+                    if row['email'] == current_email:
+                        label += ' (you)'
+                    st.markdown(f"**{label}**")
+                    st.caption(row['email'])
+                with rc2:
+                    st.caption(f"{row['role']} · created {row['created_at'].strftime('%d %b %Y')}")
+                with rc3:
+                    ac1, ac2 = st.columns(2)
+                    with ac1:
+                        with st.popover('Manage', icon=':material/settings:', width='stretch'):
+                            with st.form(f"reset_pw_form_{row['email']}", border=False):
+                                reset_pw = st.text_input(
+                                    'New password', type='password', key=f"reset_pw_input_{row['email']}",
+                                )
+                                reset_submitted = st.form_submit_button('Set new password',
+                                                                          icon=':material/check:', width='stretch')
+                            if reset_submitted:
+                                if len(reset_pw) < 8:
+                                    st.error('Password must be at least 8 characters.', icon=':material/error:')
+                                elif update_local_account_password(row['email'], reset_pw):
+                                    st.success('Password reset.', icon=':material/check_circle:')
+                                else:
+                                    st.error('Could not reset that password.', icon=':material/error:')
+
+                            st.markdown(f'<div style="height:1px;background:{LINE};margin:10px 0;"></div>',
+                                        unsafe_allow_html=True)
+
+                            role_options = ['Analyst', 'Administrator']
+                            new_role_pick = st.selectbox(
+                                'Role', role_options, index=role_options.index(row['role'])
+                                if row['role'] in role_options else 0,
+                                key=f"role_pick_{row['email']}",
+                            )
+                            if new_role_pick != row['role']:
+                                if st.button('Update role', key=f"role_update_{row['email']}",
+                                             icon=':material/check:', width='stretch'):
+                                    if update_local_account_role(row['email'], new_role_pick):
+                                        st.success('Role updated.', icon=':material/check_circle:')
+                                        st.rerun()
+                                    else:
+                                        st.error('Could not update that role.', icon=':material/error:')
+                    with ac2:
+                        # Same two-step confirm pattern as Run History's
+                        # delete-run action above -- a destructive action,
+                        # not a single misclick away.
+                        confirm_key = f"confirm_delete_local_{row['email']}"
+                        if st.session_state.get(confirm_key):
+                            if st.button('Confirm', key=f"confirm_delete_btn_{row['email']}",
+                                         icon=':material/delete_forever:', width='stretch'):
+                                delete_local_account(row['email'])
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+                        else:
+                            if st.button('Delete', key=f"delete_btn_{row['email']}",
+                                         icon=':material/delete:', width='stretch'):
+                                st.session_state[confirm_key] = True
+                                st.rerun()
+                if i != accounts.index[-1]:
                     st.markdown(f'<div style="height:1px;background:{LINE};margin:10px 0;"></div>',
                                 unsafe_allow_html=True)
 

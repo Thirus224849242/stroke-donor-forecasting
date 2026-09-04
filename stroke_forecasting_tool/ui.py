@@ -6,7 +6,7 @@ import streamlit as st
 
 from auth import initials, sign_out
 from branding import logo_white_data_uri
-from db import count_new_runs, count_pending_requests
+from db import count_new_runs, count_pending_requests, get_local_account, update_local_account_password, verify_password
 
 # ── BRAND PALETTE ────────────────────────────────────────────────────────────
 # Swiss financial / data-dense analytics: pure white surfaces, hairline gray
@@ -95,6 +95,7 @@ NAV_SECTIONS = [
     ('Operations', [
         ('Run History',      ':material/history:'),
         ('Access Requests',  ':material/how_to_reg:'),
+        ('Local Accounts',   ':material/manage_accounts:'),
     ]),
 ]
 NAV_ITEMS = [item for _, items in NAV_SECTIONS for item in items]
@@ -102,10 +103,12 @@ NAV_ITEMS = [item for _, items in NAV_SECTIONS for item in items]
 # Hidden from the sidebar (and blocked with their own page-level guard in
 # app.py, defense in depth) for anyone whose role isn't Administrator --
 # see render_sidebar()'s is_admin filter below. Data Pipeline mutates the
-# shared dashboard state everyone sees next; Access Requests grants
-# account access. Both are sensitive enough to gate, unlike everything
-# else in NAV_SECTIONS, which is read-only for any signed-in user.
-ADMIN_ONLY_NAV_ITEMS = {'Data Pipeline', 'Access Requests'}
+# shared dashboard state everyone sees next; Access Requests and Local
+# Accounts both grant account access, one for Google sign-in, one for the
+# email+password login. All three are sensitive enough to gate, unlike
+# everything else in NAV_SECTIONS, which is read-only for any signed-in
+# user.
+ADMIN_ONLY_NAV_ITEMS = {'Data Pipeline', 'Access Requests', 'Local Accounts'}
 
 
 def _slug(text: str) -> str:
@@ -1068,6 +1071,41 @@ def page_header(eyebrow, title, sub='', meta='', info=None):
                 if wants_dark != st.session_state.dark_mode:
                     st.session_state.dark_mode = wants_dark
                     st.rerun()
+
+                # Only for a local (email+password) sign-in -- a Google-
+                # authenticated user has no password in this app at all to
+                # change (their identity is Google's, not ours), so this
+                # entire block simply doesn't render for them, the same way
+                # it wouldn't make sense to offer it.
+                if st.session_state.get('auth_method') == 'password':
+                    with st.expander('Change password', icon=':material/lock_reset:'):
+                        with st.form('change_password_form', border=False):
+                            current_pw = st.text_input('Current password', type='password', key='cp_current')
+                            new_pw = st.text_input('New password', type='password', key='cp_new')
+                            confirm_pw = st.text_input('Confirm new password', type='password', key='cp_confirm')
+                            change_submitted = st.form_submit_button(
+                                'Update password', icon=':material/check:', width='stretch',
+                            )
+                        if change_submitted:
+                            email = user.get('email', '')
+                            account = get_local_account(email)
+                            # Re-verify the CURRENT password server-side rather than
+                            # trusting the already-authenticated session alone -- this
+                            # is the standard "confirm you're still you" step before
+                            # a sensitive change, and it doubles as proof the account
+                            # (and the DB) is actually reachable right now.
+                            if not account or not verify_password(current_pw, account['password_hash']):
+                                st.error('Current password is incorrect.', icon=':material/error:')
+                            elif len(new_pw) < 8:
+                                st.error('New password must be at least 8 characters.', icon=':material/error:')
+                            elif new_pw != confirm_pw:
+                                st.error("New passwords don't match.", icon=':material/error:')
+                            elif update_local_account_password(email, new_pw):
+                                st.success('Password updated.', icon=':material/check_circle:')
+                            else:
+                                st.error('Could not update your password right now. Try again shortly.',
+                                          icon=':material/error:')
+
                 if st.button('Log out', key='topbar_signout_btn', icon=':material/logout:',
                              type='primary', width='stretch', disabled=running):
                     sign_out()

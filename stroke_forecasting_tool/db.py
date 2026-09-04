@@ -176,10 +176,20 @@ def get_engine():
         return None
     try:
         engine = create_engine(st.secrets['database']['url'], pool_pre_ping=True)
-        with engine.connect() as conn:
+        # engine.begin() (auto-commits on a clean exit, rolls back on an
+        # exception), not engine.connect() + a manual conn.commit() --
+        # confirmed live, the manual-commit form can silently fail to
+        # persist a write against this database's pooled connection (the
+        # secrets.toml setup instructions specifically call for Supabase's
+        # "Transaction pooler" mode, which doesn't guarantee one logical
+        # connection stays pinned to one backend Postgres connection the
+        # way session-mode pooling does) -- an UPDATE ran with no error and
+        # a normal rowcount, then simply wasn't there on the next read.
+        # engine.begin() is what every other write in this file already
+        # uses, and it doesn't reproduce the problem.
+        with engine.begin() as conn:
             conn.execute(text(SCHEMA))
             _seed_local_accounts(conn)
-            conn.commit()
         return engine
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -365,6 +375,111 @@ def get_local_account(email: str) -> dict | None:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
         st.session_state.db_error = str(exc)
         return None
+
+
+def list_local_accounts() -> pd.DataFrame:
+    """Every local account, most recently created first -- for the
+    Administrator-only Local Accounts page. Never includes password_hash
+    (that column is only ever read by get_local_account(), for verifying
+    an actual login attempt). Empty DataFrame if unavailable."""
+    engine = get_engine()
+    if engine is None:
+        return pd.DataFrame()
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(text("""
+                SELECT email, name, role, created_at FROM local_accounts ORDER BY created_at DESC
+            """), conn)
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return pd.DataFrame()
+
+
+def create_local_account(email: str, name: str, role: str, password: str) -> bool:
+    """Creates a new local account. Fails (returns False, no exception) if
+    that email already has one -- INSERT with no ON CONFLICT clause simply
+    errors on a duplicate key, which the except below turns into a clean
+    False rather than a raised exception, so the Local Accounts page can
+    show 'that email already has an account' instead of a stack trace."""
+    engine = get_engine()
+    if engine is None:
+        return False
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO local_accounts (email, name, role, password_hash)
+                VALUES (:email, :name, :role, :password_hash)
+            """), {
+                'email': email, 'name': name, 'role': role,
+                'password_hash': hash_password(password),
+            })
+        return True
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return False
+
+
+def update_local_account_password(email: str, new_password: str) -> bool:
+    """Sets a new password for an existing local account -- used by BOTH
+    the Administrator's reset-password action on the Local Accounts page
+    and a signed-in user's own self-service change-password form (the
+    account popover in ui.py's page_header()). Same hashing as every
+    other password write in this file; the caller is responsible for
+    having already verified whatever it needs to (the admin's own role,
+    or the user's current password) before calling this."""
+    engine = get_engine()
+    if engine is None:
+        return False
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text("""
+                UPDATE local_accounts SET password_hash = :password_hash WHERE email = :email
+            """), {'email': email, 'password_hash': hash_password(new_password)})
+        return result.rowcount > 0
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return False
+
+
+def update_local_account_role(email: str, role: str) -> bool:
+    """Admin-only: change an existing local account's role. Deliberately
+    separate from update_local_account_password -- a self-service caller
+    should never be able to reach this one."""
+    engine = get_engine()
+    if engine is None:
+        return False
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text("""
+                UPDATE local_accounts SET role = :role WHERE email = :email
+            """), {'email': email, 'role': role})
+        return result.rowcount > 0
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return False
+
+
+def delete_local_account(email: str) -> bool:
+    """Removes a local account entirely -- the Local Accounts page's
+    'Delete' action. Does not touch that email's Google-sign-in access
+    (the separate `users` table, if they also have a row there) -- the
+    two login paths are independent, deleting one doesn't affect the
+    other."""
+    engine = get_engine()
+    if engine is None:
+        return False
+    try:
+        with engine.begin() as conn:
+            conn.execute(text('DELETE FROM local_accounts WHERE email = :email'), {'email': email})
+        return True
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return False
 
 
 def get_user(email: str) -> dict | None:
