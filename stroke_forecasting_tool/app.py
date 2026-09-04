@@ -514,6 +514,16 @@ if st.session_state.pipeline_success_message and not st.session_state.pipeline_r
     st.success(st.session_state.pipeline_success_message, icon=':material/check_circle:')
     st.session_state.pipeline_success_message = None
 
+# Same pattern as the success banner above, for the failure path the
+# pipeline_running block's own try/except/finally sets -- rendered
+# globally rather than only on Data Pipeline for the same reason: a
+# failed run stays on Data Pipeline today (unlike a successful one,
+# which redirects to Overview), but showing it here too means it
+# survives if the user navigates away before reading it.
+if st.session_state.pipeline_error_message and not st.session_state.pipeline_running:
+    st.error(st.session_state.pipeline_error_message, icon=':material/error:')
+    st.session_state.pipeline_error_message = None
+
 # Shared right-aligned page-header metadata (Base44-style "SESSION ..." /
 # "RUN-..." label) -- every dashboard page shows which run it's reading
 # from, live or reloaded from history.
@@ -697,88 +707,115 @@ if page == 'Data Pipeline':
                 out.write(f.getbuffer())
             return path
 
-        stage_row(stages[1], 1, 'Ingestion & Schema Validation', 'ETL', 'running')
-        log(':material/check_circle: Files received')
-        p_path  = save(f_pay, 'Payments.csv')
-        r_path  = save(f_rec, 'Recurring Payments.csv')
-        c_path  = save(f_con, 'Contacts.csv')
-        ca_path = save(f_cam, 'Campaigns.csv')
-        stage_row(stages[1], 1, 'Ingestion & Schema Validation', 'ETL', 'done', '4/4 files')
-        overall_progress(progress_slot, 1, N_STAGES)
+        try:
+            stage_row(stages[1], 1, 'Ingestion & Schema Validation', 'ETL', 'running')
+            log(':material/check_circle: Files received')
+            p_path  = save(f_pay, 'Payments.csv')
+            r_path  = save(f_rec, 'Recurring Payments.csv')
+            c_path  = save(f_con, 'Contacts.csv')
+            ca_path = save(f_cam, 'Campaigns.csv')
+            stage_row(stages[1], 1, 'Ingestion & Schema Validation', 'ETL', 'done', '4/4 files')
+            overall_progress(progress_slot, 1, N_STAGES)
 
-        stage_row(stages[2], 2, 'Master File Build', 'ETL', 'running')
+            stage_row(stages[2], 2, 'Master File Build', 'ETL', 'running')
 
-        # Real backend stdout capture -- clean.py/build_master.py already
-        # print(..., flush=True) genuine diagnostic lines ([diag] chunk
-        # counts, row totals) as they work. Redirecting stdout into a
-        # buffer and flushing it into the Execution Log on every progress
-        # tick surfaces the actual terminal output, not a hand-written
-        # narration of it -- this is where nearly all of that output
-        # happens, so it's the highest-value place to capture it.
-        stdout_buf = io.StringIO()
+            # Real backend stdout capture -- clean.py/build_master.py already
+            # print(..., flush=True) genuine diagnostic lines ([diag] chunk
+            # counts, row totals) as they work. Redirecting stdout into a
+            # buffer and flushing it into the Execution Log on every progress
+            # tick surfaces the actual terminal output, not a hand-written
+            # narration of it -- this is where nearly all of that output
+            # happens, so it's the highest-value place to capture it.
+            stdout_buf = io.StringIO()
 
-        def flush_stdout():
-            captured = stdout_buf.getvalue()
-            if captured.strip():
-                log(captured.rstrip('\n'))
-            stdout_buf.truncate(0)
-            stdout_buf.seek(0)
+            def flush_stdout():
+                captured = stdout_buf.getvalue()
+                if captured.strip():
+                    log(captured.rstrip('\n'))
+                stdout_buf.truncate(0)
+                stdout_buf.seek(0)
 
-        def on_progress(rows):
-            stage_row(stages[2], 2, 'Master File Build', 'ETL', 'running', f'{rows:,} rows processed')
+            def on_progress(rows):
+                stage_row(stages[2], 2, 'Master File Build', 'ETL', 'running', f'{rows:,} rows processed')
+                flush_stdout()
+
+            with contextlib.redirect_stdout(stdout_buf):
+                master = build_master(p_path, r_path, ca_path, c_path, progress_callback=on_progress)
             flush_stdout()
+            log(f':material/check_circle: Master file built, {len(master):,} donor-month rows')
+            stage_row(stages[2], 2, 'Master File Build', 'ETL', 'done', f'{len(master):,} rows')
+            overall_progress(progress_slot, 2, N_STAGES)
 
-        with contextlib.redirect_stdout(stdout_buf):
-            master = build_master(p_path, r_path, ca_path, c_path, progress_callback=on_progress)
-        flush_stdout()
-        log(f':material/check_circle: Master file built, {len(master):,} donor-month rows')
-        stage_row(stages[2], 2, 'Master File Build', 'ETL', 'done', f'{len(master):,} rows')
-        overall_progress(progress_slot, 2, N_STAGES)
+            run_pipeline_models(master, stages=stages, progress=(progress_slot, 2), log=log)
 
-        run_pipeline_models(master, stages=stages, progress=(progress_slot, 2), log=log)
-
-        stage_row(stages[6], 6, 'Dashboard Publish', 'Export', 'running')
-        if db_configured():
-            dashboard_state = build_dashboard_state()
-            summary = {
-                'run_by': (st.session_state.user or {}).get('email'),
-                'donor_count': st.session_state.donor_count,
-                'total_income': st.session_state.total_income,
-                'mape_ml': st.session_state.mape, 'mape_linear': st.session_state.mape_linear,
-                'mape_ltv': (st.session_state.ltv_metrics['income_holdout_mape']
-                             if st.session_state.ltv_metrics else None),
-                'mape_stockflow': st.session_state.mape_stockflow,
-                'mape_sbg': st.session_state.mape_sbg, 'mape_bgnbd': st.session_state.mape_bgnbd,
-                'mape_gw': st.session_state.mape_gw,
-                'duration_seconds': (datetime.now() - run_started).total_seconds(),
-            }
-            saved_run_id = save_dashboard_run(dashboard_state, summary)
-            if saved_run_id:
-                stored_kb = len(gzip.compress(json.dumps(dashboard_state).encode(), compresslevel=9)) / 1024
-                log(f':material/check_circle: Run saved to history, {saved_run_id} '
-                    f'({stored_kb:.0f} KB), reload it anytime from Run History, no re-upload needed')
-                stage_row(stages[6], 6, 'Dashboard Publish', 'Export', 'done', f'{stored_kb:.0f} KB saved')
-                st.session_state.viewing_run_id = saved_run_id
-                st.session_state.data_source     = 'live'
-                st.session_state.data_loaded_at  = datetime.now()
+            stage_row(stages[6], 6, 'Dashboard Publish', 'Export', 'running')
+            if db_configured():
+                dashboard_state = build_dashboard_state()
+                summary = {
+                    'run_by': (st.session_state.user or {}).get('email'),
+                    'donor_count': st.session_state.donor_count,
+                    'total_income': st.session_state.total_income,
+                    'mape_ml': st.session_state.mape, 'mape_linear': st.session_state.mape_linear,
+                    'mape_ltv': (st.session_state.ltv_metrics['income_holdout_mape']
+                                 if st.session_state.ltv_metrics else None),
+                    'mape_stockflow': st.session_state.mape_stockflow,
+                    'mape_sbg': st.session_state.mape_sbg, 'mape_bgnbd': st.session_state.mape_bgnbd,
+                    'mape_gw': st.session_state.mape_gw,
+                    'duration_seconds': (datetime.now() - run_started).total_seconds(),
+                }
+                saved_run_id = save_dashboard_run(dashboard_state, summary)
+                if saved_run_id:
+                    stored_kb = len(gzip.compress(json.dumps(dashboard_state).encode(), compresslevel=9)) / 1024
+                    log(f':material/check_circle: Run saved to history, {saved_run_id} '
+                        f'({stored_kb:.0f} KB), reload it anytime from Run History, no re-upload needed')
+                    stage_row(stages[6], 6, 'Dashboard Publish', 'Export', 'done', f'{stored_kb:.0f} KB saved')
+                    st.session_state.viewing_run_id = saved_run_id
+                    st.session_state.data_source     = 'live'
+                    st.session_state.data_loaded_at  = datetime.now()
+                else:
+                    log(f':material/warning: Run history save skipped, '
+                        f'{st.session_state.get("db_error", "unknown error")}')
+                    stage_row(stages[6], 6, 'Dashboard Publish', 'Export', 'warning', 'History save skipped')
             else:
-                log(f':material/warning: Run history save skipped, '
-                    f'{st.session_state.get("db_error", "unknown error")}')
-                stage_row(stages[6], 6, 'Dashboard Publish', 'Export', 'warning', 'History save skipped')
-        else:
-            log(':material/check_circle: Dashboard views published (no history backend configured)')
-            stage_row(stages[6], 6, 'Dashboard Publish', 'Export', 'done', 'No history backend')
-        overall_progress(progress_slot, N_STAGES, N_STAGES)
-        log('Pipeline complete, dashboards refreshed')
+                log(':material/check_circle: Dashboard views published (no history backend configured)')
+                stage_row(stages[6], 6, 'Dashboard Publish', 'Export', 'done', 'No history backend')
+            overall_progress(progress_slot, N_STAGES, N_STAGES)
+            log('Pipeline complete, dashboards refreshed')
 
-        st.session_state.pipeline_success_message = (
-            f'Pipeline complete, {len(master):,} rows · '
-            f'{master["recurring_payment_id"].nunique():,} donor signups · '
-            f'ML forecast MAPE {st.session_state.mape:.1f}% (linear baseline {st.session_state.mape_linear:.1f}%)'
-        )
-        st.session_state.pipeline_running = False
-        st.session_state.page = 'Overview'
-        st.rerun()
+            st.session_state.pipeline_success_message = (
+                f'Pipeline complete, {len(master):,} rows · '
+                f'{master["recurring_payment_id"].nunique():,} donor signups · '
+                f'ML forecast MAPE {st.session_state.mape:.1f}% (linear baseline {st.session_state.mape_linear:.1f}%)'
+            )
+            st.session_state.pipeline_running = False
+            st.session_state.page = 'Overview'
+            st.rerun()
+        except Exception as exc:
+            # Outer safety net for file ingestion, build_master(), and the
+            # dashboard-publish step -- none of those had one before (the
+            # ML/stock-flow model stages already degrade gracefully via
+            # their own try/except inside run_pipeline_models(), see
+            # there). Confirmed live in a security review: without this,
+            # an uncaught exception here (e.g. a malformed CSV) showed
+            # Streamlit's raw default traceback in the browser -- internal
+            # file paths, library internals -- to whichever Administrator
+            # triggered it, and left pipeline_running stuck True
+            # afterward, disabling navigation with no way back in short of
+            # signing out and back in.
+            log(f':material/error: Pipeline failed: {exc}')
+            log(traceback.format_exc())
+            st.session_state.pipeline_error_message = (
+                f'The pipeline run failed: {exc}. See the Execution Log above for '
+                f'details, or try again -- this usually means one of the uploaded '
+                f'files has an unexpected format.'
+            )
+            st.rerun()
+        finally:
+            # Unconditional -- runs whether the try block succeeded (where
+            # it's a harmless no-op re-set, pipeline_running is already
+            # False by then) or raised, so a crash can never leave the run
+            # stuck in a state that disables navigation with no way out.
+            st.session_state.pipeline_running = False
 
     if st.session_state.pipeline_run:
         st.markdown('<div style="height:2px;"></div>', unsafe_allow_html=True)
