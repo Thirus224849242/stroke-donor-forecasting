@@ -101,14 +101,23 @@ NAV_SECTIONS = [
 NAV_ITEMS = [item for _, items in NAV_SECTIONS for item in items]
 
 # Hidden from the sidebar (and blocked with their own page-level guard in
-# app.py, defense in depth) for anyone whose role isn't Administrator --
-# see render_sidebar()'s is_admin filter below. Data Pipeline mutates the
-# shared dashboard state everyone sees next; Access Requests and Local
-# Accounts both grant account access, one for Google sign-in, one for the
-# email+password login. All three are sensitive enough to gate, unlike
-# everything else in NAV_SECTIONS, which is read-only for any signed-in
-# user.
+# app.py, defense in depth) for an Analyst -- see render_sidebar()'s
+# is_admin filter below. Data Pipeline mutates the shared dashboard state
+# everyone sees next; Access Requests and Local Accounts both grant
+# account access, one for Google sign-in, one for the email+password
+# login. All three are sensitive enough to gate, unlike everything else
+# in NAV_SECTIONS, which is read-only for any signed-in user.
 ADMIN_ONLY_NAV_ITEMS = {'Data Pipeline', 'Access Requests', 'Local Accounts'}
+
+# A second, narrower gate on top of the above: Access Requests and Local
+# Accounts are account-MANAGEMENT pages (create/delete/promote/demote/
+# revoke) -- restricted to Super Admin only, not every Administrator, so
+# that compromising or misusing a regular Administrator account can't be
+# used to create new accounts or hand out roles. Data Pipeline isn't in
+# this set -- an ordinary Administrator keeps that (and everything else
+# it always had: CSV exports, deleting a run), just no account-management
+# power. See render_sidebar()'s is_super_admin filter below.
+SUPER_ADMIN_ONLY_NAV_ITEMS = {'Access Requests', 'Local Accounts'}
 
 
 def _slug(text: str) -> str:
@@ -839,13 +848,19 @@ def _relative_time(dt) -> str:
 
 def render_sidebar():
     user = st.session_state.user or {'name': 'User', 'role': 'Analyst'}
-    # Administrator-only: ADMIN_ONLY_NAV_ITEMS (Data Pipeline mutates the
-    # shared dashboard state everyone sees next; Access Requests grants
-    # account access) are hidden from nav for anyone else -- same role
-    # check as app.py's own guard on each of those page bodies (defense
-    # in depth, in case session_state.page is ever set to one some other
-    # way), and as the delete-run/export-CSV gates elsewhere.
-    is_admin = user['role'] == 'Administrator'
+    # Administrator-or-above: ADMIN_ONLY_NAV_ITEMS (Data Pipeline mutates
+    # the shared dashboard state everyone sees next; Access Requests/Local
+    # Accounts grant account access) are hidden from nav for an Analyst --
+    # same role check as app.py's own guard on each of those page bodies
+    # (defense in depth, in case session_state.page is ever set to one
+    # some other way), and as the delete-run/export-CSV gates elsewhere.
+    # Super-Admin-only: on top of that, Access Requests/Local Accounts are
+    # further hidden from a regular Administrator -- account MANAGEMENT
+    # (create/delete/promote/demote/revoke) is Super Admin's alone; an
+    # ordinary Administrator keeps Data Pipeline and everything else it
+    # always had.
+    is_admin = user['role'] in ('Administrator', 'Super Admin')
+    is_super_admin = user['role'] == 'Super Admin'
     running = bool(st.session_state.get('pipeline_running'))
     with st.sidebar:
         _logo_uri = logo_white_data_uri()
@@ -867,8 +882,10 @@ def render_sidebar():
         for section, items in NAV_SECTIONS:
             if not is_admin:
                 items = [item for item in items if item[0] not in ADMIN_ONLY_NAV_ITEMS]
-                if not items:
-                    continue
+            elif not is_super_admin:
+                items = [item for item in items if item[0] not in SUPER_ADMIN_ONLY_NAV_ITEMS]
+            if not items:
+                continue
             st.markdown(f'<div class="sf-side-section">{section}</div>', unsafe_allow_html=True)
             for label, icon in items:
                 active = st.session_state.page == label
