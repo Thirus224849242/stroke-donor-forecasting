@@ -33,7 +33,7 @@ SESSION_KEYS = [
     'ml_importances', 'ml_trend_slope',
     'forecast_df_linear', 'mape_linear', 'mape_stockflow',
     'ltv_results', 'ltv_tuning', 'ltv_metrics', 'ltv_error', 'ltv_monthly', 'ltv_histogram',
-    'pipeline_running', 'pipeline_success_message',
+    'pipeline_running', 'pipeline_success_message', 'pipeline_error_message',
     'sf_walkforward', 'sf_components', 'sf_zone12', 'sf_zone3', 'sf_assumptions', 'sf_error',
     'db_error',
     'data_source', 'data_loaded_at', 'viewing_run_id',
