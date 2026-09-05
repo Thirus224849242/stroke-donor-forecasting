@@ -198,12 +198,78 @@ def initials(name: str) -> str:
 
 
 def sign_out():
+    """Two-step sign-out, not one -- this function ONLY sets a flag and
+    reruns; the actual state-clearing happens in complete_sign_out()
+    below, called at the very top of app.py on the NEXT run, before any
+    dashboard content renders. Clearing everything HERE (the original
+    version) meant the still-rendering dashboard -- everything below
+    wherever this was called from, e.g. the account popover in the page
+    header -- got its data pulled out from under it mid-script, then
+    Streamlit streamed that half-torn-down state to the browser for a
+    moment before the new run (driven by this same st.rerun()) replaced
+    it with the login page: reported live as data visibly "dropping out"
+    right before logging out. Splitting it into two runs means the
+    browser only ever sees a clean loading screen in between the full
+    dashboard and the login page, never that broken intermediate frame."""
+    st.session_state['_signing_out'] = True
+    st.rerun()
+
+
+def _render_transition_spinner(label: str):
+    """Small branded loading indicator for the brief moment between two
+    major auth-state transitions (signing in, signing out) -- rendered
+    right before a screen-clearing st.rerun()/st.logout() so the browser
+    has something clean to show instead of the previous screen's now-
+    stale content lingering visibly until the next run's real content
+    arrives. Two call sites: complete_sign_out() below (dashboard ->
+    login) and render_login()'s successful-submit branch (login ->
+    dashboard) -- factored out here specifically so both directions of
+    that same transition look and behave identically."""
+    st.markdown(f"""
+    <div style="display:flex;align-items:center;justify-content:center;height:80vh;">
+        <div style="text-align:center;">
+            <div style="width:34px;height:34px;border-radius:50%;margin:0 auto 16px;
+                border:3px solid #E2E8F0;border-top-color:#00897B;
+                animation:sf-transition-spin 0.8s linear infinite;"></div>
+            <div style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:12.5px;
+                font-weight:600;color:#64748B;letter-spacing:0.06em;text-transform:uppercase;">
+                {label}
+            </div>
+        </div>
+    </div>
+    <style>@keyframes sf-transition-spin {{ to {{ transform: rotate(360deg); }} }}</style>
+    """, unsafe_allow_html=True)
+
+
+def complete_sign_out():
+    """Call once, at the very top of app.py, before anything else renders
+    -- checks the flag sign_out() sets above and, only if it's set, shows
+    a brief branded loading screen and then actually clears session state
+    and completes the sign-out. Google needs st.logout() specifically to
+    clear Streamlit's own identity cookie (a plain rerun wouldn't); local
+    sign-in just needs the plain rerun -- either one raises internally
+    and aborts the rest of THIS script run on its own (same as every
+    other st.rerun()/st.stop() call in this file), so there's no
+    trailing st.stop() needed here the way render_login() and its
+    siblings below need one (they're blocking on user input, not
+    triggering an immediate transition)."""
+    if not st.session_state.get('_signing_out'):
+        return
     method = st.session_state.auth_method
+    st.html("""
+    <style>
+    [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"],
+    [data-testid="stHeader"], [data-testid="stToolbar"] { display: none !important; }
+    </style>
+    """)
+    _render_transition_spinner('Signing out')
+
     for k in SESSION_KEYS:
         st.session_state[k] = None
     st.session_state.authenticated = False
     st.session_state.page = 'Overview'
     st.session_state.pipeline_running = False
+    st.session_state['_signing_out'] = False
     if method == 'google':
         st.logout()  # clears Streamlit's identity cookie and reruns itself
     else:
@@ -232,6 +298,19 @@ def _render_auth_shell():
     }
     .block-container {
         max-width: 440px !important; padding-top: 8vh !important;
+        /* padding-left/right explicit here, not left to Streamlit's own
+        default -- confirmed live, this page's card was rendering ~300px
+        wide instead of the intended ~440px once layout=wide became the
+        app's single fixed layout (see app.py's own comment on that
+        change): wide layout's own default side padding for
+        .block-container is bigger than centered layout's was, and this
+        block never overrode padding-left/right itself, only padding-top,
+        so it silently inherited whichever default the active layout
+        happened to carry. Pinned to a small fixed value instead, so this
+        page's actual width is independent of which layout mode the rest
+        of the app is in. padding-bottom pinned too for the same reason,
+        even though nothing below the card currently depends on it. */
+        padding-left: 24px !important; padding-right: 24px !important; padding-bottom: 24px !important;
         margin-left: auto !important; margin-right: auto !important; float: none !important;
     }
     /* The real Stroke Foundation logo -- already carries the wordmark, so
@@ -296,73 +375,129 @@ def _render_auth_footer():
 
 
 def render_login():
-    """Full-screen sign-in page. Renders and stops the script."""
-    _render_auth_shell()
+    """Full-screen sign-in page. Renders and stops the script.
 
-    with st.container(key='login_card'):
-        st.markdown("**Sign in to your account**")
-        st.caption('Enter your credentials to access the F2F forecasting dashboard.')
+    The whole page (shell + card + footer) lives inside ONE st.empty()
+    placeholder specifically so the successful-login branch below can
+    clear it in a single call -- reported live: without that, a
+    successful submit set authenticated=True and called st.rerun()
+    immediately, but this run had ALREADY streamed the full login page
+    (logo, card, the just-submitted form, footer) to the browser before
+    reaching that point, so THAT stayed the last thing on screen while
+    the next run's dashboard (sidebar included) started streaming in
+    underneath/around it -- a broken hybrid of both screens at once,
+    not a clean transition. Clearing the placeholder and rendering
+    _render_transition_spinner() before the rerun (same technique
+    complete_sign_out() uses for the reverse transition) means the
+    browser sees login page -> clean spinner -> dashboard instead.
 
-        if google_auth_configured():
-            with st.container(key='google_login_btn'):
-                if st.button('Continue with Google', width='stretch'):
-                    st.login()
-            st.markdown('<div class="sf-login-divider">or</div>', unsafe_allow_html=True)
+    just_signed_in is set (not an immediate st.rerun() call) from deep
+    inside the nested form-handling logic below, then acted on ONLY
+    after the `with page.container():` block has fully exited --
+    calling page.empty() on a placeholder while still inside its own
+    `with ...container():` body would be clearing a container the
+    script is actively writing into, not a clean "replace what was
+    there before" the way it works once that block has closed."""
+    page = st.empty()
+    just_signed_in = False
+    with page.container():
+        _render_auth_shell()
 
-        with st.form('login_form', border=False):
-            email = st.text_input(
-                'Work email', placeholder='name@strokefoundation.org.au',
-                icon=':material/mail:',
-            )
-            password = st.text_input(
-                'Password', type='password', placeholder='Enter your password',
-                icon=':material/lock:',
-            )
-            submitted = st.form_submit_button(
-                'Sign in', type='primary', icon=':material/login:',
-            )
+        with st.container(key='login_card'):
+            st.markdown("**Sign in to your account**")
+            st.caption('Enter your credentials to access the F2F forecasting dashboard.')
 
-        if submitted:
-            clean_email = email.strip().lower()
-            if not db_configured():
-                # Distinct from a wrong password -- this means local login
-                # can't work at all right now (local_accounts lives in the
-                # same Supabase database as everything else in db.py), not
-                # that this particular attempt failed.
-                st.error('Local sign-in is unavailable right now (no database configured). '
-                          'Try Google sign-in instead, or contact an administrator.',
-                          icon=':material/error:')
-            else:
-                account = get_local_account(clean_email)
-                if account and verify_password(password, account['password_hash']):
-                    # Same domain restriction Google sign-in enforces
-                    # (handle_google_redirect() below) -- applied here too
-                    # per explicit request, as a defense-in-depth check.
-                    # Local accounts are admin-provisioned (there's no
-                    # self-service sign-up for this login path), so this
-                    # should never actually trip in normal use; it's a
-                    # safety net, not the primary gate.
-                    domain = clean_email.rsplit('@', 1)[-1] if '@' in clean_email else ''
-                    if domain not in ALLOWED_GOOGLE_DOMAINS and clean_email not in GOOGLE_EXTRA_ALLOWED_EMAILS:
-                        st.error('This account is not on an authorised domain. Contact an administrator.',
-                                  icon=':material/block:')
-                    else:
-                        st.session_state.authenticated = True
-                        st.session_state.auth_method = 'password'
-                        st.session_state.user = {
-                            'email': clean_email,
-                            'name': account['name'],
-                            'role': account['role'],
-                        }
-                        st.rerun()
+            if google_auth_configured():
+                with st.container(key='google_login_btn'):
+                    if st.button('Continue with Google', width='stretch'):
+                        st.login()
+                st.markdown('<div class="sf-login-divider">or</div>', unsafe_allow_html=True)
+
+            with st.form('login_form', border=False):
+                email = st.text_input(
+                    'Work email', placeholder='name@strokefoundation.org.au',
+                    icon=':material/mail:',
+                )
+                password = st.text_input(
+                    'Password', type='password', placeholder='Enter your password',
+                    icon=':material/lock:',
+                )
+                submitted = st.form_submit_button(
+                    'Sign in', type='primary', icon=':material/login:',
+                )
+
+            if submitted:
+                clean_email = email.strip().lower()
+                if not db_configured():
+                    # Distinct from a wrong password -- this means local login
+                    # can't work at all right now (local_accounts lives in the
+                    # same Supabase database as everything else in db.py), not
+                    # that this particular attempt failed.
+                    st.error('Local sign-in is unavailable right now (no database configured). '
+                              'Try Google sign-in instead, or contact an administrator.',
+                              icon=':material/error:')
                 else:
-                    # Deliberately the SAME message whether the email has no
-                    # local account at all or the password was just wrong --
-                    # distinguishing them would let this form be used to
-                    # enumerate which emails have accounts.
-                    st.error('Incorrect email or password. Please try again.', icon=':material/error:')
+                    # get_local_account() below is the FIRST database call of
+                    # the whole session -- st.cache_resource's engine (db.py's
+                    # get_engine()) hasn't connected yet, so THIS call, not
+                    # the post-login restore step in app.py, is where the
+                    # ~2.7s TCP/TLS/auth handshake to Supabase actually gets
+                    # paid on a freshly-started server (confirmed live: without
+                    # this, the login card just sat there greyed out with no
+                    # feedback for the whole handshake, then jumped straight
+                    # to the dashboard once app.py's own bar -- now hitting an
+                    # already-warm connection -- flashed by too fast to see).
+                    # Showing the same sticky bar immediately here, before the
+                    # call, means there's no gap where nothing on screen
+                    # explains the wait. Local import: ui.py imports from this
+                    # module (initials/sign_out) at its own top level, so a
+                    # top-level `from ui import ...` here would be a circular
+                    # import; deferring it to call time (after both modules
+                    # have already finished loading) avoids that.
+                    from ui import render_startup_progress
+                    _login_bar = st.empty()
+                    render_startup_progress(_login_bar)
+                    account = get_local_account(clean_email)
+                    if account and verify_password(password, account['password_hash']):
+                        # Same domain restriction Google sign-in enforces
+                        # (handle_google_redirect() below) -- applied here too
+                        # per explicit request, as a defense-in-depth check.
+                        # Local accounts are admin-provisioned (there's no
+                        # self-service sign-up for this login path), so this
+                        # should never actually trip in normal use; it's a
+                        # safety net, not the primary gate.
+                        domain = clean_email.rsplit('@', 1)[-1] if '@' in clean_email else ''
+                        if domain not in ALLOWED_GOOGLE_DOMAINS and clean_email not in GOOGLE_EXTRA_ALLOWED_EMAILS:
+                            _login_bar.empty()
+                            st.error('This account is not on an authorised domain. Contact an administrator.',
+                                      icon=':material/block:')
+                        else:
+                            st.session_state.authenticated = True
+                            st.session_state.auth_method = 'password'
+                            st.session_state.user = {
+                                'email': clean_email,
+                                'name': account['name'],
+                                'role': account['role'],
+                            }
+                            just_signed_in = True
+                            # _login_bar deliberately left showing -- just_signed_in
+                            # below clears the whole page (this bar included) and
+                            # replaces it with the transition spinner before the
+                            # rerun, so there's no gap here either.
+                    else:
+                        _login_bar.empty()
+                        # Deliberately the SAME message whether the email has no
+                        # local account at all or the password was just wrong --
+                        # distinguishing them would let this form be used to
+                        # enumerate which emails have accounts.
+                        st.error('Incorrect email or password. Please try again.', icon=':material/error:')
 
-    _render_auth_footer()
+        _render_auth_footer()
+
+    if just_signed_in:
+        page.empty()
+        _render_transition_spinner('Signing in')
+        st.rerun()
     st.stop()
 
 
