@@ -273,6 +273,7 @@ def save_dashboard_run(state: dict, summary: dict) -> str | None:
                 'data': payload,
             })
         count_new_runs.clear()  # every other user's sidebar badge should see this run right away, not after 30s
+        list_dashboard_runs.clear()  # so Overview/Run History see the new run immediately, not after its own ttl
         return run_id
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -328,10 +329,15 @@ def mark_runs_seen(email: str) -> None:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
 
 
+@st.cache_data(show_spinner=False, ttl=30)
 def list_dashboard_runs() -> pd.DataFrame:
     """All past runs, most recent first, WITHOUT their full blobs -- cheap,
     for the Run History list/trend-over-time view. Empty DataFrame if
-    unavailable."""
+    unavailable. Cached (short ttl, cleared immediately by save/delete
+    below) -- this was an uncached query hit on every single Overview
+    load (the default landing page) plus twice more per rerun on Run
+    History, same "runs on every page, not just its own" reasoning as
+    count_new_runs()/count_pending_requests() above."""
     engine = get_engine()
     if engine is None:
         return pd.DataFrame()
@@ -384,6 +390,7 @@ def delete_dashboard_run(run_id: str) -> bool:
         with engine.begin() as conn:
             conn.execute(text('DELETE FROM dashboard_runs WHERE run_id = :run_id'), {'run_id': run_id})
         count_new_runs.clear()  # a deleted run shouldn't linger in anyone's "new" badge count
+        list_dashboard_runs.clear()  # so it disappears from Overview/Run History immediately
         return True
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -416,11 +423,16 @@ def get_local_account(email: str) -> dict | None:
         return None
 
 
+@st.cache_data(show_spinner=False, ttl=15)
 def list_local_accounts() -> pd.DataFrame:
     """Every local account, most recently created first -- for the
     Administrator-only Local Accounts page. Never includes password_hash
     (that column is only ever read by get_local_account(), for verifying
-    an actual login attempt). Empty DataFrame if unavailable."""
+    an actual login attempt). Empty DataFrame if unavailable. Cached
+    (short ttl, cleared immediately by create/update-role/delete below)
+    -- this ran uncached on every render of the Users page, and again on
+    every single admin action taken there (approve/deny/revoke/restore/
+    role-change/delete all trigger a full rerun)."""
     engine = get_engine()
     if engine is None:
         return pd.DataFrame()
@@ -453,6 +465,7 @@ def create_local_account(email: str, name: str, role: str, password: str) -> boo
                 'email': email, 'name': name, 'role': role,
                 'password_hash': hash_password(password),
             })
+        list_local_accounts.clear()  # so the new account shows up on the Users page immediately
         return True
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -495,6 +508,7 @@ def update_local_account_role(email: str, role: str) -> bool:
             result = conn.execute(text("""
                 UPDATE local_accounts SET role = :role WHERE email = :email
             """), {'email': email, 'role': role})
+        list_local_accounts.clear()  # so the new role shows up on the Users page immediately
         return result.rowcount > 0
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -514,6 +528,7 @@ def delete_local_account(email: str) -> bool:
     try:
         with engine.begin() as conn:
             conn.execute(text('DELETE FROM local_accounts WHERE email = :email'), {'email': email})
+        list_local_accounts.clear()  # so the deleted account disappears from the Users page immediately
         return True
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -563,6 +578,7 @@ def request_access(email: str, name: str) -> bool:
                 WHERE users.status = 'denied'
             """), {'email': email, 'name': name, 'requested_at': datetime.now()})
         count_pending_requests.clear()  # so the sidebar badge picks this up immediately, not after its 30s ttl
+        list_pending_requests.clear()  # so the new request shows up on the Users page immediately
         return True
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -592,9 +608,14 @@ def count_pending_requests() -> int:
         return 0
 
 
+@st.cache_data(show_spinner=False, ttl=15)
 def list_pending_requests() -> pd.DataFrame:
     """All pending access requests, oldest first -- for the Administrator-
-    only Access Requests page. Empty DataFrame if unavailable."""
+    only Access Requests page. Empty DataFrame if unavailable. Cached
+    (short ttl, cleared immediately by request_access()/
+    decide_access_request() below) -- same reasoning as
+    list_local_accounts() above: uncached, this ran on every render of
+    the Users page and every admin action taken there."""
     engine = get_engine()
     if engine is None:
         return pd.DataFrame()
@@ -628,6 +649,13 @@ def decide_access_request(email: str, approve: bool, decided_by: str) -> bool:
                 'decided_at': datetime.now(), 'decided_by': decided_by, 'email': email,
             })
         count_pending_requests.clear()  # so the sidebar badge drops immediately, not after its 30s ttl
+        # Approve moves the row from pending to approved; deny moves it from
+        # pending to denied -- clearing all three unconditionally is simpler
+        # and just as cheap as branching on `approve` to clear only the two
+        # actually affected.
+        list_pending_requests.clear()
+        list_approved_users.clear()
+        list_denied_users.clear()
         return True
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -635,6 +663,7 @@ def decide_access_request(email: str, approve: bool, decided_by: str) -> bool:
         return False
 
 
+@st.cache_data(show_spinner=False, ttl=15)
 def list_approved_users() -> pd.DataFrame:
     """Every currently-approved Google-sign-in user (both people who went
     through the request queue and the GOOGLE_ADMIN_EMAILS bootstrap seed --
@@ -642,7 +671,9 @@ def list_approved_users() -> pd.DataFrame:
     user-management view, where their role can be changed or their access
     revoked. Local (email+password) accounts are a completely separate
     table/page (local_accounts / Local Accounts) -- this is Google
-    sign-in access only."""
+    sign-in access only. Cached (short ttl, cleared immediately by
+    decide_access_request()/update_user_role()/revoke_user_access() --
+    same reasoning as list_pending_requests() above."""
     engine = get_engine()
     if engine is None:
         return pd.DataFrame()
@@ -651,6 +682,32 @@ def list_approved_users() -> pd.DataFrame:
             return pd.read_sql(text("""
                 SELECT email, name, role, decided_at FROM users
                 WHERE status = 'approved' ORDER BY decided_at DESC NULLS LAST
+            """), conn)
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return pd.DataFrame()
+
+
+@st.cache_data(show_spinner=False, ttl=15)
+def list_denied_users() -> pd.DataFrame:
+    """Every Google sign-in user whose access is currently revoked/denied --
+    the counterpart to list_approved_users(). Without this, a revoked user
+    simply vanished from every admin view once decided (list_pending_requests
+    only shows 'pending', list_approved_users only shows 'approved') -- a
+    Super Admin could revoke someone but had no way to see or reverse that
+    decision afterward; only the affected user, from their own "Access
+    denied" screen, could submit a fresh request to get back on the pending
+    queue. This lets a Super Admin restore access directly instead, with no
+    dependency on the revoked person doing anything first."""
+    engine = get_engine()
+    if engine is None:
+        return pd.DataFrame()
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(text("""
+                SELECT email, name, role, decided_at FROM users
+                WHERE status = 'denied' ORDER BY decided_at DESC NULLS LAST
             """), conn)
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -673,6 +730,7 @@ def update_user_role(email: str, role: str) -> bool:
             result = conn.execute(text("""
                 UPDATE users SET role = :role WHERE email = :email AND status = 'approved'
             """), {'email': email, 'role': role})
+        list_approved_users.clear()  # so the new role shows up on the Users page immediately
         return result.rowcount > 0
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -699,6 +757,8 @@ def revoke_user_access(email: str, decided_by: str) -> bool:
                 UPDATE users SET status = 'denied', decided_at = :now, decided_by = :decided_by
                 WHERE email = :email AND status = 'approved'
             """), {'email': email, 'now': datetime.now(), 'decided_by': decided_by})
+        list_approved_users.clear()  # so the revoked user disappears from the approved list immediately
+        list_denied_users.clear()  # ...and appears on the revoked list immediately
         return result.rowcount > 0
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -722,6 +782,7 @@ def upsert_approved_user(email: str, name: str, role: str, decided_by: str) -> b
                 ON CONFLICT (email) DO UPDATE SET
                     name = EXCLUDED.name, role = EXCLUDED.role, status = 'approved'
             """), {'email': email, 'name': name, 'role': role, 'now': datetime.now(), 'decided_by': decided_by})
+        list_approved_users.clear()  # in case this changed an existing row's name/role
         return True
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs

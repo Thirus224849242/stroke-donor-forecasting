@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from auth import initials, sign_out
-from branding import logo_white_data_uri
+from branding import logo_data_uri, logo_white_data_uri
 from db import count_new_runs, count_pending_requests, get_local_account, update_local_account_password, verify_password
 
 # ── BRAND PALETTE ────────────────────────────────────────────────────────────
@@ -94,8 +94,7 @@ NAV_SECTIONS = [
     ]),
     ('Operations', [
         ('Run History',      ':material/history:'),
-        ('Access Requests',  ':material/how_to_reg:'),
-        ('Local Accounts',   ':material/manage_accounts:'),
+        ('Users',            ':material/manage_accounts:'),
     ]),
 ]
 NAV_ITEMS = [item for _, items in NAV_SECTIONS for item in items]
@@ -103,21 +102,24 @@ NAV_ITEMS = [item for _, items in NAV_SECTIONS for item in items]
 # Hidden from the sidebar (and blocked with their own page-level guard in
 # app.py, defense in depth) for an Analyst -- see render_sidebar()'s
 # is_admin filter below. Data Pipeline mutates the shared dashboard state
-# everyone sees next; Access Requests and Local Accounts both grant
-# account access, one for Google sign-in, one for the email+password
-# login. All three are sensitive enough to gate, unlike everything else
-# in NAV_SECTIONS, which is read-only for any signed-in user.
-ADMIN_ONLY_NAV_ITEMS = {'Data Pipeline', 'Access Requests', 'Local Accounts'}
+# everyone sees next; Users grants account access, for both Google
+# sign-in and local email+password login (one unified page -- used to be
+# two separate pages, Access Requests and Local Accounts, merged so a
+# Super Admin manages every account from one place regardless of how
+# that person signs in). Both are sensitive enough to gate, unlike
+# everything else in NAV_SECTIONS, which is read-only for any signed-in
+# user.
+ADMIN_ONLY_NAV_ITEMS = {'Data Pipeline', 'Users'}
 
-# A second, narrower gate on top of the above: Access Requests and Local
-# Accounts are account-MANAGEMENT pages (create/delete/promote/demote/
-# revoke) -- restricted to Super Admin only, not every Administrator, so
+# A second, narrower gate on top of the above: Users is an account-
+# MANAGEMENT page (create/delete/promote/demote/revoke, for both login
+# types) -- restricted to Super Admin only, not every Administrator, so
 # that compromising or misusing a regular Administrator account can't be
 # used to create new accounts or hand out roles. Data Pipeline isn't in
 # this set -- an ordinary Administrator keeps that (and everything else
 # it always had: CSV exports, deleting a run), just no account-management
 # power. See render_sidebar()'s is_super_admin filter below.
-SUPER_ADMIN_ONLY_NAV_ITEMS = {'Access Requests', 'Local Accounts'}
+SUPER_ADMIN_ONLY_NAV_ITEMS = {'Users'}
 
 
 def _slug(text: str) -> str:
@@ -492,13 +494,24 @@ def inject_global_css():
     .sf-cached-run-banner itself is position:fixed and out of flow, so a
     full gap was still inserted before the next real element. :has()
     targets JUST that one wrapper (never every stElementContainer --
-    would strip intentional spacing everywhere else) and takes it out of
-    flex layout entirely via display:contents, so it no longer counts
-    toward gap at all; its child (the actual banner div) is unaffected,
-    since display:contents only removes the WRAPPER's own box, not its
-    children's rendering. */
+    would strip intentional spacing everywhere else).
+    position:absolute here, NOT display:contents (an earlier version of
+    this rule) -- re-measured live with actual getBoundingClientRect()
+    calls, not just visual inspection, and contents does NOT remove a
+    flex item's gap contribution the way it sounds like it should: it
+    only unwraps this wrapper's own box, but its child (the stMarkdown
+    div containing the fixed banner) gets PROMOTED to take its place as
+    a flex item and still costs a full gap, just as before -- confirmed
+    live, a full gap unit was still measurably present with contents
+    active. position:absolute genuinely removes the wrapper from normal
+    flow (no flex item, no gap, regardless of what's nested inside it),
+    while .sf-cached-run-banner's own position:fixed on the actual child
+    still positions it against the viewport exactly as before -- a
+    position:absolute ancestor doesn't change that (only a transform/
+    filter/perspective/contain ancestor would, and none exists in this
+    chain). */
     [data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] .sf-cached-run-banner) {{
-        display: contents;
+        position: absolute;
     }}
     </style>
     """)
@@ -825,6 +838,58 @@ def inject_global_css():
     [data-testid="stDataFrame"] {{ border-radius: 0 !important; overflow: hidden; }}
     </style>
     """)
+    # A THIRD, small st.html() call, not appended to either block above --
+    # confirmed live, twice now, that adding this rule's text to either of
+    # the two existing calls (even the shorter one) reproduces the exact
+    # silent-failure-above-a-size-threshold bug the two-way split above
+    # already exists to avoid: whichever call gained the extra text simply
+    # stopped rendering at all (every one of its rules gone from the
+    # page's actual <style> tags, no error anywhere), even rules that had
+    # worked moments earlier. A separate, minimal call sidesteps that
+    # instead of chasing the exact byte threshold.
+    #
+    # The rule itself: render_cached_run_banner() (below) emits the
+    # banner's own markdown div, THEN one or two st.html() <script> calls
+    # right after it (the always-on mousemove/ResizeObserver listener,
+    # plus a one-shot "show now" call on a nav-triggered render) -- each
+    # in its own stElementContainer. The banner-gap-fix rule above (in the
+    # first call) only ever targeted the markdown div's wrapper via :has()
+    # -- the script wrappers aren't stMarkdown, so that rule never matched
+    # them, and they kept counting as real flex children: same zero-
+    # height-still-costs-a-full-gap bug, just on the sibling(s) right
+    # after the banner div, visible as empty space above every page's
+    # title specifically whenever a cached run is loaded (the common
+    # case -- a fresh session auto-loads the most recent run).
+    #
+    # display:none here, not display:contents -- confirmed live that
+    # contents (which is what the banner's OWN wrapper rule above uses)
+    # does NOT actually remove a gap contribution the way its own comment
+    # claims: it unwraps the container, but the PROMOTED child (the real
+    # <script> element's own wrapper div) still counts as a flex item and
+    # the gap remained, measured, unchanged. display:none genuinely
+    # removes an element from flex layout entirely -- safe here
+    # specifically because these wrappers only ever hold a <script> tag
+    # (no visible content to lose), unlike the banner's own wrapper,
+    # which needs its position:fixed child to keep rendering and so must
+    # stay display:contents, not display:none.
+    st.html(f"""
+    <style>
+    [data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] .sf-cached-run-banner)
+        + [data-testid="stElementContainer"],
+    [data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] .sf-cached-run-banner)
+        + [data-testid="stElementContainer"] + [data-testid="stElementContainer"] {{
+        display: none;
+    }}
+    /* Same un-styling as .st-key-page_header_block/.st-key-page_header_row
+    above -- this container (Data Pipeline's flow-diagram+uploads+Start
+    button group) is pure layout grouping, not a card, but picked up the
+    same accidental bordered-card look those two did (see app.py's own
+    comment at upload_area's definition for the full explanation). */
+    [data-testid="stVerticalBlock"].st-key-pipeline_upload_area {{
+        background: transparent !important; border: none !important; box-shadow: none !important;
+    }}
+    </style>
+    """)
 
 
 # ── LAYOUT COMPONENTS ─────────────────────────────────────────────────────────
@@ -901,7 +966,7 @@ def render_sidebar():
                 # Notification badges -- Run History: dashboard_runs saved
                 # since this user last opened that page (count_new_runs,
                 # cleared by mark_runs_seen() when app.py actually renders
-                # it). Access Requests: the live pending-request count, no
+                # it). Users: the live pending-Google-request count, no
                 # "seen" state at all -- it's an open item needing a
                 # decision, not a feed to catch up on, so the badge just
                 # tracks decide_access_request() directly. Both queries
@@ -910,7 +975,7 @@ def render_sidebar():
                 badge = 0
                 if label == 'Run History':
                     badge = count_new_runs(user.get('email', ''))
-                elif label == 'Access Requests':
+                elif label == 'Users':
                     badge = count_pending_requests()
                 if badge:
                     st.html(f"""<style>
@@ -1258,6 +1323,71 @@ def render_cached_run_banner(loaded_str: str, nav_triggered: bool = False):
         """, unsafe_allow_javascript=True)
 
 
+def render_footer():
+    """Call once, last, after everything else on the page -- the
+    ordinary end-of-content site footer every page gets, not a
+    position:fixed bar (per explicit request: this app's dashboard
+    pages are already data-dense, and a permanently pinned bar would
+    sit on top of chart/table content on every one of them; this
+    version just naturally follows the last card, present even on a
+    short page since it's still the next real element in flow, but
+    scrolling away with everything else on a long one -- the ordinary
+    behaviour a website footer has).
+
+    A solid navy band, full-bleed to the browser edge (negative margin
+    cancelling .block-container's own 2rem side padding, then reapplying
+    it as the band's own padding so its CONTENT still lines up with
+    every card above it) -- reported live that an earlier version (a
+    thin hairline border above plain page-coloured text) didn't actually
+    read as a footer at all, just more page content, and was too tall
+    for what little it said. This is deliberately a single compact row,
+    not stacked lines, and deliberately fixed navy in BOTH light and
+    dark mode -- not the dynamic {{SURFACE}}/{{TEXT}} palette the rest of
+    the page follows -- same reasoning as the sidebar elsewhere in this
+    file: a footer band, like a sidebar, reads as a constant brand
+    element, not page content that should flip with the theme toggle.
+
+    Plain inline styles on the elements themselves, not a new class
+    added to inject_global_css()'s stylesheet -- deliberately, after
+    that file's own st.html() calls were confirmed live (more than
+    once) to silently drop their ENTIRE content once pushed over some
+    undetermined size threshold; a handful of one-off styles for a
+    footer that renders once per page isn't worth that risk for what
+    inject_global_css() would otherwise save (a few repeated class
+    names), and every other one-off block in this app (the cached-run
+    banner's own inner text, the sign-out loading screen in auth.py)
+    already follows this same inline-style convention for exactly that
+    reason.
+
+    Content is deliberately minimal and only ever states things already
+    true elsewhere in this app -- org name and "contact your Super Admin
+    for access" (the actual mechanism built this session, see the Users
+    page) -- no invented support email, and no Privacy Policy/Terms
+    links to pages that don't exist; a real marketing site's footer has
+    those because the pages exist, this app's doesn't."""
+    _logo_uri = logo_white_data_uri()
+    _logo_html = (
+        f'<img src="{_logo_uri}" alt="Stroke Foundation" style="height:18px;width:auto;flex-shrink:0;">'
+        if _logo_uri else ''
+    )
+    st.markdown(f"""
+    <div style="margin:28px -2rem -2.5rem; padding:12px 2rem 16px; background:#1E1E5F;
+        display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px 24px;">
+        <div style="display:flex; align-items:center; gap:9px;">
+            {_logo_html}
+            <span style="font-family:'Space Grotesk',system-ui,sans-serif; font-size:11.5px;
+                font-weight:600; color:#FFFFFF;">Donor Forecasting Tool</span>
+            <span style="font-size:10.5px; color:rgba(255,255,255,0.45);">
+                &middot; Stroke Foundation of Australia
+            </span>
+        </div>
+        <div style="font-size:10.5px; color:rgba(255,255,255,0.45); white-space:nowrap;">
+            &copy; {pd.Timestamp.now().year} &middot; Internal use only &middot; Access issues: contact your Super Admin
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 def pill(text, color='green'):
     """Small rounded status badge -- 'Completed'/'Warning'/'Failed'-style
     pills used in Run History, the sidebar's active-run box, and pipeline
@@ -1311,6 +1441,50 @@ def overall_progress(placeholder, done: int, total: int):
     </div>
     <div class="sf-overall-track"><div class="sf-overall-fill" style="width:{pct}%;"></div></div>
     """, unsafe_allow_html=True)
+
+
+def render_startup_progress(placeholder, done: bool = False):
+    """A single thin bar, STICKY to the top of the viewport, using the
+    exact dimensions and animation of stage_row()'s own indeterminate
+    "running" bar (search .sf-stage-bar-fill.running above): 4px track,
+    a 40%-wide fill sliding left -40% -> 100%, 1.1s ease-in-out infinite.
+    No steps, no labels, no badges -- just that one pulsing bar, shown
+    from the moment the login form is submitted through to the dashboard
+    finishing its post-login restore (see the two call sites: auth.py's
+    render_login() and app.py's post-login restore block).
+
+    Deliberately not the shared .sf-stage-bar-track/.sf-stage-bar-fill
+    CSS classes or the shared @keyframes sf-bar-slide (both defined in
+    inject_global_css()'s stylesheet): this bar is shown starting from
+    the login page itself, before inject_global_css() has ever run for
+    this session -- confirmed live, referencing a class from a
+    stylesheet that isn't on the page yet renders unstyled. The values
+    below are copied from stage_row()'s CSS so the two look and move
+    identically anyway.
+
+    Why this exists at all rather than just fixing the underlying delay:
+    measured live against the real database, ~2.7s of the ~3.8s the
+    post-login restore step takes is the raw TCP/TLS/auth handshake
+    establishing the connection to Supabase's pooler (hosted in
+    ap-northeast-1) -- physical network latency, not something app code
+    can make faster. Rather than a blank "Signing in" spinner (or a
+    frozen-looking login form) sitting on screen for that whole stretch
+    with nothing to show for it, this gives the same "something is
+    actively happening" language the rest of the app already uses for
+    its one genuinely slow operation.
+
+    done: clears the bar entirely (call once, when the whole flow --
+    success, empty, or failed -- is finished)."""
+    if done:
+        placeholder.empty()
+        return
+    placeholder.markdown(f"""<div style="position:fixed;top:0;left:0;right:0;height:4px;z-index:999999;
+background:rgba(0,0,0,0.08);overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.15);">
+<div style="height:100%;width:40%;left:-40%;position:absolute;top:0;
+background:{GREEN};animation:sf-startup-bar-slide 1.1s ease-in-out infinite;"></div>
+</div>
+<style>@keyframes sf-startup-bar-slide {{ 0% {{ left:-40%; }} 100% {{ left:100%; }} }}</style>
+""", unsafe_allow_html=True)
 
 
 _LOG_ICON_SUB = {

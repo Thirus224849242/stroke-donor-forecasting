@@ -48,31 +48,31 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from auth import handle_google_redirect, init_session_state, render_login
+from auth import complete_sign_out, handle_google_redirect, init_session_state, render_login
 from branding import TITLE_LOGO_PATH
 from db import (
     create_local_account, db_configured, decide_access_request, delete_dashboard_run,
-    delete_local_account, list_approved_users, list_dashboard_runs, list_local_accounts,
-    list_pending_requests, load_dashboard_run, mark_runs_seen, revoke_user_access,
-    save_dashboard_run, update_local_account_password, update_local_account_role,
-    update_user_role,
+    delete_local_account, list_approved_users, list_dashboard_runs, list_denied_users,
+    list_local_accounts, list_pending_requests, load_dashboard_run, mark_runs_seen,
+    revoke_user_access, save_dashboard_run, update_local_account_password,
+    update_local_account_role, update_user_role,
 )
-from pipeline.build_master import build_master
-from pipeline.forecast import (
-    fit_linear_forecast,
-    get_campaign_roi,
-    get_monthly_actuals,
-    get_retention_by_segment,
-    get_supplier_breakdown,
-)
-from pipeline.ml_forecast import fit_ml_forecast
-from pipeline.ltv_model import fit_ltv_model
-from pipeline.stock_flow_forecast import build_production_forecast
+# pipeline.* modules are deliberately NOT imported here at module level --
+# measured directly, importing them (they pull in scikit-learn, statsmodels,
+# and lifetimes) costs ~1.3s of the ~1.8s this file's imports take in total,
+# and every one of those seconds was being paid on EVERY app start just to
+# reach the login page, which calls none of this. Each is imported lazily
+# instead, right inside the one or two functions that actually call it
+# (cached_ml_forecast, cached_linear_forecast, cached_ltv_fit,
+# run_pipeline_models, and the Data Pipeline run handler below) -- Python
+# caches an import in sys.modules after the first real one, so this only
+# defers WHEN that ~1.3s is paid (once real work is happening, not before
+# the login page even renders), it doesn't pay it more than once.
 from ui import (
     AMBER, BLUE, COLOURS, GREEN, LINE, MIST, PURPLE, RED, TEAL, TEAL2, TEXT,
     card, chart, empty_state, inject_global_css, kpi, new_execution_log,
-    overall_progress, page_header, render_cached_run_banner, render_sidebar,
-    stage_row, upload_slot,
+    overall_progress, page_header, render_cached_run_banner, render_footer,
+    render_sidebar, render_startup_progress, stage_row, upload_slot,
 )
 
 
@@ -85,13 +85,26 @@ from ui import (
 # feeling slow to load/interact with, not just a missing spinner). monthly
 # only changes after a new pipeline run, which naturally produces a
 # different cache key, so no manual invalidation is needed.
-@st.cache_data(show_spinner=False)
+#
+# max_entries=20 on all three -- this cache is process-wide (shared across
+# every session, not per-user), and its key is the actual `monthly`/`master`
+# DataFrame content, which changes every time ANYONE loads a different past
+# run from Run History (unbounded in principle -- the run-history table
+# itself has no row cap). Without a bound, every distinct historical run
+# anyone ever opens adds a permanent entry that's never evicted -- a slow
+# memory leak, not an immediate crash, but a real one on a host this memory-
+# constrained (see hosting-options.md). 20 comfortably covers "the handful
+# of runs someone's actually flipping between in one sitting" while
+# guaranteeing old entries eventually fall off.
+@st.cache_data(show_spinner=False, max_entries=20)
 def cached_ml_forecast(monthly, n_forecast=24):
+    from pipeline.ml_forecast import fit_ml_forecast
     return fit_ml_forecast(monthly, n_forecast=n_forecast)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=20)
 def cached_linear_forecast(monthly, n_train=24, n_forecast=24):
+    from pipeline.forecast import fit_linear_forecast
     return fit_linear_forecast(monthly, n_train=n_train, n_forecast=n_forecast)
 
 
@@ -101,8 +114,9 @@ def cached_linear_forecast(monthly, n_train=24, n_forecast=24):
 # run_pipeline_models() any more; it's fit lazily, right here, the first
 # time that page is opened, keyed on `master` so revisiting the page or
 # switching pages elsewhere never refits it.
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=20)
 def cached_ltv_fit(master):
+    from pipeline.ltv_model import fit_ltv_model
     return fit_ltv_model(master)
 
 
@@ -137,6 +151,11 @@ def run_pipeline_models(master, stages=None, progress=None, log=None):
     log: optional log(msg) callable (see ui.new_execution_log) for the
     Execution Log panel -- a no-op when not supplied (e.g. tests).
     """
+    from pipeline.forecast import (
+        get_campaign_roi, get_monthly_actuals, get_retention_by_segment, get_supplier_breakdown,
+    )
+    from pipeline.stock_flow_forecast import build_production_forecast
+
     N_STAGES = 6
     log = log or (lambda msg: None)
     prog_placeholder, done = progress or (None, 0)
@@ -436,7 +455,23 @@ def build_page_export_csv(page_name):
     tables = {name: df for name, df in tables.items() if df is not None and not df.empty}
     if not tables:
         return None
+    return _tables_to_csv(tables)
 
+
+# Split out of build_page_export_csv() above specifically so the EXPENSIVE
+# part (df.to_csv() over every table -- on the Donor Lifetime Value page in
+# particular, the full per-donor LTV table, potentially tens of thousands
+# of rows) is cached, while the CHEAP part (deciding which session_state
+# DataFrames belong to which page) still runs every time. build_page_export_
+# csv() itself can't be cached directly -- it reads a different, page-
+# dependent set of session_state keys internally that @st.cache_data has no
+# way to see, so caching on page_name alone would silently serve a stale
+# export after the underlying data changes. Caching on `tables` instead
+# sidesteps that entirely: the cache key IS the actual DataFrame content,
+# so a cache hit is only ever returned when the data is genuinely unchanged
+# (Streamlit's hasher supports dict-of-DataFrame arguments natively).
+@st.cache_data(show_spinner=False, max_entries=20)
+def _tables_to_csv(tables: dict) -> str:
     buf = io.StringIO()
     for name, df in tables.items():
         buf.write(f'## {name}\n')
@@ -446,14 +481,33 @@ def build_page_export_csv(page_name):
 
 
 init_session_state()
-handle_google_redirect()
 
+# layout is now a fixed 'wide', not conditional on authenticated the way
+# it used to be -- switching Streamlit's OWN layout mode between runs
+# (centered while signed out, wide once signed in) turned out to be
+# exactly what caused the login page's own elements to visibly "expand"
+# for a moment during the transition into the dashboard: confirmed live,
+# the login card's actual narrowing/centering was ALREADY handled purely
+# by CSS (.block-container max-width, see auth.py's _render_auth_shell()),
+# so the layout= switch was redundant with that AND the sole cause of an
+# extra, avoidable flash on top of it. A single fixed layout removes the
+# mode-switch entirely; the CSS-only narrowing still works exactly the
+# same regardless of which layout mode it's overriding.
 st.set_page_config(
     page_title='Donor Forecasting | Stroke Foundation',
     page_icon=str(TITLE_LOGO_PATH) if TITLE_LOGO_PATH.exists() else '🫀',
-    layout='centered' if not st.session_state.authenticated else 'wide',
+    layout='wide',
     initial_sidebar_state='expanded',
 )
+
+# Checked (and, if set, handled -- rendering a loading screen and
+# stopping this run) before handle_google_redirect() or render_login()
+# get any chance to render dashboard-adjacent content -- see
+# complete_sign_out()'s own docstring in auth.py for why this needs to
+# run this early.
+complete_sign_out()
+
+handle_google_redirect()
 
 if not st.session_state.authenticated:
     render_login()
@@ -463,7 +517,23 @@ if not st.session_state.authenticated:
 # rerun (a widget click reruns the whole script; we don't want a DB
 # round-trip on every single interaction). Run History lets you switch to
 # an older run later; this is just what a fresh session opens to.
+#
+# render_startup_progress() wraps this specifically -- confirmed live
+# against the real database, this step takes ~3.8s on the first
+# post-login run of a freshly-started app (~2.7s of that is just the
+# TCP/TLS/auth handshake establishing the connection, before either
+# query below even runs), and previously nothing on screen indicated why
+# -- the "Signing in" transition screen just sat there. That connection
+# latency itself isn't something app code can reduce (see the sticky
+# bar's own docstring in ui.py for the full investigation). auth.py's
+# render_login() already shows this same bar the instant the login form
+# is submitted (its own first DB call pays this same connection cost);
+# a fresh placeholder here just continues that same bar into this run
+# rather than leaving a gap, since a placeholder object doesn't survive
+# across the st.rerun() between the two.
 if not st.session_state.pipeline_run and db_configured():
+    _startup_bar = st.empty()
+    render_startup_progress(_startup_bar)
     _runs = list_dashboard_runs()
     if not _runs.empty:
         _latest_id = _runs.iloc[0]['run_id']
@@ -473,6 +543,7 @@ if not st.session_state.pipeline_run and db_configured():
             st.session_state.viewing_run_id  = _latest_id
             st.session_state.data_source     = 'cached'
             st.session_state.data_loaded_at  = _cached_at
+    render_startup_progress(_startup_bar, done=True)
 
 page = st.session_state.page
 # page_header() (called once per page, inside each page's own routing
@@ -546,9 +617,9 @@ if page == 'Data Pipeline':
     # defense-in-depth backstop in case session_state.page ever ends up
     # 'Data Pipeline' some other way. page_header() still has to render
     # first, same reason as every other page's empty_state() guard -- see
-    # its own docstring. Administrator-or-above -- unlike Access Requests/
-    # Local Accounts, running the pipeline isn't account-management, an
-    # ordinary Administrator keeps this.
+    # its own docstring. Administrator-or-above -- unlike Users, running
+    # the pipeline isn't account-management, an ordinary Administrator
+    # keeps this.
     if (st.session_state.user or {}).get('role') not in ('Administrator', 'Super Admin'):
         with card():
             st.markdown(f"""
@@ -569,51 +640,6 @@ if page == 'Data Pipeline':
                    'history. Uploading new files below adds a new run without affecting past ones. '
                    'See the **Run History** page to browse or reload any previous run.')
 
-    st.markdown(f"""
-    <div class="sf-pipeline">
-        <div class="sf-pipe-step">
-            <div class="sf-pipe-icon p-teal">
-                <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-            </div>
-            <div><div class="sf-pipe-label">Upload</div><div class="sf-pipe-desc">4 CSV files</div></div>
-        </div>
-        <div class="sf-pipe-arrow">›</div>
-        <div class="sf-pipe-step">
-            <div class="sf-pipe-icon p-navy">
-                <svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-            </div>
-            <div><div class="sf-pipe-label">Clean</div><div class="sf-pipe-desc">Standardise</div></div>
-        </div>
-        <div class="sf-pipe-arrow">›</div>
-        <div class="sf-pipe-step">
-            <div class="sf-pipe-icon p-navy">
-                <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/>
-                <rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
-                <rect x="3" y="14" width="7" height="7"/></svg>
-            </div>
-            <div><div class="sf-pipe-label">Build master</div><div class="sf-pipe-desc">Join all 4</div></div>
-        </div>
-        <div class="sf-pipe-arrow">›</div>
-        <div class="sf-pipe-step">
-            <div class="sf-pipe-icon p-purple">
-                <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/>
-                <path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-            </div>
-            <div><div class="sf-pipe-label">Forecast</div><div class="sf-pipe-desc">Run model</div></div>
-        </div>
-        <div class="sf-pipe-arrow">›</div>
-        <div class="sf-pipe-step">
-            <div class="sf-pipe-icon p-amber">
-                <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/>
-                <rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
-                <rect x="3" y="14" width="7" height="7"/></svg>
-            </div>
-            <div><div class="sf-pipe-label">Dashboard</div><div class="sf-pipe-desc">Views update</div></div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
     ICON_CARD  = '<rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/>'
     ICON_LOOP  = '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>'
     ICON_USERS = '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'
@@ -626,41 +652,114 @@ if page == 'Data Pipeline':
 
     running = st.session_state.pipeline_running
 
-    st.markdown('<div class="sf-eyebrow">Source files</div>', unsafe_allow_html=True)
-    col1, col2 = st.columns(2)
-    with col1:
-        f_pay, pay_valid = upload_slot('Payments.csv', 'Every card charge attempt · up to 1024 MB',
-                                        ICON_CARD, 'p-teal', 'up_p', REQUIRED_PAYMENTS, disabled=running)
-        f_rec, rec_valid = upload_slot('Recurring Payments.csv', 'Every donor regular-giving signup',
-                                        ICON_LOOP, 'p-navy', 'up_r', REQUIRED_RECURRING, disabled=running)
-    with col2:
-        f_con, con_valid = upload_slot('Contacts.csv', 'One row per unique donor',
-                                        ICON_USERS, 'p-purple', 'up_c', REQUIRED_CONTACTS, disabled=running)
-        f_cam, cam_valid = upload_slot('Campaigns.csv', 'One row per recruitment campaign · includes CPA',
-                                        ICON_TARGET, 'p-amber', 'up_ca', REQUIRED_CAMPAIGNS, disabled=running)
+    # Everything above the "Forecasting pipeline"/"Execution log" cards --
+    # the flow diagram, the 4 upload slots, and the Start button (moved
+    # here, below the uploads, rather than living in the pipeline card's
+    # own header -- per explicit request, "start" reads more naturally
+    # as the next action after choosing files than as a title-bar
+    # control) -- lives in ONE st.empty() placeholder specifically so it
+    # can be cleared in one call once the run starts (see upload_area.
+    # empty() right below this block): a run can take several minutes,
+    # and the upload widgets/flow diagram are irrelevant once it's
+    # actually in progress, per explicit request ("only the bottom 2
+    # elements... should be visible"). Streamlit still needs these
+    # upload_slot() calls to actually EXECUTE every run (that's the only
+    # way to get f_pay/f_rec/f_con/f_cam's current value at all, running
+    # or not) -- clearing the placeholder right after removes their
+    # rendered output from the page without preventing that.
+    #
+    # key='pipeline_upload_area' -- confirmed live, this container (even
+    # with border left at its default) was rendering as ONE bordered
+    # card wrapping the flow diagram, uploads, AND the button together,
+    # reported as "these are supposed to be individual elements... they
+    # all are under 1 box". Same root cause already documented elsewhere
+    # in ui.py (see .st-key-page_header_block/.st-key-page_header_row):
+    # any st.container(), keyed or not, carries the same overflow=
+    # "visible" attribute a real border=True container does, which is
+    # what inject_global_css()'s global card-style rule actually keys
+    # off. A stable key gives this one container a specific CSS class
+    # (st-key-pipeline_upload_area) so it can be un-styled the same way
+    # those two already are, instead of looking like an accidental card.
+    upload_area = st.empty()
+    with upload_area.container(key='pipeline_upload_area'):
+        st.markdown(f"""
+        <div class="sf-pipeline">
+            <div class="sf-pipe-step">
+                <div class="sf-pipe-icon p-teal">
+                    <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                </div>
+                <div><div class="sf-pipe-label">Upload</div><div class="sf-pipe-desc">4 CSV files</div></div>
+            </div>
+            <div class="sf-pipe-arrow">›</div>
+            <div class="sf-pipe-step">
+                <div class="sf-pipe-icon p-navy">
+                    <svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                </div>
+                <div><div class="sf-pipe-label">Clean</div><div class="sf-pipe-desc">Standardise</div></div>
+            </div>
+            <div class="sf-pipe-arrow">›</div>
+            <div class="sf-pipe-step">
+                <div class="sf-pipe-icon p-navy">
+                    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/>
+                    <rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+                    <rect x="3" y="14" width="7" height="7"/></svg>
+                </div>
+                <div><div class="sf-pipe-label">Build master</div><div class="sf-pipe-desc">Join all 4</div></div>
+            </div>
+            <div class="sf-pipe-arrow">›</div>
+            <div class="sf-pipe-step">
+                <div class="sf-pipe-icon p-purple">
+                    <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                    <path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                </div>
+                <div><div class="sf-pipe-label">Forecast</div><div class="sf-pipe-desc">Run model</div></div>
+            </div>
+            <div class="sf-pipe-arrow">›</div>
+            <div class="sf-pipe-step">
+                <div class="sf-pipe-icon p-amber">
+                    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/>
+                    <rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+                    <rect x="3" y="14" width="7" height="7"/></svg>
+                </div>
+                <div><div class="sf-pipe-label">Dashboard</div><div class="sf-pipe-desc">Views update</div></div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-    all_up    = all([f_pay, f_rec, f_con, f_cam])
-    all_valid = all([pay_valid, rec_valid, con_valid, cam_valid])
+        st.markdown('<div class="sf-eyebrow">Source files</div>', unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            f_pay, pay_valid = upload_slot('Payments.csv', 'Every card charge attempt · up to 1024 MB',
+                                            ICON_CARD, 'p-teal', 'up_p', REQUIRED_PAYMENTS, disabled=running)
+            f_rec, rec_valid = upload_slot('Recurring Payments.csv', 'Every donor regular-giving signup',
+                                            ICON_LOOP, 'p-navy', 'up_r', REQUIRED_RECURRING, disabled=running)
+        with col2:
+            f_con, con_valid = upload_slot('Contacts.csv', 'One row per unique donor',
+                                            ICON_USERS, 'p-purple', 'up_c', REQUIRED_CONTACTS, disabled=running)
+            f_cam, cam_valid = upload_slot('Campaigns.csv', 'One row per recruitment campaign · includes CPA',
+                                            ICON_TARGET, 'p-amber', 'up_ca', REQUIRED_CAMPAIGNS, disabled=running)
 
-    if all_up and not all_valid:
-        st.error('One or more files don\'t match what\'s expected for their slot. Fix the file(s) flagged '
-                  'above before running the pipeline.', icon=':material/error:')
+        all_up    = all([f_pay, f_rec, f_con, f_cam])
+        all_valid = all([pay_valid, rec_valid, con_valid, cam_valid])
 
-    st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
+        if all_up and not all_valid:
+            st.error('One or more files don\'t match what\'s expected for their slot. Fix the file(s) flagged '
+                      'above before running the pipeline.', icon=':material/error:')
 
-    # Numbered stage list (matches the reference app): a "Forecasting
-    # Pipeline" card with the Start button in its own header, an OVERALL
-    # PROGRESS bar, then all 9 stages -- always rendered (not just while
-    # running), so the page shows the real "ready, 0%" state at rest,
-    # exactly like the reference. Placeholders are created here so both
-    # the at-rest and the live-running code paths below can fill them in.
+        st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
+        start_clicked = st.button(
+            'Start pipeline', type='primary', icon=':material/play_arrow:',
+            width='stretch', disabled=running or not all_up or not all_valid,
+        )
+
     # 6 stages -- sBG/BG-NBD and the gift-waterfall bridge were dropped
     # along with their Income Forecast options above, since nothing else
     # reads their output. Donor LTV (Pareto/NBD + Gamma-Gamma) was also
     # pulled out of this run: it was the slowest stage (~5 min) and only
-    # the separate Donor Lifetime Value page reads its output, so it's now
-    # fit lazily on that page's first visit instead of blocking every
-    # pipeline run (see cached_ltv_fit() near the top of this file).
+    # the separate Donor Lifetime Value page reads its output, so it's
+    # now fit lazily on that page's first visit instead of blocking
+    # every pipeline run (see cached_ltv_fit() near the top of this file).
     N_STAGES = 6
     STAGE_DEFS = [
         (1, 'Ingestion & Schema Validation', 'ETL'),
@@ -670,36 +769,44 @@ if page == 'Data Pipeline':
         (5, 'Stock-Flow Model',               'SARIMA + Cohort Survival'),
         (6, 'Dashboard Publish',              'Export'),
     ]
-    with st.container(border=True):
-        head_col, btn_col = st.columns([4, 1.4], vertical_alignment='center')
-        with head_col:
-            st.markdown('<div class="sf-card-title">Forecasting pipeline</div>', unsafe_allow_html=True)
-        with btn_col:
-            start_clicked = st.button(
-                'Start pipeline', type='primary', icon=':material/play_arrow:',
-                width='stretch', disabled=running or not all_up or not all_valid,
-            )
-        st.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
-        progress_slot = st.empty()
-        overall_progress(progress_slot, 0, N_STAGES)
-        # Placeholders only -- deliberately NOT pre-rendered as 'pending'.
-        # Each stage's row only appears once its own turn actually comes
-        # (see the running block below), so the card shows stages arriving
-        # one at a time as the run progresses, not a full skeleton upfront.
-        stages = {n: st.empty() for n, _, _ in STAGE_DEFS}
 
-    st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
-    with card('Execution log', 'Real-time, timestamped log of this run'):
-        log_slot = st.empty()
-        log = new_execution_log(log_slot)
-        if not running:
-            log('Pipeline session initialised. Awaiting Start pipeline…')
+    # "Forecasting pipeline" (progress) and "Execution log" -- hidden
+    # entirely until a run is actually in progress, per explicit request
+    # ("should only be visible after the run pipeline button is clicked
+    # and a pipeline is running"), rather than always shown with a
+    # resting "0%"/"awaiting Start pipeline" state as before. Once
+    # running is True, upload_area.empty() above has already cleared
+    # the upload section, so these two cards are the ONLY thing left on
+    # the page -- exactly the "only the bottom 2 elements" behaviour
+    # asked for, from both directions now (upload section hides once
+    # running; these two cards stay hidden until it starts).
+    if running:
+        upload_area.empty()
+
+        with st.container(border=True):
+            st.markdown('<div class="sf-card-title">Forecasting pipeline</div>', unsafe_allow_html=True)
+            st.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
+            progress_slot = st.empty()
+            overall_progress(progress_slot, 0, N_STAGES)
+            # Placeholders only -- deliberately NOT pre-rendered as
+            # 'pending'. Each stage's row only appears once its own turn
+            # actually comes (see the running block below), so the card
+            # shows stages arriving one at a time as the run progresses,
+            # not a full skeleton upfront.
+            stages = {n: st.empty() for n, _, _ in STAGE_DEFS}
+
+        st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
+        with card('Execution log', 'Real-time, timestamped log of this run'):
+            log_slot = st.empty()
+            log = new_execution_log(log_slot)
 
     if start_clicked:
         st.session_state.pipeline_running = True
         st.rerun()
 
     if st.session_state.pipeline_running:
+        from pipeline.build_master import build_master
+
         run_started = datetime.now()
         tmp = tempfile.mkdtemp()
 
@@ -1066,6 +1173,31 @@ elif page == 'Income Forecast':
     sf_walkforward_state = st.session_state.sf_walkforward
     sf_assumptions_state = st.session_state.sf_assumptions
 
+    # Model/horizon pickers rendered here, BEFORE the comparison-table fits
+    # below, not after them as before -- these two widgets don't depend on
+    # the comparison table at all, but used to sit textually after it, so
+    # on a genuine cache miss (a freshly-loaded run whose `monthly` hasn't
+    # been fit yet) they'd sit blocked behind a real gradient-boosting
+    # refit before ever becoming interactive. Streamlit renders top to
+    # bottom in code order -- reordering the code is what actually moves
+    # them earlier, a st.container() placeholder alone wouldn't (the slow
+    # fit call below still has to finish before ANY later line runs,
+    # container or not; only genuinely relocating independent code ahead
+    # of slow work gets it painted sooner). The model-specific control
+    # that used to share this row (training window for Linear, etc.)
+    # stays below, since it genuinely needs model_choice decided first.
+    model_options = ['ML forecast', 'Linear trend', 'Stock-flow model']
+    fc1, fc2 = st.columns([1.8, 1.3], vertical_alignment='bottom')
+    with fc1:
+        model_choice = st.segmented_control(
+            'Forecast model', model_options, default='ML forecast', key='fc_model',
+        )
+    with fc2:
+        horizon = st.segmented_control('Forecast horizon', [12, 18, 24], default=24,
+                                        key='fc_h', format_func=lambda x: f'{x} months')
+    model_choice = model_choice or 'ML forecast'
+    horizon = horizon or 24
+
     comp_rows = []
     with st.spinner('Comparing forecast methods…'):
         try:
@@ -1118,17 +1250,12 @@ elif page == 'Income Forecast':
             },
         )
 
-    model_options = ['ML forecast', 'Linear trend', 'Stock-flow model']
-    fc1, fc2, fc3 = st.columns([1.8, 1.3, 1.9], vertical_alignment='bottom')
-    with fc1:
-        model_choice = st.segmented_control(
-            'Forecast model', model_options, default='ML forecast', key='fc_model',
-        )
-    with fc2:
-        horizon = st.segmented_control('Forecast horizon', [12, 18, 24], default=24,
-                                        key='fc_h', format_func=lambda x: f'{x} months')
-    model_choice = model_choice or 'ML forecast'
-    horizon = horizon or 24
+    # model_choice/horizon themselves were already picked further up, before
+    # the comparison-table fits -- fc3 is just the leftover per-model
+    # contextual slot (a caption, or the Linear model's training-window
+    # control) that genuinely does need model_choice decided first, so it
+    # stays here rather than moving up with the other two.
+    fc3 = st.container()
     use_ml = model_choice == 'ML forecast'
 
     importances = {}
@@ -1985,9 +2112,28 @@ elif page == 'Run History':
         )
 
     with card('Load or delete a run', f'Searching the {len(runs)} most recent runs'):
-        search = st.text_input(
-            'Search by Run ID', placeholder='Search by Run ID…', icon=':material/search:',
-        )
+        # Wrapped in a form -- typing used to trigger a full-script rerun on
+        # every keystroke (sidebar, page header, badge counts, everything),
+        # not just this card. A form batches those into one rerun on submit
+        # (Enter, or the button) instead of one per character.
+        with st.form('run_search_form', border=False):
+            # Input + submit button on one row, capped well short of the
+            # card's full width -- reported live as too wide (first at
+            # full width, then again at an even 50/50 used/unused split --
+            # explicitly not that either, wanted closer to 80/20). The
+            # button was ALSO wrapping to its own line below the input
+            # (st.form's default vertical stacking) instead of sitting
+            # beside it. search_col:btn_col:spacer is 6:2:2 -- the two
+            # together are 80% of the row, the trailing spacer column is
+            # never used, just reserved so the other two don't stretch to
+            # fill it.
+            search_col, btn_col, _spacer = st.columns([6, 2, 2], vertical_alignment='bottom')
+            with search_col:
+                search = st.text_input(
+                    'Search by Run ID', placeholder='Search by Run ID…', icon=':material/search:',
+                )
+            with btn_col:
+                st.form_submit_button('Search', icon=':material/search:', width='stretch')
         filtered = runs[runs['run_id'].str.contains(search.strip(), case=False, na=False)] if search.strip() else runs
 
         if filtered.empty:
@@ -1997,12 +2143,18 @@ elif page == 'Run History':
             # communicated separately below (disabled Load button + caption),
             # so it doesn't need to be baked into the option text too.
             run_labels = {row['run_id']: row['run_id'] for _, row in filtered.iterrows()}
-            picked_id = st.selectbox(
-                'Choose a run', options=list(run_labels.keys()),
-                format_func=lambda rid: run_labels[rid], label_visibility='collapsed',
-            )
+            # Same half-width treatment as the search row above -- this
+            # was stretching to the card's full width.
+            select_col, _spacer = st.columns([1, 1])
+            with select_col:
+                picked_id = st.selectbox(
+                    'Choose a run', options=list(run_labels.keys()),
+                    format_func=lambda rid: run_labels[rid], label_visibility='collapsed',
+                )
 
-            c1, c2 = st.columns([3, 1])
+            # Equal-width Load/Delete -- was [3, 1] (Load much wider than
+            # Delete), reported as should be the same size.
+            c1, c2 = st.columns(2)
             with c1:
                 load_disabled = picked_id == viewing_id
                 if st.button('Load this run for full analysis', icon=':material/bolt:',
@@ -2055,23 +2207,33 @@ elif page == 'Run History':
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ACCESS REQUESTS
+# USERS
 # ══════════════════════════════════════════════════════════════════════════════
-elif page == 'Access Requests':
-    page_header('Administration', 'Access requests',
-                'Review pending Google sign-in requests from allowed domains -- approve to '
-                'create an Analyst account, or deny. Change an existing user\'s role or '
-                'revoke their access below.',
+# One unified account-management page -- used to be two separate pages
+# (Access Requests for Google sign-in, Local Accounts for email+password),
+# split by which table each login method's account lived in. Merged per
+# explicit request: a Super Admin manages every account from one place
+# regardless of how that person signs in, with full revoke/promote/demote
+# power over both, including restoring a Google user's access after
+# revoking it (see list_denied_users() in db.py -- previously a revoked
+# Google user simply vanished from every admin view with no way back
+# except the affected person re-requesting themselves).
+elif page == 'Users':
+    page_header('Administration', 'Users',
+                'Create and manage every sign-in account -- Google and email+password alike. '
+                'Approve or deny new Google requests, change anyone\'s role, and revoke or '
+                'restore access. A signed-in user can change their own password from the '
+                'account menu in the page header.',
                 meta=page_meta)
 
-    # Super-Admin-only -- grants/revokes/promotes account access, the same
-    # account-management tier as Local Accounts. Not just Administrator
-    # any more: this page can hand out Administrator (and Super Admin)
-    # itself, so an ordinary Administrator having access to it would let
-    # them promote themselves or anyone else. The sidebar already hides
-    # this page's nav entry accordingly (see render_sidebar()'s
-    # is_super_admin filter); this is the defense-in-depth backstop in
-    # case session_state.page ever ends up here some other way.
+    # Super-Admin-only -- grants/revokes/promotes account access for
+    # BOTH login methods. Not just Administrator any more: this page can
+    # hand out Administrator (and Super Admin) itself, so an ordinary
+    # Administrator having access to it would let them promote themselves
+    # or anyone else. The sidebar already hides this page's nav entry
+    # accordingly (see render_sidebar()'s is_super_admin filter); this is
+    # the defense-in-depth backstop in case session_state.page ever ends
+    # up here some other way.
     if (st.session_state.user or {}).get('role') != 'Super Admin':
         with card():
             st.markdown(f"""
@@ -2080,7 +2242,7 @@ elif page == 'Access Requests':
                     Super Admins only
                 </div>
                 <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
-                    Approving, denying, or managing access requests is restricted to Super Admins.
+                    Creating or managing user accounts is restricted to Super Admins.
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -2091,10 +2253,10 @@ elif page == 'Access Requests':
             st.markdown(f"""
             <div style="text-align:center;padding:28px;">
                 <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
-                    Access requests aren't available
+                    User management isn't available
                 </div>
                 <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
-                    No database connection is configured, so there's no request queue to review.
+                    No database connection is configured, so there's no account store to manage.
                     Anyone on an allowed Google domain can sign in directly until one is set up
                     (see handle_google_redirect() in auth.py).
                 </div>
@@ -2102,6 +2264,9 @@ elif page == 'Access Requests':
             """, unsafe_allow_html=True)
         st.stop()
 
+    current_email = (st.session_state.user or {}).get('email', '')
+
+    # ── Pending Google requests ──
     pending = list_pending_requests()
 
     if pending.empty:
@@ -2118,7 +2283,7 @@ elif page == 'Access Requests':
             """, unsafe_allow_html=True)
     else:
         pending['requested_at'] = pd.to_datetime(pending['requested_at'])
-        with card(f'{len(pending)} pending', 'Oldest first'):
+        with card(f'{len(pending)} pending', 'Google sign-in requests -- oldest first'):
             for i, row in pending.iterrows():
                 rc1, rc2, rc3 = st.columns([3, 2, 2], vertical_alignment='center')
                 with rc1:
@@ -2150,127 +2315,201 @@ elif page == 'Access Requests':
 
     st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
 
+    # ── All accounts -- Google and local, one combined list, per explicit
+    # request (used to be two separate cards split by login method).
+    # Sorted by most recent activity (decided_at for Google, created_at
+    # for local) so the newest change to anyone's access sits at the top
+    # regardless of which table it actually lives in -- the split is
+    # invisible here, surfaced only via the small type pill next to each
+    # row's role, and in which action buttons that row gets (Role/Revoke
+    # for Google, Manage/Delete for local -- the two tables support
+    # different operations, so the actions can't be identical, only the
+    # listing is unified). ──
     approved = list_approved_users()
-    current_email = (st.session_state.user or {}).get('email', '')
+    accounts = list_local_accounts()
 
-    if approved.empty:
-        with card('Users', 'Approved Google sign-ins'):
+    # Built as plain dicts rather than a pandas assign()/concat() -- both
+    # list_approved_users() and list_local_accounts() fall back to a bare,
+    # columnless pd.DataFrame() on a query error (see their own docstrings
+    # in db.py), and indexing a specific column out of THAT would raise,
+    # not just render an empty state. A plain Python list sidesteps that
+    # entirely: iterrows() over a genuinely columnless DataFrame just
+    # yields nothing, same as an ordinary empty result.
+    combined_rows = []
+    for _, r in approved.iterrows():
+        combined_rows.append({
+            'email': r['email'], 'name': r['name'], 'role': r['role'], 'kind': 'Google',
+            'date': pd.to_datetime(r['decided_at']) if pd.notna(r['decided_at']) else None,
+        })
+    for _, r in accounts.iterrows():
+        combined_rows.append({
+            'email': r['email'], 'name': r['name'], 'role': r['role'], 'kind': 'Local',
+            'date': pd.to_datetime(r['created_at']) if pd.notna(r['created_at']) else None,
+        })
+    combined_rows.sort(key=lambda x: x['date'] or pd.Timestamp.min, reverse=True)
+    all_accounts = pd.DataFrame(combined_rows, columns=['email', 'name', 'role', 'kind', 'date'])
+    all_accounts = all_accounts.rename(columns={'kind': '_kind', 'date': '_date'})
+
+    if all_accounts.empty:
+        with card():
             st.markdown(f"""
             <div style="text-align:center;padding:28px;">
                 <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
-                    No approved users yet
+                    No accounts yet
                 </div>
                 <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
-                    Approved Google sign-ins will show up here, with controls to change their
-                    role or revoke their access.
+                    Approved Google sign-ins and local accounts you create below will show
+                    up here together, with controls to change role, reset password, revoke,
+                    or delete.
                 </div>
             </div>
             """, unsafe_allow_html=True)
     else:
-        with card(f'{len(approved)} users', 'Approved Google sign-ins -- change role or revoke access'):
-            for i, row in approved.iterrows():
+        with card(f'{len(all_accounts)} accounts',
+                   'Google and local sign-ins -- change role, reset password, revoke, or delete'):
+            last_idx = len(all_accounts) - 1
+            for i, row in all_accounts.iterrows():
+                is_google = row['_kind'] == 'Google'
+                is_self = row['email'] == current_email
                 uc1, uc2, uc3 = st.columns([3, 2, 3], vertical_alignment='center')
                 with uc1:
                     label = row['name'] or row['email']
-                    if row['email'] == current_email:
+                    if is_self:
                         label += ' (you)'
                     st.markdown(f"**{label}**")
                     st.caption(row['email'])
                 with uc2:
-                    decided = pd.to_datetime(row['decided_at']) if pd.notna(row['decided_at']) else None
-                    detail = f"{row['role']} · since {decided.strftime('%d %b %Y')}" if decided else row['role']
+                    pill_class = 'sf-pill-blue' if is_google else 'sf-pill-gray'
+                    st.markdown(f'<span class="sf-pill {pill_class}">{row["_kind"]}</span>',
+                                unsafe_allow_html=True)
+                    verb = 'since' if is_google else 'created'
+                    detail = (f"{row['role']} · {verb} {row['_date'].strftime('%d %b %Y')}"
+                              if pd.notna(row['_date']) else row['role'])
                     st.caption(detail)
                 with uc3:
-                    is_self = row['email'] == current_email
                     vc1, vc2 = st.columns(2)
-                    with vc1:
-                        with st.popover('Role', icon=':material/settings:', width='stretch',
-                                          disabled=is_self):
-                            role_options = ['Analyst', 'Administrator', 'Super Admin']
-                            new_role_pick = st.selectbox(
-                                'Role', role_options,
-                                index=role_options.index(row['role']) if row['role'] in role_options else 0,
-                                key=f"user_role_pick_{row['email']}",
-                            )
-                            if new_role_pick != row['role']:
-                                if st.button('Update role', key=f"user_role_update_{row['email']}",
-                                             icon=':material/check:', width='stretch'):
-                                    if update_user_role(row['email'], new_role_pick):
-                                        st.success('Role updated.', icon=':material/check_circle:')
-                                        st.rerun()
+                    if is_google:
+                        with vc1:
+                            with st.popover('Role', icon=':material/settings:', width='stretch',
+                                              disabled=is_self):
+                                role_options = ['Analyst', 'Administrator', 'Super Admin']
+                                new_role_pick = st.selectbox(
+                                    'Role', role_options,
+                                    index=role_options.index(row['role']) if row['role'] in role_options else 0,
+                                    key=f"user_role_pick_{row['email']}",
+                                )
+                                if new_role_pick != row['role']:
+                                    if st.button('Update role', key=f"user_role_update_{row['email']}",
+                                                 icon=':material/check:', width='stretch'):
+                                        if update_user_role(row['email'], new_role_pick):
+                                            st.success('Role updated.', icon=':material/check_circle:')
+                                            st.rerun()
+                                        else:
+                                            st.error('Could not update that role.', icon=':material/error:')
+                        with vc2:
+                            # Two-step confirm -- revoking access is
+                            # destructive (see revoke_user_access()'s own
+                            # docstring for why this sets status='denied'
+                            # rather than deleting the row), not a single
+                            # misclick away. Can't revoke your own access
+                            # from here -- same reasoning as not being
+                            # able to change your own role, avoids locking
+                            # yourself out by accident.
+                            confirm_key = f"confirm_revoke_{row['email']}"
+                            if is_self:
+                                st.button('Revoke', key=f"revoke_btn_{row['email']}",
+                                          icon=':material/block:', width='stretch', disabled=True)
+                            elif st.session_state.get(confirm_key):
+                                if st.button('Confirm', key=f"confirm_revoke_btn_{row['email']}",
+                                             icon=':material/block:', width='stretch'):
+                                    revoke_user_access(row['email'], decided_by=current_email)
+                                    st.session_state.pop(confirm_key, None)
+                                    st.rerun()
+                            else:
+                                if st.button('Revoke', key=f"revoke_btn_{row['email']}",
+                                             icon=':material/block:', width='stretch'):
+                                    st.session_state[confirm_key] = True
+                                    st.rerun()
+                    else:
+                        with vc1:
+                            # Manage (password reset + role change) is
+                            # disabled for your own row, same as Google's
+                            # Role popover above -- role change is the
+                            # risk (a Super Admin could demote or delete
+                            # their own only-Super-Admin account and lock
+                            # everyone out, self included); password reset
+                            # is bundled into the same popover, so it's
+                            # disabled along with it, not because it's
+                            # risky, but a self-service "Change password"
+                            # already exists in the account menu (page
+                            # header) for exactly that case.
+                            with st.popover('Manage', icon=':material/settings:', width='stretch',
+                                              disabled=is_self):
+                                with st.form(f"reset_pw_form_{row['email']}", border=False):
+                                    reset_pw = st.text_input(
+                                        'New password', type='password', key=f"reset_pw_input_{row['email']}",
+                                    )
+                                    reset_submitted = st.form_submit_button('Set new password',
+                                                                              icon=':material/check:', width='stretch')
+                                if reset_submitted:
+                                    if len(reset_pw) < 8:
+                                        st.error('Password must be at least 8 characters.', icon=':material/error:')
+                                    elif update_local_account_password(row['email'], reset_pw):
+                                        st.success('Password reset.', icon=':material/check_circle:')
                                     else:
-                                        st.error('Could not update that role.', icon=':material/error:')
-                    with vc2:
-                        # Same two-step confirm pattern as Local Accounts'
-                        # delete action -- revoking access is destructive
-                        # (see revoke_user_access()'s own docstring for why
-                        # this sets status='denied' rather than deleting the
-                        # row), not a single misclick away. Can't revoke your
-                        # own access from here -- same reasoning as not being
-                        # able to change your own role, avoids locking
-                        # yourself out by accident.
-                        confirm_key = f"confirm_revoke_{row['email']}"
-                        if is_self:
-                            st.button('Revoke', key=f"revoke_btn_{row['email']}",
-                                      icon=':material/block:', width='stretch', disabled=True)
-                        elif st.session_state.get(confirm_key):
-                            if st.button('Confirm', key=f"confirm_revoke_btn_{row['email']}",
-                                         icon=':material/block:', width='stretch'):
-                                revoke_user_access(row['email'], decided_by=current_email)
-                                st.session_state.pop(confirm_key, None)
-                                st.rerun()
-                        else:
-                            if st.button('Revoke', key=f"revoke_btn_{row['email']}",
-                                         icon=':material/block:', width='stretch'):
-                                st.session_state[confirm_key] = True
-                                st.rerun()
-                if i != approved.index[-1]:
+                                        st.error('Could not reset that password.', icon=':material/error:')
+
+                                st.markdown(f'<div style="height:1px;background:{LINE};margin:10px 0;"></div>',
+                                            unsafe_allow_html=True)
+
+                                role_options = ['Analyst', 'Administrator', 'Super Admin']
+                                new_role_pick = st.selectbox(
+                                    'Role', role_options, index=role_options.index(row['role'])
+                                    if row['role'] in role_options else 0,
+                                    key=f"role_pick_{row['email']}",
+                                )
+                                if new_role_pick != row['role']:
+                                    if st.button('Update role', key=f"role_update_{row['email']}",
+                                                 icon=':material/check:', width='stretch'):
+                                        if update_local_account_role(row['email'], new_role_pick):
+                                            st.success('Role updated.', icon=':material/check_circle:')
+                                            st.rerun()
+                                        else:
+                                            st.error('Could not update that role.', icon=':material/error:')
+                        with vc2:
+                            # Same two-step confirm pattern as Run
+                            # History's delete-run action -- a destructive
+                            # action, not a single misclick away. Can't
+                            # delete your own account from here -- same
+                            # reasoning as Google's Revoke being disabled
+                            # for self above: deleting the account you're
+                            # currently signed in as would sign you out
+                            # mid-session with no way back in as that
+                            # identity, and if it were the only Super
+                            # Admin account, no one left could undo it.
+                            confirm_key = f"confirm_delete_local_{row['email']}"
+                            if is_self:
+                                st.button('Delete', key=f"delete_btn_{row['email']}",
+                                          icon=':material/delete:', width='stretch', disabled=True)
+                            elif st.session_state.get(confirm_key):
+                                if st.button('Confirm', key=f"confirm_delete_btn_{row['email']}",
+                                             icon=':material/delete_forever:', width='stretch'):
+                                    delete_local_account(row['email'])
+                                    st.session_state.pop(confirm_key, None)
+                                    st.rerun()
+                            else:
+                                if st.button('Delete', key=f"delete_btn_{row['email']}",
+                                             icon=':material/delete:', width='stretch'):
+                                    st.session_state[confirm_key] = True
+                                    st.rerun()
+                if i != last_idx:
                     st.markdown(f'<div style="height:1px;background:{LINE};margin:10px 0;"></div>',
                                 unsafe_allow_html=True)
 
+    st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# LOCAL ACCOUNTS
-# ══════════════════════════════════════════════════════════════════════════════
-elif page == 'Local Accounts':
-    page_header('Administration', 'Local accounts',
-                'Create and manage email+password sign-in accounts, alongside Google. '
-                'A signed-in user can change their own password from the account menu '
-                'in the page header.',
-                meta=page_meta)
-
-    # Super-Admin-only -- grants/revokes account access, including
-    # Administrator and Super Admin itself, same reasoning as Access
-    # Requests above.
-    if (st.session_state.user or {}).get('role') != 'Super Admin':
-        with card():
-            st.markdown(f"""
-            <div style="text-align:center;padding:28px;">
-                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
-                    Super Admins only
-                </div>
-                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
-                    Creating or managing local sign-in accounts is restricted to Super Admins.
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        st.stop()
-
-    if not db_configured():
-        with card():
-            st.markdown(f"""
-            <div style="text-align:center;padding:28px;">
-                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
-                    Local accounts aren't available
-                </div>
-                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
-                    No database connection is configured, so there's no account store to manage.
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        st.stop()
-
-    with card('Create account', 'A new email + password sign-in'):
+    # ── Create local account ──
+    with card('Create local account', 'A new email + password sign-in'):
         with st.form('create_local_account_form', border=False):
             cc1, cc2 = st.columns(2)
             with cc1:
@@ -2302,86 +2541,43 @@ elif page == 'Local Accounts':
 
     st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
 
-    accounts = list_local_accounts()
-
-    if accounts.empty:
-        with card():
-            st.markdown(f"""
-            <div style="text-align:center;padding:28px;">
-                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
-                    No local accounts yet
-                </div>
-                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
-                    Create one above, or use Google sign-in instead.
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        accounts['created_at'] = pd.to_datetime(accounts['created_at'])
-        current_email = (st.session_state.user or {}).get('email', '')
-        with card(f'{len(accounts)} accounts', 'Most recently created first'):
-            for i, row in accounts.iterrows():
-                rc1, rc2, rc3 = st.columns([3, 2, 3], vertical_alignment='center')
-                with rc1:
-                    label = row['name']
-                    if row['email'] == current_email:
-                        label += ' (you)'
-                    st.markdown(f"**{label}**")
+    # ── Revoked Google access -- restore directly, no dependency on the
+    # revoked person re-requesting themselves (see list_denied_users()'s
+    # own docstring in db.py for why this section exists at all). Kept
+    # separate from the unified list above rather than shown inline with
+    # a "revoked" tag, so a Super Admin skimming "who currently has
+    # access" isn't scanning past accounts that don't. ──
+    denied = list_denied_users()
+    if not denied.empty:
+        with card(f'{len(denied)} revoked', 'Google sign-ins with revoked access -- restore if needed'):
+            for i, row in denied.iterrows():
+                dc1, dc2, dc3 = st.columns([3, 2, 2], vertical_alignment='center')
+                with dc1:
+                    st.markdown(f"**{row['name'] or row['email']}**")
                     st.caption(row['email'])
-                with rc2:
-                    st.caption(f"{row['role']} · created {row['created_at'].strftime('%d %b %Y')}")
-                with rc3:
-                    ac1, ac2 = st.columns(2)
-                    with ac1:
-                        with st.popover('Manage', icon=':material/settings:', width='stretch'):
-                            with st.form(f"reset_pw_form_{row['email']}", border=False):
-                                reset_pw = st.text_input(
-                                    'New password', type='password', key=f"reset_pw_input_{row['email']}",
-                                )
-                                reset_submitted = st.form_submit_button('Set new password',
-                                                                          icon=':material/check:', width='stretch')
-                            if reset_submitted:
-                                if len(reset_pw) < 8:
-                                    st.error('Password must be at least 8 characters.', icon=':material/error:')
-                                elif update_local_account_password(row['email'], reset_pw):
-                                    st.success('Password reset.', icon=':material/check_circle:')
-                                else:
-                                    st.error('Could not reset that password.', icon=':material/error:')
-
-                            st.markdown(f'<div style="height:1px;background:{LINE};margin:10px 0;"></div>',
-                                        unsafe_allow_html=True)
-
-                            role_options = ['Analyst', 'Administrator', 'Super Admin']
-                            new_role_pick = st.selectbox(
-                                'Role', role_options, index=role_options.index(row['role'])
-                                if row['role'] in role_options else 0,
-                                key=f"role_pick_{row['email']}",
-                            )
-                            if new_role_pick != row['role']:
-                                if st.button('Update role', key=f"role_update_{row['email']}",
-                                             icon=':material/check:', width='stretch'):
-                                    if update_local_account_role(row['email'], new_role_pick):
-                                        st.success('Role updated.', icon=':material/check_circle:')
-                                        st.rerun()
-                                    else:
-                                        st.error('Could not update that role.', icon=':material/error:')
-                    with ac2:
-                        # Same two-step confirm pattern as Run History's
-                        # delete-run action above -- a destructive action,
-                        # not a single misclick away.
-                        confirm_key = f"confirm_delete_local_{row['email']}"
-                        if st.session_state.get(confirm_key):
-                            if st.button('Confirm', key=f"confirm_delete_btn_{row['email']}",
-                                         icon=':material/delete_forever:', width='stretch'):
-                                delete_local_account(row['email'])
-                                st.session_state.pop(confirm_key, None)
-                                st.rerun()
-                        else:
-                            if st.button('Delete', key=f"delete_btn_{row['email']}",
-                                         icon=':material/delete:', width='stretch'):
-                                st.session_state[confirm_key] = True
-                                st.rerun()
-                if i != accounts.index[-1]:
+                with dc2:
+                    decided = pd.to_datetime(row['decided_at']) if pd.notna(row['decided_at']) else None
+                    detail = f"Was {row['role']} · revoked {decided.strftime('%d %b %Y')}" if decided else f"Was {row['role']}"
+                    st.caption(detail)
+                with dc3:
+                    # Not destructive (unlike Revoke above) -- restoring
+                    # someone's access is easy to undo again with another
+                    # click, so this skips the two-step confirm pattern.
+                    # Restores at whatever role they held before being
+                    # revoked (decide_access_request() only ever touches
+                    # status, never role -- see its own docstring).
+                    if st.button('Restore access', key=f"restore_{row['email']}",
+                                 icon=':material/how_to_reg:', width='stretch'):
+                        decide_access_request(row['email'], approve=True, decided_by=current_email)
+                        st.rerun()
+                if i != denied.index[-1]:
                     st.markdown(f'<div style="height:1px;background:{LINE};margin:10px 0;"></div>',
                                 unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FOOTER -- every page, outside the elif chain above so it renders
+# regardless of which one matched.
+# ══════════════════════════════════════════════════════════════════════════════
+render_footer()
 
