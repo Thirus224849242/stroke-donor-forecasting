@@ -29,7 +29,7 @@ GOOGLE_EXTRA_ALLOWED_EMAILS = {'thirumalreddyenugu@gmail.com'}
 
 SESSION_KEYS = [
     'master', 'forecast_df', 'monthly', 'mape',
-    'pipeline_run', 'page', 'authenticated', 'user', 'auth_method',
+    'pipeline_run', 'page', 'authenticated', 'user', 'auth_method', 'pending_2fa', 'totp_setup_secret',
     'ml_importances', 'ml_trend_slope',
     'forecast_df_linear', 'mape_linear', 'mape_stockflow',
     'ltv_results', 'ltv_tuning', 'ltv_metrics', 'ltv_error', 'ltv_monthly', 'ltv_histogram',
@@ -397,100 +397,159 @@ def render_login():
     calling page.empty() on a placeholder while still inside its own
     `with ...container():` body would be clearing a container the
     script is actively writing into, not a clean "replace what was
-    there before" the way it works once that block has closed."""
+    there before" the way it works once that block has closed.
+
+    st.session_state.pending_2fa holds {email, name, role, secret} for
+    the brief window between a correct password and a confirmed TOTP
+    code, for a local account that has two-factor auth turned on (see
+    ui.py's account-menu setup flow, and db.py's totp_secret column) --
+    None the rest of the time, including for every account that never
+    enabled it. Its presence, not a separate step counter, is what picks
+    which of the two forms below renders; set right before an immediate
+    st.rerun() (same "set state, then rerun" pattern the dark-mode toggle
+    elsewhere in this app already uses from deep inside nested `with`
+    blocks) rather than falling through to render the code form in the
+    same pass, so the two forms never both try to render at once."""
     page = st.empty()
     just_signed_in = False
     with page.container():
         _render_auth_shell()
 
         with st.container(key='login_card'):
-            st.markdown("**Sign in to your account**")
-            st.caption('Enter your credentials to access the F2F forecasting dashboard.')
-
-            if google_auth_configured():
-                with st.container(key='google_login_btn'):
-                    if st.button('Continue with Google', width='stretch'):
-                        st.login()
-                st.markdown('<div class="sf-login-divider">or</div>', unsafe_allow_html=True)
-
-            with st.form('login_form', border=False):
-                email = st.text_input(
-                    'Work email', placeholder='name@strokefoundation.org.au',
-                    icon=':material/mail:',
-                )
-                password = st.text_input(
-                    'Password', type='password', placeholder='Enter your password',
-                    icon=':material/lock:',
-                )
-                submitted = st.form_submit_button(
-                    'Sign in', type='primary', icon=':material/login:',
-                )
-
-            if submitted:
-                clean_email = email.strip().lower()
-                if not db_configured():
-                    # Distinct from a wrong password -- this means local login
-                    # can't work at all right now (local_accounts lives in the
-                    # same Supabase database as everything else in db.py), not
-                    # that this particular attempt failed.
-                    st.error('Local sign-in is unavailable right now (no database configured). '
-                              'Try Google sign-in instead, or contact an administrator.',
-                              icon=':material/error:')
-                else:
-                    # get_local_account() below is the FIRST database call of
-                    # the whole session -- st.cache_resource's engine (db.py's
-                    # get_engine()) hasn't connected yet, so THIS call, not
-                    # the post-login restore step in app.py, is where the
-                    # ~2.7s TCP/TLS/auth handshake to Supabase actually gets
-                    # paid on a freshly-started server (confirmed live: without
-                    # this, the login card just sat there greyed out with no
-                    # feedback for the whole handshake, then jumped straight
-                    # to the dashboard once app.py's own bar -- now hitting an
-                    # already-warm connection -- flashed by too fast to see).
-                    # Showing the same sticky bar immediately here, before the
-                    # call, means there's no gap where nothing on screen
-                    # explains the wait. Local import: ui.py imports from this
-                    # module (initials/sign_out) at its own top level, so a
-                    # top-level `from ui import ...` here would be a circular
-                    # import; deferring it to call time (after both modules
-                    # have already finished loading) avoids that.
-                    from ui import render_startup_progress
-                    _login_bar = st.empty()
-                    render_startup_progress(_login_bar)
-                    account = get_local_account(clean_email)
-                    if account and verify_password(password, account['password_hash']):
-                        # Same domain restriction Google sign-in enforces
-                        # (handle_google_redirect() below) -- applied here too
-                        # per explicit request, as a defense-in-depth check.
-                        # Local accounts are admin-provisioned (there's no
-                        # self-service sign-up for this login path), so this
-                        # should never actually trip in normal use; it's a
-                        # safety net, not the primary gate.
-                        domain = clean_email.rsplit('@', 1)[-1] if '@' in clean_email else ''
-                        if domain not in ALLOWED_GOOGLE_DOMAINS and clean_email not in GOOGLE_EXTRA_ALLOWED_EMAILS:
-                            _login_bar.empty()
-                            st.error('This account is not on an authorised domain. Contact an administrator.',
-                                      icon=':material/block:')
-                        else:
-                            st.session_state.authenticated = True
-                            st.session_state.auth_method = 'password'
-                            st.session_state.user = {
-                                'email': clean_email,
-                                'name': account['name'],
-                                'role': account['role'],
-                            }
-                            just_signed_in = True
-                            # _login_bar deliberately left showing -- just_signed_in
-                            # below clears the whole page (this bar included) and
-                            # replaces it with the transition spinner before the
-                            # rerun, so there's no gap here either.
+            pending = st.session_state.get('pending_2fa')
+            if pending:
+                st.markdown("**Two-factor authentication**")
+                st.caption(f"Enter the 6-digit code from your authenticator app for {pending['email']}.")
+                with st.form('totp_form', border=False):
+                    code = st.text_input(
+                        'Authentication code', placeholder='123456', max_chars=6,
+                        icon=':material/pin:',
+                    )
+                    totp_submitted = st.form_submit_button(
+                        'Verify', type='primary', icon=':material/verified_user:',
+                    )
+                if st.button('Use a different account', key='totp_cancel'):
+                    st.session_state.pending_2fa = None
+                    st.rerun()
+                if totp_submitted:
+                    # Local import -- pyotp is only ever needed here and in
+                    # ui.py's setup/disable flow, not on the hot path of
+                    # every other page load.
+                    import pyotp
+                    # valid_window=1 accepts the current 30s step plus one
+                    # step either side -- standard TOTP tolerance for clock
+                    # drift between the server and the user's phone, same
+                    # default most authenticator-backed logins use.
+                    if code and pyotp.TOTP(pending['secret']).verify(code.strip(), valid_window=1):
+                        st.session_state.authenticated = True
+                        st.session_state.auth_method = 'password'
+                        st.session_state.user = {
+                            'email': pending['email'], 'name': pending['name'], 'role': pending['role'],
+                        }
+                        st.session_state.pending_2fa = None
+                        just_signed_in = True
                     else:
-                        _login_bar.empty()
-                        # Deliberately the SAME message whether the email has no
-                        # local account at all or the password was just wrong --
-                        # distinguishing them would let this form be used to
-                        # enumerate which emails have accounts.
-                        st.error('Incorrect email or password. Please try again.', icon=':material/error:')
+                        st.error('Incorrect code. Please try again.', icon=':material/error:')
+            else:
+                st.markdown("**Sign in to your account**")
+                st.caption('Enter your credentials to access the F2F forecasting dashboard.')
+
+                if google_auth_configured():
+                    with st.container(key='google_login_btn'):
+                        if st.button('Continue with Google', width='stretch'):
+                            st.login()
+                    st.markdown('<div class="sf-login-divider">or</div>', unsafe_allow_html=True)
+
+                with st.form('login_form', border=False):
+                    email = st.text_input(
+                        'Work email', placeholder='name@strokefoundation.org.au',
+                        icon=':material/mail:',
+                    )
+                    password = st.text_input(
+                        'Password', type='password', placeholder='Enter your password',
+                        icon=':material/lock:',
+                    )
+                    submitted = st.form_submit_button(
+                        'Sign in', type='primary', icon=':material/login:',
+                    )
+
+                if submitted:
+                    clean_email = email.strip().lower()
+                    if not db_configured():
+                        # Distinct from a wrong password -- this means local login
+                        # can't work at all right now (local_accounts lives in the
+                        # same Supabase database as everything else in db.py), not
+                        # that this particular attempt failed.
+                        st.error('Local sign-in is unavailable right now (no database configured). '
+                                  'Try Google sign-in instead, or contact an administrator.',
+                                  icon=':material/error:')
+                    else:
+                        # get_local_account() below is the FIRST database call of
+                        # the whole session -- st.cache_resource's engine (db.py's
+                        # get_engine()) hasn't connected yet, so THIS call, not
+                        # the post-login restore step in app.py, is where the
+                        # ~2.7s TCP/TLS/auth handshake to Supabase actually gets
+                        # paid on a freshly-started server (confirmed live: without
+                        # this, the login card just sat there greyed out with no
+                        # feedback for the whole handshake, then jumped straight
+                        # to the dashboard once app.py's own bar -- now hitting an
+                        # already-warm connection -- flashed by too fast to see).
+                        # Showing the same sticky bar immediately here, before the
+                        # call, means there's no gap where nothing on screen
+                        # explains the wait. Local import: ui.py imports from this
+                        # module (initials/sign_out) at its own top level, so a
+                        # top-level `from ui import ...` here would be a circular
+                        # import; deferring it to call time (after both modules
+                        # have already finished loading) avoids that.
+                        from ui import render_startup_progress
+                        _login_bar = st.empty()
+                        render_startup_progress(_login_bar)
+                        account = get_local_account(clean_email)
+                        if account and verify_password(password, account['password_hash']):
+                            # Same domain restriction Google sign-in enforces
+                            # (handle_google_redirect() below) -- applied here too
+                            # per explicit request, as a defense-in-depth check.
+                            # Local accounts are admin-provisioned (there's no
+                            # self-service sign-up for this login path), so this
+                            # should never actually trip in normal use; it's a
+                            # safety net, not the primary gate.
+                            domain = clean_email.rsplit('@', 1)[-1] if '@' in clean_email else ''
+                            if domain not in ALLOWED_GOOGLE_DOMAINS and clean_email not in GOOGLE_EXTRA_ALLOWED_EMAILS:
+                                _login_bar.empty()
+                                st.error('This account is not on an authorised domain. Contact an administrator.',
+                                          icon=':material/block:')
+                            elif account.get('totp_secret'):
+                                # Password's right, but this account has 2FA on --
+                                # not authenticated yet. Cleared rather than left
+                                # showing: the wait from here is on the USER typing
+                                # a code, not on a network/DB call, so "connecting"
+                                # language would be actively misleading.
+                                _login_bar.empty()
+                                st.session_state.pending_2fa = {
+                                    'email': clean_email, 'name': account['name'],
+                                    'role': account['role'], 'secret': account['totp_secret'],
+                                }
+                                st.rerun()
+                            else:
+                                st.session_state.authenticated = True
+                                st.session_state.auth_method = 'password'
+                                st.session_state.user = {
+                                    'email': clean_email,
+                                    'name': account['name'],
+                                    'role': account['role'],
+                                }
+                                just_signed_in = True
+                                # _login_bar deliberately left showing -- just_signed_in
+                                # below clears the whole page (this bar included) and
+                                # replaces it with the transition spinner before the
+                                # rerun, so there's no gap here either.
+                        else:
+                            _login_bar.empty()
+                            # Deliberately the SAME message whether the email has no
+                            # local account at all or the password was just wrong --
+                            # distinguishing them would let this form be used to
+                            # enumerate which emails have accounts.
+                            st.error('Incorrect email or password. Please try again.', icon=':material/error:')
 
         _render_auth_footer()
 

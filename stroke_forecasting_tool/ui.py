@@ -6,7 +6,10 @@ import streamlit as st
 
 from auth import initials, sign_out
 from branding import logo_data_uri, logo_white_data_uri
-from db import count_new_runs, count_pending_requests, get_local_account, update_local_account_password, verify_password
+from db import (
+    clear_totp_secret, count_new_runs, count_pending_requests, get_local_account, set_totp_secret,
+    update_local_account_password, verify_password,
+)
 
 # ── BRAND PALETTE ────────────────────────────────────────────────────────────
 # Swiss financial / data-dense analytics: pure white surfaces, hairline gray
@@ -328,8 +331,65 @@ def inject_global_css():
     value renders in the same dark navy regardless of what it measures. */
     /* KpiCard has no leading icon per spec (label -> value -> delta ->
     subtext only) -- hide whatever icon st.metric's icon= param renders,
-    rather than editing every kpi() call site that still passes one. */
-    [data-testid="stMetricLabel"] [data-testid^="stIcon"] {{ display: none !important; }}
+    rather than editing every kpi() call site that still passes one.
+    NOT [data-testid^="stIcon"] -- Streamlit's real testid for this
+    element is "stMetricIcon", which does not start with "stIcon" (it
+    starts with "stMetric"), so that selector never matched anything and
+    the icon rendered unhidden -- confirmed live in dark mode, where it
+    showed up in light-mode's static navy (see the [data-testid=
+    "stWidgetLabel"] rule below for why: this whole element falls back to
+    Streamlit's own native theme, which config.toml pins to light mode
+    unconditionally, whenever nothing here explicitly overrides it). */
+    [data-testid="stMetricLabel"] [data-testid="stMetricIcon"] {{ display: none !important; }}
+
+    /* ── Native widget chrome that isn't covered by inject_global_css()'s
+    dynamic {{TEXT}}/{{SURFACE}} elsewhere falls back to config.toml's
+    [theme] section, which is a single static (light-mode) theme --
+    Streamlit has no built-in concept of our own dark_mode toggle. Every
+    rule in this block exists because something was confirmed live to be
+    unreadable in dark mode without it: stMetricLabel/stMetricIcon above
+    (native navy text on a dark card), plain widget labels below (e.g.
+    "Current password" -- native navy on a dark card), and default/
+    secondary buttons (e.g. "Update password" -- our own {{TEXT}} colour,
+    inherited from .stApp, rendered on Streamlit's native light button
+    background, i.e. near-white text on white). ── */
+    [data-testid="stWidgetLabel"] p {{ color: {TEXT} !important; }}
+    /* [data-testid^="stBaseButton-secondary"] (STARTS WITH, not an exact
+    match) -- confirmed live, st.form_submit_button's secondary variant
+    carries data-testid="stBaseButton-secondaryFormSubmit", not the plain
+    "stBaseButton-secondary" st.button uses, so an exact-match selector
+    missed it entirely (e.g. "Update password" stayed unstyled). The
+    "starts with" form catches both, and still excludes every
+    "stBaseButton-primary*" variant -- a first attempt at this rule used
+    the much broader .stButton > button (every button, primary or
+    secondary, shares that wrapper class) and, confirmed live, repainted
+    every PRIMARY button (teal/green CTAs like "Run pipeline") the same
+    flat surface colour as a plain secondary one; this scoped version
+    only touches the actually-broken case (a default-type button's
+    native light background, e.g. "Update password", showing our own
+    dark-mode {{TEXT}} on top of it) without touching primary buttons,
+    which already look correct. */
+    [data-testid^="stBaseButton-secondary"] {{
+        background: {SURFACE} !important; color: {TEXT} !important; border: 1px solid {LINE} !important;
+    }}
+    /* st.popover's own trigger button is a THIRD, separate button variant
+    -- confirmed live (Users page, Role/Manage popovers), it carries
+    data-testid="stPopoverButton", not any "stBaseButton-*" name at all,
+    so neither rule above touched it and it was left on Streamlit's
+    native light chrome exactly like the other two cases. Disabled
+    popovers (Role/Manage on your own row, so you can't demote or reset
+    your own account) get the same reduced-opacity treatment already
+    used for disabled sidebar nav buttons, since a flat {{SURFACE}}/
+    {{TEXT}} pair alone doesn't otherwise look any different disabled. */
+    [data-testid="stPopoverButton"] {{
+        background: {SURFACE} !important; color: {TEXT} !important; border: 1px solid {LINE} !important;
+    }}
+    [data-testid="stPopoverButton"]:disabled {{ opacity: 0.45 !important; }}
+    /* The password show/hide eye toggle inside a text_input has no testid
+    of its own to target directly -- confirmed live, it renders in
+    Streamlit's native (static light) text colour otherwise, same root
+    cause as everything else in this block. */
+    [data-testid="stTextInputRootElement"] button {{ color: {SLATE} !important; }}
 
     /* ── Sidebar ── */
     /* Streamlit's native sidebar header -- the collapse-arrow row above
@@ -1187,6 +1247,100 @@ def page_header(eyebrow, title, sub='', meta='', info=None):
                             else:
                                 st.error('Could not update your password right now. Try again shortly.',
                                           icon=':material/error:')
+
+                    # Same local-only gate as Change password above, and for
+                    # the same reason -- Google's own account has its own
+                    # 2FA, unrelated to anything this app can turn on or off.
+                    with st.expander('Two-factor authentication', icon=':material/shield_lock:'):
+                        email = user.get('email', '')
+                        account = get_local_account(email)
+                        totp_enabled = bool(account and account.get('totp_secret'))
+                        if totp_enabled:
+                            st.success('Two-factor authentication is enabled.', icon=':material/check_circle:')
+                            st.caption('Every sign-in will ask for a code from your authenticator app.')
+                            # A second confirming step (current password,
+                            # inside its own form) before actually turning it
+                            # off -- same "prove you're still you" reasoning
+                            # as Change password re-checking the current
+                            # password above, for a change that lowers this
+                            # account's security.
+                            with st.form('totp_disable_form', border=False):
+                                confirm_pw = st.text_input(
+                                    'Enter your password to disable', type='password', key='totp_disable_pw',
+                                )
+                                disable_submitted = st.form_submit_button(
+                                    'Disable two-factor authentication', icon=':material/remove_moderator:',
+                                    width='stretch',
+                                )
+                            if disable_submitted:
+                                if not verify_password(confirm_pw, account['password_hash']):
+                                    st.error('Incorrect password.', icon=':material/error:')
+                                elif clear_totp_secret(email):
+                                    st.success('Two-factor authentication disabled.', icon=':material/check_circle:')
+                                    st.rerun()
+                                else:
+                                    st.error('Could not disable two-factor authentication right now. '
+                                              'Try again shortly.', icon=':material/error:')
+                        else:
+                            st.caption('Add an extra step at sign-in using an authenticator app '
+                                       '(Google Authenticator, Authy, 1Password, etc).')
+                            # The secret lives in session_state ONLY from here
+                            # until a real code confirms it below -- set_totp_secret()
+                            # (db.py) is never called until that verification
+                            # succeeds, so a user who starts setup and never
+                            # finishes it leaves no half-configured 2FA behind
+                            # in the database, just an abandoned value in this
+                            # session that a rerun/new session never sees again.
+                            if not st.session_state.get('totp_setup_secret'):
+                                if st.button('Set up two-factor authentication', key='totp_setup_start',
+                                              icon=':material/qr_code_2:', width='stretch'):
+                                    import pyotp
+                                    st.session_state.totp_setup_secret = pyotp.random_base32()
+                                    st.rerun()
+                            else:
+                                import base64
+                                import io
+
+                                import pyotp
+                                import qrcode
+
+                                secret = st.session_state.totp_setup_secret
+                                uri = pyotp.TOTP(secret).provisioning_uri(
+                                    name=email, issuer_name='Stroke Foundation Donor Forecasting',
+                                )
+                                buf = io.BytesIO()
+                                qrcode.make(uri).save(buf, format='PNG')
+                                qr_b64 = base64.b64encode(buf.getvalue()).decode()
+                                st.markdown(
+                                    f'<img src="data:image/png;base64,{qr_b64}" width="176" '
+                                    'style="display:block;margin:4px auto 10px;border-radius:4px;" />',
+                                    unsafe_allow_html=True,
+                                )
+                                st.caption('Scan this with your authenticator app, or enter the key '
+                                           f'manually: `{secret}`')
+                                with st.form('totp_verify_form', border=False):
+                                    setup_code = st.text_input(
+                                        'Enter the 6-digit code to confirm', placeholder='123456',
+                                        max_chars=6, key='totp_setup_code',
+                                    )
+                                    verify_submitted = st.form_submit_button(
+                                        'Verify and enable', icon=':material/check:', width='stretch',
+                                    )
+                                if st.button('Cancel', key='totp_setup_cancel'):
+                                    st.session_state.totp_setup_secret = None
+                                    st.rerun()
+                                if verify_submitted:
+                                    if setup_code and pyotp.TOTP(secret).verify(setup_code.strip(), valid_window=1):
+                                        if set_totp_secret(email, secret):
+                                            st.session_state.totp_setup_secret = None
+                                            st.success('Two-factor authentication enabled.',
+                                                       icon=':material/check_circle:')
+                                            st.rerun()
+                                        else:
+                                            st.error('Could not enable two-factor authentication right now. '
+                                                      'Try again shortly.', icon=':material/error:')
+                                    else:
+                                        st.error('Incorrect code. Please try again.', icon=':material/error:')
 
                 if st.button('Log out', key='topbar_signout_btn', icon=':material/logout:',
                              type='primary', width='stretch', disabled=running):
