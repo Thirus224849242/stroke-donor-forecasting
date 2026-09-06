@@ -419,14 +419,17 @@ def get_local_account(email: str) -> dict | None:
     wrong password would (no separate "account doesn't exist" message, so
     this can't be used to enumerate which emails have accounts).
     totp_secret is None for every account that hasn't turned 2FA on --
-    render_login() only prompts for a code when it's actually set."""
+    render_login() only prompts for a code when it's actually set.
+    created_at is here for the Profile page's "member since" line --
+    every other caller of this function just ignores the extra key."""
     engine = get_engine()
     if engine is None:
         return None
     try:
         with engine.connect() as conn:
             row = conn.execute(text("""
-                SELECT email, name, role, password_hash, totp_secret FROM local_accounts WHERE email = :email
+                SELECT email, name, role, password_hash, totp_secret, created_at
+                FROM local_accounts WHERE email = :email
             """), {'email': email}).mappings().fetchone()
         return dict(row) if row else None
     except Exception as exc:
@@ -493,10 +496,10 @@ def update_local_account_password(email: str, new_password: str) -> bool:
     """Sets a new password for an existing local account -- used by BOTH
     the Administrator's reset-password action on the Local Accounts page
     and a signed-in user's own self-service change-password form (the
-    account popover in ui.py's page_header()). Same hashing as every
-    other password write in this file; the caller is responsible for
-    having already verified whatever it needs to (the admin's own role,
-    or the user's current password) before calling this."""
+    Profile page, app.py). Same hashing as every other password write in
+    this file; the caller is responsible for having already verified
+    whatever it needs to (the admin's own role, or the user's current
+    password) before calling this."""
     engine = get_engine()
     if engine is None:
         return False
@@ -505,6 +508,32 @@ def update_local_account_password(email: str, new_password: str) -> bool:
             result = conn.execute(text("""
                 UPDATE local_accounts SET password_hash = :password_hash WHERE email = :email
             """), {'email': email, 'password_hash': hash_password(new_password)})
+        return result.rowcount > 0
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return False
+
+
+def update_local_account_profile(email: str, new_name: str, new_email: str) -> bool:
+    """Super-Admin-only self-service: changes a local account's own name
+    and/or email (email is this table's primary key, so this covers both
+    a name-only edit and an actual email change in one statement).
+    Analysts and Administrators can't reach this at all -- app.py's
+    Profile page only renders this form for auth_method == 'password'
+    AND role == 'Super Admin', same "only touch what the caller already
+    checked" split every other write in this file follows. Returns False
+    (not a raised exception) if new_email is already used by a different
+    account -- same duplicate-key handling as create_local_account()."""
+    engine = get_engine()
+    if engine is None:
+        return False
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text("""
+                UPDATE local_accounts SET email = :new_email, name = :new_name WHERE email = :email
+            """), {'email': email, 'new_email': new_email, 'new_name': new_name})
+        list_local_accounts.clear()  # so a changed name/email shows up on the Users page immediately
         return result.rowcount > 0
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs

@@ -6,10 +6,7 @@ import streamlit as st
 
 from auth import initials, sign_out
 from branding import logo_data_uri, logo_white_data_uri
-from db import (
-    clear_totp_secret, count_new_runs, count_pending_requests, get_local_account, set_totp_secret,
-    update_local_account_password, verify_password,
-)
+from db import count_new_runs, count_pending_requests
 
 # ── BRAND PALETTE ────────────────────────────────────────────────────────────
 # Swiss financial / data-dense analytics: pure white surfaces, hairline gray
@@ -898,6 +895,22 @@ def inject_global_css():
     [data-testid="stDataFrame"] {{ border-radius: 0 !important; overflow: hidden; }}
     </style>
     """)
+    # A separate, minimal st.html() call, NOT appended into the block just
+    # above -- confirmed live: doing that (which is where this rule was
+    # first added) silently killed that entire call's rendered <style>
+    # output, including .st-key-page_header_block's un-styling rule a few
+    # hundred lines up in the very same call -- reported live as the page
+    # header + KPI row suddenly wrapped in an unwanted bordered card
+    # again, with no error anywhere to explain why. Exactly the same
+    # silent-failure-above-a-size-threshold bug the two-way (then three-
+    # way, see the next call) split below already exists to avoid; this
+    # is a fourth split for the same reason, not a new kind of bug.
+    st.html(f"""
+    <style>
+    [data-testid="stPopoverBody"] {{ width: 300px !important; }}
+    [data-testid="stPopoverBody"] code {{ word-break: break-all; white-space: normal !important; }}
+    </style>
+    """)
     # A THIRD, small st.html() call, not appended to either block above --
     # confirmed live, twice now, that adding this rule's text to either of
     # the two existing calls (even the shorter one) reproduces the exact
@@ -1214,133 +1227,18 @@ def page_header(eyebrow, title, sub='', meta='', info=None):
                     st.session_state.dark_mode = wants_dark
                     st.rerun()
 
-                # Only for a local (email+password) sign-in -- a Google-
-                # authenticated user has no password in this app at all to
-                # change (their identity is Google's, not ours), so this
-                # entire block simply doesn't render for them, the same way
-                # it wouldn't make sense to offer it.
-                if st.session_state.get('auth_method') == 'password':
-                    with st.expander('Change password', icon=':material/lock_reset:'):
-                        with st.form('change_password_form', border=False):
-                            current_pw = st.text_input('Current password', type='password', key='cp_current')
-                            new_pw = st.text_input('New password', type='password', key='cp_new')
-                            confirm_pw = st.text_input('Confirm new password', type='password', key='cp_confirm')
-                            change_submitted = st.form_submit_button(
-                                'Update password', icon=':material/check:', width='stretch',
-                            )
-                        if change_submitted:
-                            email = user.get('email', '')
-                            account = get_local_account(email)
-                            # Re-verify the CURRENT password server-side rather than
-                            # trusting the already-authenticated session alone -- this
-                            # is the standard "confirm you're still you" step before
-                            # a sensitive change, and it doubles as proof the account
-                            # (and the DB) is actually reachable right now.
-                            if not account or not verify_password(current_pw, account['password_hash']):
-                                st.error('Current password is incorrect.', icon=':material/error:')
-                            elif len(new_pw) < 8:
-                                st.error('New password must be at least 8 characters.', icon=':material/error:')
-                            elif new_pw != confirm_pw:
-                                st.error("New passwords don't match.", icon=':material/error:')
-                            elif update_local_account_password(email, new_pw):
-                                st.success('Password updated.', icon=':material/check_circle:')
-                            else:
-                                st.error('Could not update your password right now. Try again shortly.',
-                                          icon=':material/error:')
-
-                    # Same local-only gate as Change password above, and for
-                    # the same reason -- Google's own account has its own
-                    # 2FA, unrelated to anything this app can turn on or off.
-                    with st.expander('Two-factor authentication', icon=':material/shield_lock:'):
-                        email = user.get('email', '')
-                        account = get_local_account(email)
-                        totp_enabled = bool(account and account.get('totp_secret'))
-                        if totp_enabled:
-                            st.success('Two-factor authentication is enabled.', icon=':material/check_circle:')
-                            st.caption('Every sign-in will ask for a code from your authenticator app.')
-                            # A second confirming step (current password,
-                            # inside its own form) before actually turning it
-                            # off -- same "prove you're still you" reasoning
-                            # as Change password re-checking the current
-                            # password above, for a change that lowers this
-                            # account's security.
-                            with st.form('totp_disable_form', border=False):
-                                confirm_pw = st.text_input(
-                                    'Enter your password to disable', type='password', key='totp_disable_pw',
-                                )
-                                disable_submitted = st.form_submit_button(
-                                    'Disable two-factor authentication', icon=':material/remove_moderator:',
-                                    width='stretch',
-                                )
-                            if disable_submitted:
-                                if not verify_password(confirm_pw, account['password_hash']):
-                                    st.error('Incorrect password.', icon=':material/error:')
-                                elif clear_totp_secret(email):
-                                    st.success('Two-factor authentication disabled.', icon=':material/check_circle:')
-                                    st.rerun()
-                                else:
-                                    st.error('Could not disable two-factor authentication right now. '
-                                              'Try again shortly.', icon=':material/error:')
-                        else:
-                            st.caption('Add an extra step at sign-in using an authenticator app '
-                                       '(Google Authenticator, Authy, 1Password, etc).')
-                            # The secret lives in session_state ONLY from here
-                            # until a real code confirms it below -- set_totp_secret()
-                            # (db.py) is never called until that verification
-                            # succeeds, so a user who starts setup and never
-                            # finishes it leaves no half-configured 2FA behind
-                            # in the database, just an abandoned value in this
-                            # session that a rerun/new session never sees again.
-                            if not st.session_state.get('totp_setup_secret'):
-                                if st.button('Set up two-factor authentication', key='totp_setup_start',
-                                              icon=':material/qr_code_2:', width='stretch'):
-                                    import pyotp
-                                    st.session_state.totp_setup_secret = pyotp.random_base32()
-                                    st.rerun()
-                            else:
-                                import base64
-                                import io
-
-                                import pyotp
-                                import qrcode
-
-                                secret = st.session_state.totp_setup_secret
-                                uri = pyotp.TOTP(secret).provisioning_uri(
-                                    name=email, issuer_name='Stroke Foundation Donor Forecasting',
-                                )
-                                buf = io.BytesIO()
-                                qrcode.make(uri).save(buf, format='PNG')
-                                qr_b64 = base64.b64encode(buf.getvalue()).decode()
-                                st.markdown(
-                                    f'<img src="data:image/png;base64,{qr_b64}" width="176" '
-                                    'style="display:block;margin:4px auto 10px;border-radius:4px;" />',
-                                    unsafe_allow_html=True,
-                                )
-                                st.caption('Scan this with your authenticator app, or enter the key '
-                                           f'manually: `{secret}`')
-                                with st.form('totp_verify_form', border=False):
-                                    setup_code = st.text_input(
-                                        'Enter the 6-digit code to confirm', placeholder='123456',
-                                        max_chars=6, key='totp_setup_code',
-                                    )
-                                    verify_submitted = st.form_submit_button(
-                                        'Verify and enable', icon=':material/check:', width='stretch',
-                                    )
-                                if st.button('Cancel', key='totp_setup_cancel'):
-                                    st.session_state.totp_setup_secret = None
-                                    st.rerun()
-                                if verify_submitted:
-                                    if setup_code and pyotp.TOTP(secret).verify(setup_code.strip(), valid_window=1):
-                                        if set_totp_secret(email, secret):
-                                            st.session_state.totp_setup_secret = None
-                                            st.success('Two-factor authentication enabled.',
-                                                       icon=':material/check_circle:')
-                                            st.rerun()
-                                        else:
-                                            st.error('Could not enable two-factor authentication right now. '
-                                                      'Try again shortly.', icon=':material/error:')
-                                    else:
-                                        st.error('Incorrect code. Please try again.', icon=':material/error:')
+                # Change password / Two-factor authentication used to live
+                # here as expanders -- moved out to a full Profile page
+                # (app.py) since they'd grown too large for a popover menu,
+                # and a dedicated page also has room for the profile-details
+                # (name/email) editing a Super Admin gets that never fit here
+                # at all. This is now just a one-line link to that page,
+                # same nav pattern render_sidebar()'s own buttons use.
+                if st.button('My profile', key='topbar_profile_btn', icon=':material/account_circle:',
+                              width='stretch'):
+                    st.session_state.page = 'Profile'
+                    st.session_state.nav_loading = True
+                    st.rerun()
 
                 if st.button('Log out', key='topbar_signout_btn', icon=':material/logout:',
                              type='primary', width='stretch', disabled=running):
