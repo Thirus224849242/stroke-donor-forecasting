@@ -51,7 +51,7 @@ import streamlit as st
 from auth import complete_sign_out, handle_google_redirect, init_session_state, render_login
 from branding import TITLE_LOGO_PATH
 from db import (
-    create_local_account, db_configured, decide_access_request, delete_dashboard_run,
+    clear_totp_secret, create_local_account, db_configured, decide_access_request, delete_dashboard_run,
     delete_local_account, list_approved_users, list_dashboard_runs, list_denied_users,
     list_local_accounts, list_pending_requests, load_dashboard_run, mark_runs_seen,
     revoke_user_access, save_dashboard_run, update_local_account_password,
@@ -68,8 +68,20 @@ from db import (
 # caches an import in sys.modules after the first real one, so this only
 # defers WHEN that ~1.3s is paid (once real work is happening, not before
 # the login page even renders), it doesn't pay it more than once.
+# `import ui` (a module reference), NOT `from ui import AMBER, TEXT, ...` --
+# confirmed live in dark mode: every colour constant below is reassigned by
+# ui.py's own _apply_palette() on every rerun (see its docstring in ui.py),
+# but `from ui import TEXT` copies whatever TEXT was AT IMPORT TIME into a
+# brand-new name in this module's own namespace -- it does not track ui.py's
+# name being reassigned later, so every f-string in this file that used a
+# bare {TEXT}/{TEAL}/etc. was permanently stuck on the LIGHT-mode value
+# forever, regardless of the dark-mode toggle (this is exactly why KPI icons,
+# chart lines, and section dividers looked washed out / low-contrast in dark
+# mode -- they were light-mode colours rendered on a dark background). Every
+# call site below now does ui.TEXT/ui.TEAL/etc., which re-reads ui.py's
+# current module attribute at the moment it's actually used.
+import ui
 from ui import (
-    AMBER, BLUE, COLOURS, GREEN, LINE, MIST, PURPLE, RED, TEAL, TEAL2, TEXT,
     card, chart, empty_state, inject_global_css, kpi, new_execution_log,
     overall_progress, page_header, render_cached_run_banner, render_footer,
     render_sidebar, render_startup_progress, stage_row, upload_slot,
@@ -624,10 +636,10 @@ if page == 'Data Pipeline':
         with card():
             st.markdown(f"""
             <div style="text-align:center;padding:28px;">
-                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                <div style="font-size:14px;font-weight:700;color:{ui.TEXT};margin-bottom:6px;">
                     Administrators only
                 </div>
-                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                <div style="font-size:12.5px;color:{ui.MIST};max-width:480px;margin:0 auto;">
                     Running the pipeline updates the shared dashboard data everyone sees, so it's
                     restricted to Administrators. Contact your admin if you need a fresh run.
                 </div>
@@ -932,11 +944,11 @@ if page == 'Data Pipeline':
         if st.session_state.mape_linear:
             mape_delta = f'{st.session_state.mape - st.session_state.mape_linear:+.1f}pp vs linear'
         with st.container(horizontal=True):
-            kpi('Rows in master file', f'{st.session_state.master_rows:,}', icon=':material/table_rows:', accent=TEAL)
-            kpi('Donor signups', f'{st.session_state.donor_count:,}', icon=':material/how_to_reg:', accent=BLUE)
-            kpi('Total income reconciled', f'${st.session_state.total_income:,.0f}', icon=':material/payments:', accent=PURPLE)
+            kpi('Rows in master file', f'{st.session_state.master_rows:,}', icon=':material/table_rows:', accent=ui.TEAL)
+            kpi('Donor signups', f'{st.session_state.donor_count:,}', icon=':material/how_to_reg:', accent=ui.BLUE)
+            kpi('Total income reconciled', f'${st.session_state.total_income:,.0f}', icon=':material/payments:', accent=ui.PURPLE)
             kpi('ML forecast accuracy', f'{st.session_state.mape:.1f}% MAPE', delta=mape_delta,
-                delta_color='inverse', icon=':material/verified:', accent=AMBER)
+                delta_color='inverse', icon=':material/verified:', accent=ui.AMBER)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1020,13 +1032,13 @@ elif page == 'Overview':
     with st.container(horizontal=True):
         kpi('12-month forecast', f'${total_12_avg:,.0f}',
             delta=f'range \\${total_12_min:,.0f}–\\${total_12_max:,.0f} across {len(methods)} methods',
-            icon=':material/trending_up:', accent=TEAL, delta_color='off')
+            icon=':material/trending_up:', accent=ui.TEAL, delta_color='off')
         kpi('Active donors', f'{current_active:,.0f}', delta=f'{active_delta:+,} vs prior month',
-            icon=':material/group:', accent=BLUE)
+            icon=':material/group:', accent=ui.BLUE)
         kpi('Current monthly income', f'${current_income:,.0f}', delta=f'{income_delta:+.1f}% vs prior month',
-            icon=':material/payments:', accent=PURPLE)
+            icon=':material/payments:', accent=ui.PURPLE)
         kpi('Forecast accuracy', f'{mape_avg:.1f}% MAPE', delta=f'avg across {len(methods)} methods',
-            icon=':material/verified:', accent=AMBER, delta_color='off')
+            icon=':material/verified:', accent=ui.AMBER, delta_color='off')
 
     recent = monthly.tail(24)
     t_act  = list(range(1, len(recent) + 1))
@@ -1042,15 +1054,15 @@ elif page == 'Overview':
     fig.add_trace(go.Scatter(
         x=t_act, y=recent['total_income'].values,
         mode='lines+markers', name='Actual',
-        line=dict(color=TEXT, width=2.5), marker=dict(size=4),
+        line=dict(color=ui.TEXT, width=2.5), marker=dict(size=4),
     ))
     fig.add_trace(go.Scatter(
         x=t_fore, y=blended_avg.values,
         mode='lines+markers', name='Blended forecast',
-        line=dict(color=TEAL, width=2.5, dash='dash'),
+        line=dict(color=ui.TEAL, width=2.5, dash='dash'),
         marker=dict(size=5, symbol='square'),
     ))
-    fig.add_vline(x=len(recent) + 0.5, line_dash='dot', line_color=LINE, opacity=0.8)
+    fig.add_vline(x=len(recent) + 0.5, line_dash='dot', line_color=ui.LINE, opacity=0.8)
     fig.update_layout(yaxis=dict(tickformat='$,.0f'))
 
     with card('Monthly income: actual vs blended forecast',
@@ -1070,7 +1082,7 @@ elif page == 'Overview':
         sup = st.session_state.supplier_summary
         fig2 = go.Figure(go.Pie(
             labels=sup['supplier'], values=sup['total_income'],
-            hole=0.55, marker_colors=COLOURS, textinfo='percent', textfont_size=10,
+            hole=0.55, marker_colors=ui.COLOURS, textinfo='percent', textfont_size=10,
         ))
         fig2.update_layout(showlegend=True,
                             legend=dict(orientation='v', x=1, y=0.5, font=dict(size=9)),
@@ -1086,7 +1098,7 @@ elif page == 'Overview':
         camp = st.session_state.campaign_summary
         fig3 = go.Figure(go.Pie(
             labels=camp['campaign_type'], values=camp['total_income'],
-            hole=0.55, marker_colors=COLOURS, textinfo='percent', textfont_size=10,
+            hole=0.55, marker_colors=ui.COLOURS, textinfo='percent', textfont_size=10,
         ))
         fig3.update_layout(showlegend=True,
                             legend=dict(orientation='v', x=1, y=0.5, font=dict(size=9)),
@@ -1317,13 +1329,13 @@ elif page == 'Income Forecast':
 
     with st.container(horizontal=True):
         kpi(f'{horizon}-month total', f'${total:,.0f}', delta='Projected income',
-            icon=':material/summarize:', accent=TEAL, delta_color='off')
+            icon=':material/summarize:', accent=ui.TEAL, delta_color='off')
         kpi('Avg monthly income', f'${fore["predicted_income"].mean():,.0f}', delta='Per month',
-            icon=':material/calendar_month:', accent=BLUE, delta_color='off')
+            icon=':material/calendar_month:', accent=ui.BLUE, delta_color='off')
         kpi('Validation MAPE', f'{mape:.1f}%', delta=holdback_label,
-            icon=':material/verified:', accent=PURPLE, delta_color='off')
+            icon=':material/verified:', accent=ui.PURPLE, delta_color='off')
         kpi('Underlying trend', f'${slope:+,.0f}/mo', delta='Long-run income slope',
-            icon=':material/show_chart:', accent=AMBER, delta_color='off')
+            icon=':material/show_chart:', accent=ui.AMBER, delta_color='off')
 
     recent = monthly.tail(n_train)
     t_act  = list(range(1, len(recent) + 1))
@@ -1348,17 +1360,17 @@ elif page == 'Income Forecast':
     fig.add_trace(go.Scatter(
         x=t_act, y=recent['total_income'].values,
         mode='lines+markers', name='Actual monthly income',
-        line=dict(color=TEXT, width=2.5), marker=dict(size=4),
+        line=dict(color=ui.TEXT, width=2.5), marker=dict(size=4),
     ))
     fig.add_trace(go.Scatter(
         x=t_fore, y=fore['predicted_income'].values,
         mode='lines+markers', name=f'{horizon}-month forecast',
-        line=dict(color=TEAL, width=2.5, dash='dash'),
+        line=dict(color=ui.TEAL, width=2.5, dash='dash'),
         marker=dict(size=5, symbol='square'),
     ))
-    fig.add_vline(x=split, line_dash='dot', line_color=MIST, opacity=0.8,
+    fig.add_vline(x=split, line_dash='dot', line_color=ui.MIST, opacity=0.8,
                   annotation_text='Forecast start', annotation_font_size=10,
-                  annotation_font_color=MIST)
+                  annotation_font_color=ui.MIST)
     fig.update_layout(
         yaxis=dict(tickformat='$,.0f', title='Monthly income ($)'),
         xaxis=dict(title='Month number'),
@@ -1390,9 +1402,9 @@ elif page == 'Income Forecast':
 
         fig_imp = go.Figure(go.Bar(
             x=imp.values, y=imp.index, orientation='h',
-            marker_color=TEAL,
+            marker_color=ui.TEAL,
             text=[f'{v:.0%}' for v in imp.values], textposition='outside',
-            textfont=dict(size=11, color=TEXT),
+            textfont=dict(size=11, color=ui.TEXT),
         ))
         fig_imp.update_layout(
             xaxis=dict(title='Relative importance', tickformat='.0%'),
@@ -1448,12 +1460,12 @@ elif page == 'Income Forecast':
     if model_choice == 'Stock-flow model' and sf_zone3_state:
         st.markdown('<div style="height:4px;"></div>', unsafe_allow_html=True)
         zone3_fig = go.Figure()
-        scenario_colors = {'Conservative': AMBER, 'Base': TEAL, 'Optimistic': PURPLE}
+        scenario_colors = {'Conservative': ui.AMBER, 'Base': ui.TEAL, 'Optimistic': ui.PURPLE}
         for name, df3 in sf_zone3_state.items():
             zone3_fig.add_trace(go.Scatter(
                 x=df3['calendar_month'], y=df3['predicted_income'],
                 mode='lines+markers', name=name,
-                line=dict(color=scenario_colors.get(name, TEXT), width=2.5), marker=dict(size=5),
+                line=dict(color=scenario_colors.get(name, ui.TEXT), width=2.5), marker=dict(size=5),
             ))
         zone3_fig.update_layout(
             yaxis=dict(tickformat='$,.0f', title='Monthly income ($)'),
@@ -1518,7 +1530,7 @@ elif page == 'Retention Analysis':
 
     if ret_df.empty:
         with card():
-            st.markdown(f'<div style="text-align:center;padding:24px;color:{MIST};">'
+            st.markdown(f'<div style="text-align:center;padding:24px;color:{ui.MIST};">'
                         f'Not enough data for this segment.</div>', unsafe_allow_html=True)
     else:
         ret_df = ret_df[ret_df['tenure_months'] <= max_m]
@@ -1528,9 +1540,9 @@ elif page == 'Retention Analysis':
             fig.add_trace(go.Scatter(
                 x=grp['tenure_months'], y=grp['retention_pct'],
                 mode='lines', name=str(grp_val),
-                line=dict(color=COLOURS[i % len(COLOURS)], width=2),
+                line=dict(color=ui.COLOURS[i % len(ui.COLOURS)], width=2),
             ))
-        fig.add_hline(y=50, line_dash='dot', line_color=MIST, opacity=0.7,
+        fig.add_hline(y=50, line_dash='dot', line_color=ui.MIST, opacity=0.7,
                       annotation_text='50% retention', annotation_font_size=10)
         fig.update_layout(
             yaxis=dict(range=[0, 105], ticksuffix='%', title='Donors still active (%)'),
@@ -1621,10 +1633,10 @@ elif page == 'Donor Lifetime Value':
         with card():
             st.markdown(f"""
             <div style="text-align:center;padding:28px;">
-                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                <div style="font-size:14px;font-weight:700;color:{ui.TEXT};margin-bottom:6px;">
                     Donor lifetime value model unavailable
                 </div>
-                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                <div style="font-size:12.5px;color:{ui.MIST};max-width:480px;margin:0 auto;">
                     {st.session_state.ltv_error or 'Run a fresh pipeline in this session to compute this model, '
                      'it isn\'t stored with saved runs from history.'}
                 </div>
@@ -1634,23 +1646,23 @@ elif page == 'Donor Lifetime Value':
         with st.container(horizontal=True):
             kpi('Donors modelled', f'{ltv_metrics["total_donors"]:,}',
                 delta=f'{ltv_metrics["gamma_gamma_eligible"]:,} with repeat gifts',
-                icon=':material/groups:', accent=TEAL, delta_color='off')
+                icon=':material/groups:', accent=ui.TEAL, delta_color='off')
             kpi('Predicted 12-month value', f'${ltv_metrics["predicted_value_12m"]:,.0f}',
-                delta='existing donors only', icon=':material/savings:', accent=BLUE, delta_color='off')
+                delta='existing donors only', icon=':material/savings:', accent=ui.BLUE, delta_color='off')
             kpi('Predicted 24-month value', f'${ltv_metrics["predicted_value_24m"]:,.0f}',
-                delta='existing donors only', icon=':material/savings:', accent=PURPLE, delta_color='off')
+                delta='existing donors only', icon=':material/savings:', accent=ui.PURPLE, delta_color='off')
             kpi('Holdout MAPE', f'{ltv_metrics["holdout_mape"]:.1f}%',
                 delta=f'penalizer {ltv_metrics["best_penalizer"]:g}',
-                icon=':material/verified:', accent=AMBER, delta_color='off')
+                icon=':material/verified:', accent=ui.AMBER, delta_color='off')
 
         col1, col2 = st.columns([3, 2])
         with col1:
             top15 = ltv_results.sort_values('predicted_ltv_24m', ascending=False).head(15)
             fig = go.Figure(go.Bar(
                 x=top15['predicted_ltv_24m'], y=top15['contact_id'].astype(str),
-                orientation='h', marker_color=TEAL,
+                orientation='h', marker_color=ui.TEAL,
                 text=[f'${v:,.0f}' for v in top15['predicted_ltv_24m']],
-                textposition='outside', textfont=dict(size=10, color=TEXT),
+                textposition='outside', textfont=dict(size=10, color=ui.TEXT),
             ))
             fig.update_layout(
                 xaxis=dict(title='Predicted 24-month value ($)', tickformat='$,.0f'),
@@ -1676,13 +1688,13 @@ elif page == 'Donor Lifetime Value':
             edges, counts = hist['bin_edges'], hist['counts']
             centers = [(edges[i] + edges[i + 1]) / 2 for i in range(len(counts))]
             widths = [edges[i + 1] - edges[i] for i in range(len(counts))]
-            # TEAL, not TEXT -- TEXT is the text-colour variable, not a
+            # ui.TEAL, not ui.TEXT -- ui.TEXT is the text-colour variable, not a
             # decoration colour; using it here made this chart's bars a
             # flat, mismatched navy next to the teal "Top 15 donors"
-            # chart beside it (and, being TEXT specifically, an odd
+            # chart beside it (and, being ui.TEXT specifically, an odd
             # near-white in dark mode too, since that variable tracks
             # whatever the current body text colour is, not an accent).
-            fig2 = go.Figure(go.Bar(x=centers, y=counts, width=widths, marker_color=TEAL))
+            fig2 = go.Figure(go.Bar(x=centers, y=counts, width=widths, marker_color=ui.TEAL))
             fig2.update_layout(
                 xaxis=dict(title='Predicted 24-month value ($)', tickformat='$,.0f'),
                 yaxis=dict(title='Number of donors'), showlegend=False,
@@ -1780,21 +1792,21 @@ elif page == 'Supplier Insights':
 
     with st.container(horizontal=True):
         kpi('Top supplier', top['supplier'], delta='By total income',
-            icon=':material/military_tech:', accent=TEAL, delta_color='off')
+            icon=':material/military_tech:', accent=ui.TEAL, delta_color='off')
         kpi('Top supplier income', f'${top["total_income"]:,.0f}', delta='Historical total',
-            icon=':material/payments:', accent=BLUE, delta_color='off')
+            icon=':material/payments:', accent=ui.BLUE, delta_color='off')
         kpi('Total suppliers', str(len(sup)), delta='In dataset',
-            icon=':material/store:', accent=PURPLE, delta_color='off')
+            icon=':material/store:', accent=ui.PURPLE, delta_color='off')
         kpi('Avg gift (top)', f'${top["avg_gift"]:,.2f}', delta='Per payment',
-            icon=':material/percent:', accent=AMBER, delta_color='off')
+            icon=':material/percent:', accent=ui.AMBER, delta_color='off')
 
     col1, col2 = st.columns(2)
     with col1:
         fig = go.Figure(go.Bar(
             x=sup['supplier'], y=sup['total_income'],
-            marker_color=COLOURS[:len(sup)],
+            marker_color=ui.COLOURS[:len(sup)],
             text=[f'${v/1e6:.2f}M' for v in sup['total_income']],
-            textposition='outside', textfont=dict(size=11, color=TEXT),
+            textposition='outside', textfont=dict(size=11, color=ui.TEXT),
         ))
         fig.update_layout(yaxis=dict(tickformat='$,.0f', title='Total income ($)'), showlegend=False)
         with card('Total income by supplier', info=(
@@ -1808,9 +1820,9 @@ elif page == 'Supplier Insights':
     with col2:
         fig2 = go.Figure(go.Bar(
             x=sup['supplier'], y=sup['active_donors'],
-            marker_color=COLOURS[:len(sup)],
+            marker_color=ui.COLOURS[:len(sup)],
             text=[f'{v:,}' for v in sup['active_donors']],
-            textposition='outside', textfont=dict(size=11, color=TEXT),
+            textposition='outside', textfont=dict(size=11, color=ui.TEXT),
         ))
         fig2.update_layout(yaxis=dict(title='Active donors'), showlegend=False)
         with card('Active donors by supplier', info=(
@@ -1839,7 +1851,7 @@ elif page == 'Supplier Insights':
                 fig3.add_trace(go.Scatter(
                     x=grp['donor_month'], y=grp['total_income'],
                     mode='lines', name=s,
-                    line=dict(color=COLOURS[i % len(COLOURS)], width=2),
+                    line=dict(color=ui.COLOURS[i % len(ui.COLOURS)], width=2),
                 ))
             fig3.update_layout(yaxis=dict(tickformat='$,.0f', title='Monthly income ($)'),
                                 xaxis_title='Month')
@@ -1893,22 +1905,22 @@ elif page == 'Campaign ROI':
 
     with st.container(horizontal=True):
         kpi('Top income campaign', best['campaign_type'], delta=f'\\${best["total_income"]:,.0f} total',
-            icon=':material/campaign:', accent=TEAL, delta_color='off')
+            icon=':material/campaign:', accent=ui.TEAL, delta_color='off')
         kpi('Campaign types', str(len(roi)), delta='In dataset',
-            icon=':material/category:', accent=BLUE, delta_color='off')
+            icon=':material/category:', accent=ui.BLUE, delta_color='off')
         kpi('CPA range', cpa_range, delta='Non-zero cost campaigns',
-            icon=':material/paid:', accent=PURPLE, delta_color='off')
+            icon=':material/paid:', accent=ui.PURPLE, delta_color='off')
         kpi('Free-acquisition income', f'${roi[roi["avg_cpa"] == 0]["total_income"].sum():,.0f}' if has_cpa else 'N/A',
-            delta='Free Sales campaigns', icon=':material/redeem:', accent=AMBER, delta_color='off')
+            delta='Free Sales campaigns', icon=':material/redeem:', accent=ui.AMBER, delta_color='off')
 
     col1, col2 = st.columns(2)
     with col1:
         sorted_roi = roi.sort_values('total_income', ascending=False)
         fig = go.Figure(go.Bar(
             x=sorted_roi['campaign_type'], y=sorted_roi['total_income'],
-            marker_color=COLOURS[:len(roi)],
+            marker_color=ui.COLOURS[:len(roi)],
             text=[f'${v/1e6:.2f}M' for v in sorted_roi['total_income']],
-            textposition='outside', textfont=dict(size=11, color=TEXT),
+            textposition='outside', textfont=dict(size=11, color=ui.TEXT),
         ))
         fig.update_layout(yaxis=dict(tickformat='$,.0f', title='Total income ($)'), showlegend=False)
         with card('Total income by campaign type', info=(
@@ -1923,9 +1935,9 @@ elif page == 'Campaign ROI':
         if has_cpa:
             fig2 = go.Figure(go.Bar(
                 x=roi['campaign_type'], y=roi['avg_cpa'],
-                marker_color=COLOURS[:len(roi)],
+                marker_color=ui.COLOURS[:len(roi)],
                 text=[f'${v:.0f}' if v > 0 else 'Free' for v in roi['avg_cpa']],
-                textposition='outside', textfont=dict(size=11, color=TEXT),
+                textposition='outside', textfont=dict(size=11, color=ui.TEXT),
             ))
             fig2.update_layout(yaxis=dict(tickformat='$,.0f', title='Avg CPA ($)'), showlegend=False)
             with card('Average cost per acquisition', tag='CPA data', tag_color='orange', info=(
@@ -1936,7 +1948,7 @@ elif page == 'Campaign ROI':
                 chart(fig2, 280)
         else:
             with card('Average cost per acquisition'):
-                st.markdown(f'<div style="text-align:center;padding:24px;color:{MIST};">'
+                st.markdown(f'<div style="text-align:center;padding:24px;color:{ui.MIST};">'
                             f'CPA data not found in Campaigns file.</div>', unsafe_allow_html=True)
 
     cm = st.session_state.campaign_monthly
@@ -1946,7 +1958,7 @@ elif page == 'Campaign ROI':
         fig3.add_trace(go.Scatter(
             x=grp['donor_month'], y=grp['total_income'],
             mode='lines', name=ct,
-            line=dict(color=COLOURS[i % len(COLOURS)], width=2),
+            line=dict(color=ui.COLOURS[i % len(ui.COLOURS)], width=2),
         ))
     fig3.update_layout(yaxis=dict(tickformat='$,.0f', title='Monthly income ($)'), xaxis_title='Month')
     with card('Monthly income by campaign type', info=(
@@ -1995,10 +2007,10 @@ elif page == 'Run History':
         with card():
             st.markdown(f"""
             <div style="text-align:center;padding:28px;">
-                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                <div style="font-size:14px;font-weight:700;color:{ui.TEXT};margin-bottom:6px;">
                     Run history isn't available
                 </div>
-                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                <div style="font-size:12.5px;color:{ui.MIST};max-width:480px;margin:0 auto;">
                     No database connection is configured, so past runs aren't saved. Every
                     pipeline run still works, it just won't be reloadable later.
                 </div>
@@ -2012,10 +2024,10 @@ elif page == 'Run History':
         with card():
             st.markdown(f"""
             <div style="text-align:center;padding:28px;">
-                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                <div style="font-size:14px;font-weight:700;color:{ui.TEXT};margin-bottom:6px;">
                     No runs saved yet
                 </div>
-                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                <div style="font-size:12.5px;color:{ui.MIST};max-width:480px;margin:0 auto;">
                     Run the pipeline from the Data Pipeline page. It'll be saved here
                     automatically once it finishes.
                 </div>
@@ -2038,25 +2050,25 @@ elif page == 'Run History':
     with st.container(horizontal=True):
         kpi('Total runs', str(total_run_count),
             delta=f'Showing {len(runs)} most recent' if total_run_count > len(runs) else 'Saved to history',
-            icon=':material/history:', accent=TEAL, delta_color='off')
+            icon=':material/history:', accent=ui.TEAL, delta_color='off')
         kpi('Latest run', latest['run_at'].strftime('%d %b, %H:%M'),
             delta=latest['run_by'] or 'Unknown user', icon=':material/schedule:',
-            accent=BLUE, delta_color='off')
+            accent=ui.BLUE, delta_color='off')
         kpi('Donors (latest)', f'{int(latest["donor_count"]):,}' if pd.notna(latest['donor_count']) else 'N/A',
-            delta='In most recent run', icon=':material/groups:', accent=PURPLE, delta_color='off')
+            delta='In most recent run', icon=':material/groups:', accent=ui.PURPLE, delta_color='off')
         kpi('Income (latest)', f'${latest["total_income"]:,.0f}' if pd.notna(latest['total_income']) else 'N/A',
-            delta='Total, most recent run', icon=':material/payments:', accent=AMBER, delta_color='off')
+            delta='Total, most recent run', icon=':material/payments:', accent=ui.AMBER, delta_color='off')
         if 'duration_seconds' in runs.columns and runs['duration_seconds'].notna().any():
             kpi('Avg run duration', _fmt_duration(runs['duration_seconds'].mean()),
                 delta=f'Latest: {_fmt_duration(latest.get("duration_seconds"))}',
-                icon=':material/timer:', accent=TEAL2, delta_color='off')
+                icon=':material/timer:', accent=ui.TEAL2, delta_color='off')
 
     chrono = runs.sort_values('run_at')
     col1, col2 = st.columns(2)
     with col1:
         fig = go.Figure(go.Scatter(
             x=chrono['run_at'], y=chrono['total_income'], mode='lines+markers',
-            line=dict(color=TEAL, width=2), marker=dict(size=7),
+            line=dict(color=ui.TEAL, width=2), marker=dict(size=7),
         ))
         fig.update_layout(yaxis=dict(tickformat='$,.0f', title='Total income ($)'), xaxis_title='Run')
         with card('Total income by run'):
@@ -2065,8 +2077,8 @@ elif page == 'Run History':
     with col2:
         fig2 = go.Figure()
         mape_cols = [
-            ('mape_ml', 'ML forecast', TEAL), ('mape_linear', 'Linear trend', PURPLE),
-            ('mape_ltv', 'Donor rollup', AMBER), ('mape_stockflow', 'Stock-flow', BLUE),
+            ('mape_ml', 'ML forecast', ui.TEAL), ('mape_linear', 'Linear trend', ui.PURPLE),
+            ('mape_ltv', 'Donor rollup', ui.AMBER), ('mape_stockflow', 'Stock-flow', ui.BLUE),
         ]
         for col, label, colour in mape_cols:
             if col in chrono.columns and chrono[col].notna().any():
@@ -2238,10 +2250,10 @@ elif page == 'Users':
         with card():
             st.markdown(f"""
             <div style="text-align:center;padding:28px;">
-                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                <div style="font-size:14px;font-weight:700;color:{ui.TEXT};margin-bottom:6px;">
                     Super Admins only
                 </div>
-                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                <div style="font-size:12.5px;color:{ui.MIST};max-width:480px;margin:0 auto;">
                     Creating or managing user accounts is restricted to Super Admins.
                 </div>
             </div>
@@ -2252,10 +2264,10 @@ elif page == 'Users':
         with card():
             st.markdown(f"""
             <div style="text-align:center;padding:28px;">
-                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                <div style="font-size:14px;font-weight:700;color:{ui.TEXT};margin-bottom:6px;">
                     User management isn't available
                 </div>
-                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                <div style="font-size:12.5px;color:{ui.MIST};max-width:480px;margin:0 auto;">
                     No database connection is configured, so there's no account store to manage.
                     Anyone on an allowed Google domain can sign in directly until one is set up
                     (see handle_google_redirect() in auth.py).
@@ -2273,10 +2285,10 @@ elif page == 'Users':
         with card():
             st.markdown(f"""
             <div style="text-align:center;padding:28px;">
-                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                <div style="font-size:14px;font-weight:700;color:{ui.TEXT};margin-bottom:6px;">
                     No pending requests
                 </div>
-                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                <div style="font-size:12.5px;color:{ui.MIST};max-width:480px;margin:0 auto;">
                     New Google sign-in requests from allowed domains will show up here.
                 </div>
             </div>
@@ -2310,7 +2322,7 @@ elif page == 'Users':
                             )
                             st.rerun()
                 if i != pending.index[-1]:
-                    st.markdown(f'<div style="height:1px;background:{LINE};margin:10px 0;"></div>',
+                    st.markdown(f'<div style="height:1px;background:{ui.LINE};margin:10px 0;"></div>',
                                 unsafe_allow_html=True)
 
     st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
@@ -2354,10 +2366,10 @@ elif page == 'Users':
         with card():
             st.markdown(f"""
             <div style="text-align:center;padding:28px;">
-                <div style="font-size:14px;font-weight:700;color:{TEXT};margin-bottom:6px;">
+                <div style="font-size:14px;font-weight:700;color:{ui.TEXT};margin-bottom:6px;">
                     No accounts yet
                 </div>
-                <div style="font-size:12.5px;color:{MIST};max-width:480px;margin:0 auto;">
+                <div style="font-size:12.5px;color:{ui.MIST};max-width:480px;margin:0 auto;">
                     Approved Google sign-ins and local accounts you create below will show
                     up here together, with controls to change role, reset password, revoke,
                     or delete.
@@ -2459,7 +2471,7 @@ elif page == 'Users':
                                     else:
                                         st.error('Could not reset that password.', icon=':material/error:')
 
-                                st.markdown(f'<div style="height:1px;background:{LINE};margin:10px 0;"></div>',
+                                st.markdown(f'<div style="height:1px;background:{ui.LINE};margin:10px 0;"></div>',
                                             unsafe_allow_html=True)
 
                                 role_options = ['Analyst', 'Administrator', 'Super Admin']
@@ -2476,6 +2488,31 @@ elif page == 'Users':
                                             st.rerun()
                                         else:
                                             st.error('Could not update that role.', icon=':material/error:')
+
+                                # Recovery path for someone locked out after
+                                # losing their authenticator device -- a TOTP
+                                # secret is never displayed or exported once
+                                # set (see db.py's set_totp_secret()), so
+                                # there's no way for them to get back in
+                                # without either this or a whole new account.
+                                # Only shown at all when totp_enabled is
+                                # actually true for this row -- no button to
+                                # click for the (default) case where 2FA was
+                                # never turned on.
+                                if row.get('totp_enabled'):
+                                    st.markdown(f'<div style="height:1px;background:{ui.LINE};margin:10px 0;"></div>',
+                                                unsafe_allow_html=True)
+                                    st.caption('Two-factor authentication is enabled for this account.')
+                                    if st.button('Disable their two-factor authentication',
+                                                 key=f"totp_admin_disable_{row['email']}",
+                                                 icon=':material/remove_moderator:', width='stretch'):
+                                        if clear_totp_secret(row['email']):
+                                            st.success('Two-factor authentication disabled.',
+                                                       icon=':material/check_circle:')
+                                            st.rerun()
+                                        else:
+                                            st.error('Could not disable two-factor authentication right now.',
+                                                      icon=':material/error:')
                         with vc2:
                             # Same two-step confirm pattern as Run
                             # History's delete-run action -- a destructive
@@ -2503,7 +2540,7 @@ elif page == 'Users':
                                     st.session_state[confirm_key] = True
                                     st.rerun()
                 if i != last_idx:
-                    st.markdown(f'<div style="height:1px;background:{LINE};margin:10px 0;"></div>',
+                    st.markdown(f'<div style="height:1px;background:{ui.LINE};margin:10px 0;"></div>',
                                 unsafe_allow_html=True)
 
     st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
@@ -2571,7 +2608,7 @@ elif page == 'Users':
                         decide_access_request(row['email'], approve=True, decided_by=current_email)
                         st.rerun()
                 if i != denied.index[-1]:
-                    st.markdown(f'<div style="height:1px;background:{LINE};margin:10px 0;"></div>',
+                    st.markdown(f'<div style="height:1px;background:{ui.LINE};margin:10px 0;"></div>',
                                 unsafe_allow_html=True)
 
 

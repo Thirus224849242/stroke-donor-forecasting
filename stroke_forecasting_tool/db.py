@@ -136,6 +136,16 @@ CREATE TABLE IF NOT EXISTS local_accounts (
     password_hash TEXT NOT NULL,
     created_at    TIMESTAMP NOT NULL DEFAULT now()
 );
+-- Two-factor auth (TOTP, e.g. Google Authenticator/Authy) for local
+-- accounts -- NULL means 2FA is off for that account (the default; opt-in
+-- per user via the account menu, not forced). Set once a user scans the
+-- QR code and confirms it with a real code from their app (see
+-- set_totp_secret() below) -- never written from an unverified value, so
+-- a row with this column populated is a real, working authenticator, not
+-- just "the user started setup". Google sign-in accounts don't use this
+-- at all -- their 2FA (if any) is Google's own, managed on their account,
+-- not this app's.
+ALTER TABLE local_accounts ADD COLUMN IF NOT EXISTS totp_secret TEXT;
 """
 
 # Static metadata (email/name/role) for the two accounts -- NOT the
@@ -402,19 +412,21 @@ def delete_dashboard_run(run_id: str) -> bool:
 
 def get_local_account(email: str) -> dict | None:
     """One local (email+password) account's row -- email/name/role/
-    password_hash -- or None if that email has no local account at all.
-    auth.py's render_login() calls this then checks the password against
-    password_hash with verify_password(); DB unreachable or no matching
-    row both just mean the login attempt fails, same as a wrong password
-    would (no separate "account doesn't exist" message, so this can't be
-    used to enumerate which emails have accounts)."""
+    password_hash/totp_secret -- or None if that email has no local
+    account at all. auth.py's render_login() calls this then checks the
+    password against password_hash with verify_password(); DB unreachable
+    or no matching row both just mean the login attempt fails, same as a
+    wrong password would (no separate "account doesn't exist" message, so
+    this can't be used to enumerate which emails have accounts).
+    totp_secret is None for every account that hasn't turned 2FA on --
+    render_login() only prompts for a code when it's actually set."""
     engine = get_engine()
     if engine is None:
         return None
     try:
         with engine.connect() as conn:
             row = conn.execute(text("""
-                SELECT email, name, role, password_hash FROM local_accounts WHERE email = :email
+                SELECT email, name, role, password_hash, totp_secret FROM local_accounts WHERE email = :email
             """), {'email': email}).mappings().fetchone()
         return dict(row) if row else None
     except Exception as exc:
@@ -427,19 +439,23 @@ def get_local_account(email: str) -> dict | None:
 def list_local_accounts() -> pd.DataFrame:
     """Every local account, most recently created first -- for the
     Administrator-only Local Accounts page. Never includes password_hash
-    (that column is only ever read by get_local_account(), for verifying
-    an actual login attempt). Empty DataFrame if unavailable. Cached
-    (short ttl, cleared immediately by create/update-role/delete below)
-    -- this ran uncached on every render of the Users page, and again on
-    every single admin action taken there (approve/deny/revoke/restore/
-    role-change/delete all trigger a full rerun)."""
+    or the raw totp_secret (only whether one is set, as totp_enabled) --
+    password_hash is only ever read by get_local_account(), for verifying
+    an actual login attempt, and a TOTP secret should never leave the
+    database once written. Empty DataFrame if unavailable. Cached (short
+    ttl, cleared immediately by create/update-role/delete/set_totp_secret/
+    clear_totp_secret below) -- this ran uncached on every render of the
+    Users page, and again on every single admin action taken there
+    (approve/deny/revoke/restore/role-change/delete all trigger a full
+    rerun)."""
     engine = get_engine()
     if engine is None:
         return pd.DataFrame()
     try:
         with engine.connect() as conn:
             return pd.read_sql(text("""
-                SELECT email, name, role, created_at FROM local_accounts ORDER BY created_at DESC
+                SELECT email, name, role, created_at, (totp_secret IS NOT NULL) AS totp_enabled
+                FROM local_accounts ORDER BY created_at DESC
             """), conn)
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -489,6 +505,50 @@ def update_local_account_password(email: str, new_password: str) -> bool:
             result = conn.execute(text("""
                 UPDATE local_accounts SET password_hash = :password_hash WHERE email = :email
             """), {'email': email, 'password_hash': hash_password(new_password)})
+        return result.rowcount > 0
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return False
+
+
+def set_totp_secret(email: str, secret: str) -> bool:
+    """Turns two-factor auth ON for a local account -- called only after
+    auth.py's setup flow has already verified a real code from the user's
+    authenticator app against this exact secret, so a row only ever ends
+    up with a secret that's proven to work, never one from an abandoned
+    or failed setup attempt."""
+    engine = get_engine()
+    if engine is None:
+        return False
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text("""
+                UPDATE local_accounts SET totp_secret = :secret WHERE email = :email
+            """), {'email': email, 'secret': secret})
+        list_local_accounts.clear()
+        return result.rowcount > 0
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return False
+
+
+def clear_totp_secret(email: str) -> bool:
+    """Turns two-factor auth OFF -- the user's own self-service "disable"
+    action, or a Super Admin's recovery action for someone locked out
+    after losing their authenticator device (there's no other way back in
+    for them otherwise, since a TOTP secret is never displayed or
+    recoverable once set)."""
+    engine = get_engine()
+    if engine is None:
+        return False
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text("""
+                UPDATE local_accounts SET totp_secret = NULL WHERE email = :email
+            """), {'email': email})
+        list_local_accounts.clear()
         return result.rowcount > 0
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
