@@ -646,26 +646,6 @@ def inject_global_css():
     [data-testid="stPopoverBody"] {{
         background: {SURFACE} !important; color: {TEXT} !important; border-color: {LINE} !important;
     }}
-    /* Fixed width, not auto-sized to content -- confirmed live, adding the
-    Two-factor authentication section (whose QR-code setup screen has a
-    32-character secret key rendered as inline markdown code, which
-    doesn't wrap and is wider than everything else in this menu)
-    stretched the whole popover to 670px, more than double its normal
-    ~280px. NOT scoped under .st-key-topbar_user_menu (confirmed live via
-    getBoundingClientRect/closest(): Streamlit renders a popover's body
-    through a portal -- position:fixed, appended near the end of
-    <body> -- so it is never actually a DOM descendant of its trigger
-    button's own container, and an ancestor-combinator selector like
-    that silently matches nothing at all. Unscoped, same as the
-    background/color rule directly above, is the only selector that
-    actually reaches it -- which does mean this width applies to every
-    popover in the app (the Users page's Role/Manage popovers too), not
-    just this one; their content (a password field, a role dropdown, a
-    couple of buttons) fits this width just as well. word-break on the
-    secret-key code span keeps IT from single-handedly forcing the width
-    back up again even inside a fixed-width box. */
-    [data-testid="stPopoverBody"] {{ width: 300px !important; }}
-    [data-testid="stPopoverBody"] code {{ word-break: break-all; white-space: normal !important; }}
     /* st.info/warning/error/success and st.text_input/selectbox/
     multiselect/number_input/date_input are all Streamlit-native widgets
     styled from config.toml's fixed (non-dynamic) theme colours, exactly
@@ -916,6 +896,22 @@ def inject_global_css():
     /* ── Dataframe -- flat, square, hairline border via dataframeBorderColor
     (config.toml), no radius override needed now baseRadius=0. ── */
     [data-testid="stDataFrame"] {{ border-radius: 0 !important; overflow: hidden; }}
+    </style>
+    """)
+    # A separate, minimal st.html() call, NOT appended into the block just
+    # above -- confirmed live: doing that (which is where this rule was
+    # first added) silently killed that entire call's rendered <style>
+    # output, including .st-key-page_header_block's un-styling rule a few
+    # hundred lines up in the very same call -- reported live as the page
+    # header + KPI row suddenly wrapped in an unwanted bordered card
+    # again, with no error anywhere to explain why. Exactly the same
+    # silent-failure-above-a-size-threshold bug the two-way (then three-
+    # way, see the next call) split below already exists to avoid; this
+    # is a fourth split for the same reason, not a new kind of bug.
+    st.html(f"""
+    <style>
+    [data-testid="stPopoverBody"] {{ width: 300px !important; }}
+    [data-testid="stPopoverBody"] code {{ word-break: break-all; white-space: normal !important; }}
     </style>
     """)
     # A THIRD, small st.html() call, not appended to either block above --
