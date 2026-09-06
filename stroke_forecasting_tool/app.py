@@ -48,14 +48,14 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from auth import complete_sign_out, handle_google_redirect, init_session_state, render_login
+from auth import complete_sign_out, handle_google_redirect, init_session_state, initials, render_login
 from branding import TITLE_LOGO_PATH
 from db import (
     clear_totp_secret, create_local_account, db_configured, decide_access_request, delete_dashboard_run,
-    delete_local_account, list_approved_users, list_dashboard_runs, list_denied_users,
+    delete_local_account, get_local_account, list_approved_users, list_dashboard_runs, list_denied_users,
     list_local_accounts, list_pending_requests, load_dashboard_run, mark_runs_seen,
-    revoke_user_access, save_dashboard_run, update_local_account_password,
-    update_local_account_role, update_user_role,
+    revoke_user_access, save_dashboard_run, set_totp_secret, update_local_account_password,
+    update_local_account_profile, update_local_account_role, update_user_role, verify_password,
 )
 # pipeline.* modules are deliberately NOT imported here at module level --
 # measured directly, importing them (they pull in scikit-learn, statsmodels,
@@ -83,7 +83,7 @@ from db import (
 import ui
 from ui import (
     card, chart, empty_state, inject_global_css, kpi, new_execution_log,
-    overall_progress, page_header, render_cached_run_banner, render_footer,
+    overall_progress, page_header, pill, render_cached_run_banner, render_footer,
     render_sidebar, render_startup_progress, stage_row, upload_slot,
 )
 
@@ -2234,8 +2234,8 @@ elif page == 'Users':
     page_header('Administration', 'Users',
                 'Create and manage every sign-in account -- Google and email+password alike. '
                 'Approve or deny new Google requests, change anyone\'s role, and revoke or '
-                'restore access. A signed-in user can change their own password from the '
-                'account menu in the page header.',
+                'restore access. A signed-in user manages their own password and two-factor '
+                'authentication from their Profile page (account menu in the page header).',
                 meta=page_meta)
 
     # Super-Admin-only -- grants/revokes/promotes account access for
@@ -2610,6 +2610,243 @@ elif page == 'Users':
                 if i != denied.index[-1]:
                     st.markdown(f'<div style="height:1px;background:{ui.LINE};margin:10px 0;"></div>',
                                 unsafe_allow_html=True)
+
+
+elif page == 'Profile':
+    # Reached only from the account menu (page_header(), ui.py) -- deliberately
+    # not in NAV_SECTIONS/the sidebar, since this is account-scoped, not a
+    # dashboard. Every signed-in user, any role, any sign-in method, lands
+    # here the same way; what they can actually DO on the page is what
+    # varies (see the auth_method/role checks below), not who can open it.
+    #
+    # Change password and Two-factor authentication used to be expanders in
+    # that same account-menu popover -- moved here because they'd outgrown
+    # a popover (the 2FA QR-code setup screen especially), and because the
+    # profile-details editing below (Super Admin only) never fit there at
+    # all. See ui.py's page_header() docstring/comments for that history.
+    _user = st.session_state.user or {}
+    _auth_method = st.session_state.get('auth_method')
+    _is_local = _auth_method == 'password'
+    _email = _user.get('email', '')
+    _account = get_local_account(_email) if _is_local else None
+
+    page_header('Account', 'Profile', 'Your account details, sign-in security, and password.')
+
+    with card(title='Account details'):
+        col_avatar, col_id = st.columns([1, 5], vertical_alignment='center')
+        with col_avatar:
+            st.markdown(
+                f'<div class="sf-avatar" style="width:56px;height:56px;font-size:19px;">'
+                f'{initials(_user.get("name", ""))}</div>',
+                unsafe_allow_html=True,
+            )
+        with col_id:
+            st.markdown(f"""
+            <div style="font-size:16px;font-weight:700;color:{ui.TEXT};">{_user.get('name', '')}</div>
+            <div style="font-size:12.5px;color:{ui.SLATE};">{_email}</div>
+            """, unsafe_allow_html=True)
+        st.markdown('<div style="height:1px;background:{0};margin:14px 0 10px;"></div>'.format(ui.LINE),
+                    unsafe_allow_html=True)
+        role_color = {'Super Admin': 'amber', 'Administrator': 'blue', 'Analyst': 'gray'}.get(_user.get('role'), 'gray')
+        method_pill = pill('Local sign-in', 'green') if _is_local else pill('Google sign-in', 'blue')
+        member_since = (
+            f" · Member since {_account['created_at']:%d %b %Y}"
+            if _account and _account.get('created_at') else ''
+        )
+        st.markdown(
+            f'{pill(_user.get("role", ""), role_color)} {method_pill}'
+            f'<span style="font-size:11.5px;color:{ui.MIST};margin-left:8px;">{member_since}</span>',
+            unsafe_allow_html=True,
+        )
+
+    # Profile-details editing (name/email) -- Super Admin, local sign-in
+    # only. Google's own name/email is Google's identity, not this app's
+    # to change (see auth.py's handle_google_redirect() -- it's re-read
+    # from the OAuth payload on every sign-in, there's nothing here that
+    # editing it would even persist against); Analyst/Administrator local
+    # accounts are admin-provisioned the same way passwords are, per the
+    # user's own explicit spec for this page -- only a Super Admin edits
+    # their own name/email, everyone else just sees it.
+    if _is_local and _user.get('role') == 'Super Admin':
+        with card(title='Profile details', sub='Only Super Admins can change their own name or email.'):
+            with st.form('profile_details_form', border=False):
+                new_name = st.text_input('Name', value=_user.get('name', ''))
+                new_email = st.text_input('Work email', value=_email)
+                current_pw_profile = st.text_input(
+                    'Current password, to confirm', type='password', key='profile_confirm_pw',
+                )
+                profile_submitted = st.form_submit_button(
+                    'Save changes', icon=':material/check:', width='stretch',
+                )
+            if profile_submitted:
+                clean_new_email = new_email.strip().lower()
+                if not _account or not verify_password(current_pw_profile, _account['password_hash']):
+                    st.error('Current password is incorrect.', icon=':material/error:')
+                elif not new_name.strip():
+                    st.error('Name cannot be empty.', icon=':material/error:')
+                elif not clean_new_email or '@' not in clean_new_email:
+                    st.error('Enter a valid email address.', icon=':material/error:')
+                elif new_name.strip() == _user.get('name') and clean_new_email == _email:
+                    st.info('Nothing to save -- name and email are unchanged.', icon=':material/info:')
+                elif update_local_account_profile(_email, new_name.strip(), clean_new_email):
+                    # Keeps the CURRENT session in sync immediately -- without
+                    # this, every other place that reads st.session_state.user
+                    # (sidebar, page_header, this page's own avatar above)
+                    # would keep showing the OLD name/email until the next
+                    # sign-in, and a changed email specifically would break
+                    # get_local_account(_email) on this exact page's next
+                    # rerun, since that row no longer exists under the old key.
+                    st.session_state.user = {
+                        **_user, 'name': new_name.strip(), 'email': clean_new_email,
+                    }
+                    st.success('Profile updated.', icon=':material/check_circle:')
+                    st.rerun()
+                else:
+                    st.error('Could not save those changes -- that email may already be in use.',
+                              icon=':material/error:')
+    elif _is_local:
+        with card(title='Profile details'):
+            st.caption('Only a Super Admin can change your name or email. Contact one if these need updating.')
+            st.markdown(f"""
+            <div style="display:flex;gap:28px;">
+                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
+                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
+                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
+                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        with card(title='Profile details'):
+            st.caption('Your name and email come from Google and are managed in your Google account, '
+                       'not here.')
+            st.markdown(f"""
+            <div style="display:flex;gap:28px;">
+                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
+                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
+                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
+                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # Password and two-factor auth are both local-sign-in-only -- a Google
+    # account has no password in this app at all, and its own 2FA (if any)
+    # is Google's, not ours (same reasoning as the docstring history above).
+    if _is_local:
+        with card(title='Change password'):
+            with st.form('change_password_form', border=False):
+                current_pw = st.text_input('Current password', type='password', key='cp_current')
+                new_pw = st.text_input('New password', type='password', key='cp_new')
+                confirm_pw = st.text_input('Confirm new password', type='password', key='cp_confirm')
+                change_submitted = st.form_submit_button(
+                    'Update password', icon=':material/check:', width='stretch',
+                )
+            if change_submitted:
+                # Re-verify the CURRENT password server-side rather than
+                # trusting the already-authenticated session alone -- this
+                # is the standard "confirm you're still you" step before a
+                # sensitive change, and it doubles as proof the account
+                # (and the DB) is actually reachable right now.
+                if not _account or not verify_password(current_pw, _account['password_hash']):
+                    st.error('Current password is incorrect.', icon=':material/error:')
+                elif len(new_pw) < 8:
+                    st.error('New password must be at least 8 characters.', icon=':material/error:')
+                elif new_pw != confirm_pw:
+                    st.error("New passwords don't match.", icon=':material/error:')
+                elif update_local_account_password(_email, new_pw):
+                    st.success('Password updated.', icon=':material/check_circle:')
+                else:
+                    st.error('Could not update your password right now. Try again shortly.',
+                              icon=':material/error:')
+
+        with card(title='Two-factor authentication'):
+            _totp_enabled = bool(_account and _account.get('totp_secret'))
+            if _totp_enabled:
+                st.success('Two-factor authentication is enabled.', icon=':material/check_circle:')
+                st.caption('Every sign-in will ask for a code from your authenticator app.')
+                # A second confirming step (current password, inside its own
+                # form) before actually turning it off -- same "prove you're
+                # still you" reasoning as Change password re-checking the
+                # current password above, for a change that lowers this
+                # account's security.
+                with st.form('totp_disable_form', border=False):
+                    totp_disable_pw = st.text_input(
+                        'Enter your password to disable', type='password', key='totp_disable_pw',
+                    )
+                    disable_submitted = st.form_submit_button(
+                        'Disable 2FA', icon=':material/remove_moderator:', width='stretch',
+                    )
+                if disable_submitted:
+                    if not verify_password(totp_disable_pw, _account['password_hash']):
+                        st.error('Incorrect password.', icon=':material/error:')
+                    elif clear_totp_secret(_email):
+                        st.success('Two-factor authentication disabled.', icon=':material/check_circle:')
+                        st.rerun()
+                    else:
+                        st.error('Could not disable two-factor authentication right now. '
+                                  'Try again shortly.', icon=':material/error:')
+            else:
+                st.caption('Add an extra step at sign-in using an authenticator app '
+                           '(Google Authenticator, Authy, 1Password, etc).')
+                # The secret lives in session_state ONLY from here until a
+                # real code confirms it below -- set_totp_secret() (db.py)
+                # is never called until that verification succeeds, so a
+                # user who starts setup and never finishes it leaves no
+                # half-configured 2FA behind in the database, just an
+                # abandoned value in this session that a rerun/new session
+                # never sees again.
+                if not st.session_state.get('totp_setup_secret'):
+                    if st.button('Set up 2FA', key='totp_setup_start',
+                                  icon=':material/qr_code_2:', width='stretch'):
+                        import pyotp
+                        st.session_state.totp_setup_secret = pyotp.random_base32()
+                        st.rerun()
+                else:
+                    import base64
+                    import io
+
+                    import pyotp
+                    import qrcode
+
+                    _secret = st.session_state.totp_setup_secret
+                    _uri = pyotp.TOTP(_secret).provisioning_uri(
+                        name=_email, issuer_name='Stroke Foundation Donor Forecasting',
+                    )
+                    _buf = io.BytesIO()
+                    qrcode.make(_uri).save(_buf, format='PNG')
+                    _qr_b64 = base64.b64encode(_buf.getvalue()).decode()
+                    st.markdown(
+                        f'<img src="data:image/png;base64,{_qr_b64}" width="176" '
+                        'style="display:block;margin:4px auto 10px;border-radius:4px;" />',
+                        unsafe_allow_html=True,
+                    )
+                    st.caption('Scan this with your authenticator app, or enter the key '
+                               f'manually: `{_secret}`')
+                    with st.form('totp_verify_form', border=False):
+                        setup_code = st.text_input(
+                            'Enter the 6-digit code to confirm', placeholder='123456',
+                            max_chars=6, key='totp_setup_code',
+                        )
+                        verify_submitted = st.form_submit_button(
+                            'Verify and enable', icon=':material/check:', width='stretch',
+                        )
+                    if st.button('Cancel', key='totp_setup_cancel'):
+                        st.session_state.totp_setup_secret = None
+                        st.rerun()
+                    if verify_submitted:
+                        if setup_code and pyotp.TOTP(_secret).verify(setup_code.strip(), valid_window=1):
+                            if set_totp_secret(_email, _secret):
+                                st.session_state.totp_setup_secret = None
+                                st.success('Two-factor authentication enabled.', icon=':material/check_circle:')
+                                st.rerun()
+                            else:
+                                st.error('Could not enable two-factor authentication right now. '
+                                          'Try again shortly.', icon=':material/error:')
+                        else:
+                            st.error('Incorrect code. Please try again.', icon=':material/error:')
+    else:
+        with card(title='Sign-in security'):
+            st.caption('Password and two-factor authentication are managed in your Google account, '
+                       'not here -- your access to this app is tied to your Google sign-in.')
 
 
 # ══════════════════════════════════════════════════════════════════════════════
