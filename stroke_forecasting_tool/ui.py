@@ -1273,7 +1273,24 @@ def page_header(eyebrow, title, sub='', meta='', info=None):
                 if st.button('My profile', key='topbar_profile_btn', icon=':material/account_circle:',
                               width='stretch'):
                     st.session_state.page = 'Profile'
-                    st.session_state.nav_loading = True
+                    # NOT nav_loading = True here, unlike render_sidebar()'s own
+                    # nav buttons -- confirmed live this left the blur+spinner
+                    # overlay CSS permanently "armed" on the Profile page. That
+                    # overlay is a one-shot: inject_global_css() bakes its
+                    # blur/spin rules into the stylesheet for exactly one full
+                    # rerun, then omits them and resets the flag on the next.
+                    # But the Profile page's 2FA card is an st.fragment -- its
+                    # own reruns (Set up 2FA, Cancel, etc.) never reach
+                    # inject_global_css() at all, so whatever stylesheet was
+                    # last baked in (with the overlay rules still in it, from
+                    # THIS click) stays active for the rest of the session.
+                    # Since [data-testid="stStatusWidget"] reappears on every
+                    # rerun -- fragment reruns included -- that stale rule kept
+                    # re-matching and blurring the whole page on every 2FA
+                    # interaction, not just this one navigation. Profile has no
+                    # heavy data load like the dashboard pages nav_loading is
+                    # meant to cover, so skipping the effect here entirely is
+                    # the correct fix, not just a workaround.
                     st.rerun()
 
                 if st.button('Log out', key='topbar_signout_btn', icon=':material/logout:',

@@ -225,9 +225,27 @@ def _render_transition_spinner(label: str):
     arrives. Two call sites: complete_sign_out() below (dashboard ->
     login) and render_login()'s successful-submit branch (login ->
     dashboard) -- factored out here specifically so both directions of
-    that same transition look and behave identically."""
+    that same transition look and behave identically.
+
+    position:fixed + inset:0 + an opaque background, not a plain
+    height:80vh block flowing in normal document order -- confirmed live
+    (via an artificial delay here, long enough to actually see this
+    frame rather than it flashing past): the old height:80vh version
+    only ADDED this spinner block after whatever else was already on the
+    page, it never covered it. render_login()'s call site never showed
+    that, because it first clears its own content via page.empty()
+    before calling this -- but complete_sign_out() has no such
+    placeholder to clear (the dashboard content it's transitioning away
+    from was rendered by the PREVIOUS run, not this one, so there's
+    nothing here to call .empty() on), so the old dashboard cards stayed
+    fully visible underneath/around this spinner for the whole gap
+    before the next rerun replaced them -- reported live as "broken CSS
+    a moment before the login loads". A fixed, full-viewport, opaque
+    overlay covers that regardless of what's still sitting in the
+    document behind it."""
     st.markdown(f"""
-    <div style="display:flex;align-items:center;justify-content:center;height:80vh;">
+    <div style="position:fixed;inset:0;z-index:999999;background:#FFFFFF;
+        display:flex;align-items:center;justify-content:center;">
         <div style="text-align:center;">
             <div style="width:34px;height:34px;border-radius:50%;margin:0 auto 16px;
                 border:3px solid #E2E8F0;border-top-color:#00897B;
@@ -261,6 +279,19 @@ def complete_sign_out():
     <style>
     [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"],
     [data-testid="stHeader"], [data-testid="stToolbar"] { display: none !important; }
+    /* The account-menu popover (ui.py's page_header()) renders its open
+    body into #stFloatingOverlayPortal, appended near document.body, not
+    as a normal descendant of the page -- confirmed live, its stacking
+    layer sits ABOVE _render_transition_spinner()'s full-viewport overlay
+    (a plain z-index on the overlay isn't enough to cover something in a
+    different, higher portal layer -- and #stFloatingOverlayPortal is NOT
+    the same element as [data-testid="portal"], a separate, unrelated
+    overlay root). If "Log out" is clicked while that menu is still open
+    (the normal way to reach it), its now-stale body stayed visible,
+    floating on top of the sign-out transition. Hidden outright since
+    nothing in this portal has any reason to be visible during a
+    full-screen auth transition. */
+    #stFloatingOverlayPortal { display: none !important; }
     </style>
     """)
     _render_transition_spinner('Signing out')
