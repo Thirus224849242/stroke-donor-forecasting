@@ -583,32 +583,55 @@ def _render_2fa_card(_email):
                 # rendered whether generation succeeded or not, so a failure
                 # here never leaves the user stuck without a way back.
                 _qr_error = False
+                # A placeholder sized to roughly the QR block's own final
+                # footprint (image + caption), not st.spinner()'s single
+                # text-and-icon line -- shown immediately so the card expands
+                # to its eventual size right away instead of jumping when the
+                # QR swaps in a moment later. Held for a short, deliberate
+                # beat (real generation is sub-second -- confirmed live, a
+                # spinner that only shows for a genuinely instant operation
+                # reads as not working at all, just an instant snap from
+                # button to QR) so it's actually perceptible as a loading
+                # state, matching the same reasoning as complete_sign_out()'s
+                # equivalent pause in auth.py.
+                _qr_ph = st.empty()
+                with _qr_ph.container():
+                    st.html(f"""
+                    <div style="min-height:230px;display:flex;align-items:center;
+                        justify-content:center;">
+                        <div style="text-align:center;">
+                            <div style="width:28px;height:28px;border-radius:50%;margin:0 auto 12px;
+                                border:3px solid {ui.LINE};border-top-color:{ui.TEAL};
+                                animation:sf-2fa-spin 0.8s linear infinite;"></div>
+                            <div style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px;
+                                font-weight:600;color:{ui.SLATE};letter-spacing:0.06em;
+                                text-transform:uppercase;">Generating QR code&hellip;</div>
+                        </div>
+                    </div>
+                    <style>@keyframes sf-2fa-spin {{ to {{ transform: rotate(360deg); }} }}</style>
+                    """)
                 try:
-                    # Contained within this card via st.spinner() -- Streamlit's
-                    # own component-level loading indicator, rendered exactly
-                    # where it's called rather than as a full-page overlay, so
-                    # the rest of the Profile page (nav, other cards) stays
-                    # visually stable while this runs. Wraps only the actual
-                    # generation, not the st.image()/caption below, so the
-                    # spinner is gone by the time the QR code appears.
-                    with st.spinner('Generating QR code...'):
-                        import io
+                    import io
+                    import time
 
-                        import pyotp
-                        import qrcode
+                    import pyotp
+                    import qrcode
 
-                        _secret = st.session_state.totp_setup_secret
-                        _uri = pyotp.TOTP(_secret).provisioning_uri(
-                            name=_email, issuer_name='Stroke Foundation Donor Forecasting',
-                        )
-                        _buf = io.BytesIO()
-                        qrcode.make(_uri).save(_buf, format='PNG')
-                        _buf.seek(0)
+                    _secret = st.session_state.totp_setup_secret
+                    _uri = pyotp.TOTP(_secret).provisioning_uri(
+                        name=_email, issuer_name='Stroke Foundation Donor Forecasting',
+                    )
+                    _buf = io.BytesIO()
+                    qrcode.make(_uri).save(_buf, format='PNG')
+                    _buf.seek(0)
+                    time.sleep(0.6)
+                    _qr_ph.empty()
                     st.image(_buf, width=176)
                     st.caption('Scan this with your authenticator app, or enter the key '
                                f'manually: `{_secret}`')
                 except Exception:
                     _qr_error = True
+                    _qr_ph.empty()
                     st.error('Could not generate a setup code right now. Try again shortly, '
                               'or contact an administrator.', icon=':material/error:')
 

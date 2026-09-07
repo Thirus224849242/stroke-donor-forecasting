@@ -295,6 +295,17 @@ def complete_sign_out():
     </style>
     """)
     _render_transition_spinner('Signing out')
+    # Clearing session_state below is just dict assignment -- no real wait
+    # to cover -- so without a deliberate pause here, this whole screen
+    # flashed past in well under a frame and landed straight on the login
+    # page: reported live as feeling raw/abrupt, and as "the signing-out
+    # loader isn't working" even though it WAS rendering, just never for
+    # long enough to actually see. A short fixed pause (not a readiness
+    # check -- there's nothing here to wait for) is the deliberate fix,
+    # matching the same reasoning as the 2FA QR placeholder's pause in
+    # app.py's _render_2fa_card().
+    import time
+    time.sleep(0.6)
 
     for k in SESSION_KEYS:
         st.session_state[k] = None
