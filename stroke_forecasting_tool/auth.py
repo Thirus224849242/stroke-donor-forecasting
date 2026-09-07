@@ -30,6 +30,7 @@ GOOGLE_EXTRA_ALLOWED_EMAILS = {'thirumalreddyenugu@gmail.com'}
 SESSION_KEYS = [
     'master', 'forecast_df', 'monthly', 'mape',
     'pipeline_run', 'page', 'authenticated', 'user', 'auth_method', 'pending_2fa', 'totp_setup_secret',
+    'totp_qr_cache',
     'is_signing_in', 'is_signing_out',
     'ml_importances', 'ml_trend_slope',
     'forecast_df_linear', 'mape_linear', 'mape_stockflow',
