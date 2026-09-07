@@ -432,24 +432,33 @@ def render_login():
                     st.session_state.pending_2fa = None
                     st.rerun()
                 if totp_submitted:
-                    # Local import -- pyotp is only ever needed here and in
-                    # ui.py's setup/disable flow, not on the hot path of
-                    # every other page load.
-                    import pyotp
-                    # valid_window=1 accepts the current 30s step plus one
-                    # step either side -- standard TOTP tolerance for clock
-                    # drift between the server and the user's phone, same
-                    # default most authenticator-backed logins use.
-                    if code and pyotp.TOTP(pending['secret']).verify(code.strip(), valid_window=1):
-                        st.session_state.authenticated = True
-                        st.session_state.auth_method = 'password'
-                        st.session_state.user = {
-                            'email': pending['email'], 'name': pending['name'], 'role': pending['role'],
-                        }
-                        st.session_state.pending_2fa = None
-                        just_signed_in = True
+                    try:
+                        # Local import -- pyotp is only ever needed here and in
+                        # app.py's Profile-page setup/disable flow, not on the
+                        # hot path of every other page load.
+                        import pyotp
+                        # valid_window=1 accepts the current 30s step plus one
+                        # step either side -- standard TOTP tolerance for clock
+                        # drift between the server and the user's phone, same
+                        # default most authenticator-backed logins use.
+                        code_ok = bool(code) and pyotp.TOTP(pending['secret']).verify(
+                            code.strip(), valid_window=1,
+                        )
+                    except Exception:
+                        code_ok = False
+                        st.error('Two-factor verification is unavailable right now. Try again '
+                                  'shortly, or contact an administrator.', icon=':material/error:')
                     else:
-                        st.error('Incorrect code. Please try again.', icon=':material/error:')
+                        if code_ok:
+                            st.session_state.authenticated = True
+                            st.session_state.auth_method = 'password'
+                            st.session_state.user = {
+                                'email': pending['email'], 'name': pending['name'], 'role': pending['role'],
+                            }
+                            st.session_state.pending_2fa = None
+                            just_signed_in = True
+                        else:
+                            st.error('Incorrect code. Please try again.', icon=':material/error:')
             else:
                 st.markdown("**Sign in to your account**")
                 st.caption('Enter your credentials to access the F2F forecasting dashboard.')

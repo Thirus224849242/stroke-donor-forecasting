@@ -2797,42 +2797,59 @@ elif page == 'Profile':
                 if not st.session_state.get('totp_setup_secret'):
                     if st.button('Set up 2FA', key='totp_setup_start',
                                   icon=':material/qr_code_2:', width='stretch'):
-                        import pyotp
-                        st.session_state.totp_setup_secret = pyotp.random_base32()
-                        st.rerun()
+                        try:
+                            import pyotp
+                            st.session_state.totp_setup_secret = pyotp.random_base32()
+                            st.rerun()
+                        except Exception:
+                            st.error('Two-factor setup is unavailable right now. Try again shortly, '
+                                      'or contact an administrator.', icon=':material/error:')
                 else:
-                    import base64
-                    import io
+                    # Everything from here on can fail (a missing/broken pyotp or
+                    # qrcode install, an unpicklable secret, etc) -- caught so a
+                    # setup-time error shows as a normal in-card message instead of
+                    # an uncaught traceback replacing the whole page. Cancel is
+                    # rendered whether generation succeeded or not, so a failure
+                    # here never leaves the user stuck without a way back.
+                    _qr_error = False
+                    try:
+                        import io
 
-                    import pyotp
-                    import qrcode
+                        import pyotp
+                        import qrcode
 
-                    _secret = st.session_state.totp_setup_secret
-                    _uri = pyotp.TOTP(_secret).provisioning_uri(
-                        name=_email, issuer_name='Stroke Foundation Donor Forecasting',
-                    )
-                    _buf = io.BytesIO()
-                    qrcode.make(_uri).save(_buf, format='PNG')
-                    _qr_b64 = base64.b64encode(_buf.getvalue()).decode()
-                    st.markdown(
-                        f'<img src="data:image/png;base64,{_qr_b64}" width="176" '
-                        'style="display:block;margin:4px auto 10px;border-radius:4px;" />',
-                        unsafe_allow_html=True,
-                    )
-                    st.caption('Scan this with your authenticator app, or enter the key '
-                               f'manually: `{_secret}`')
-                    with st.form('totp_verify_form', border=False):
-                        setup_code = st.text_input(
-                            'Enter the 6-digit code to confirm', placeholder='123456',
-                            max_chars=6, key='totp_setup_code',
+                        _secret = st.session_state.totp_setup_secret
+                        _uri = pyotp.TOTP(_secret).provisioning_uri(
+                            name=_email, issuer_name='Stroke Foundation Donor Forecasting',
                         )
-                        verify_submitted = st.form_submit_button(
-                            'Verify and enable', icon=':material/check:', width='stretch',
-                        )
+                        _buf = io.BytesIO()
+                        qrcode.make(_uri).save(_buf, format='PNG')
+                        _buf.seek(0)
+                        st.image(_buf, width=176)
+                        st.caption('Scan this with your authenticator app, or enter the key '
+                                   f'manually: `{_secret}`')
+                    except Exception:
+                        _qr_error = True
+                        st.error('Could not generate a setup code right now. Try again shortly, '
+                                  'or contact an administrator.', icon=':material/error:')
+
+                    if not _qr_error:
+                        with st.form('totp_verify_form', border=False):
+                            setup_code = st.text_input(
+                                'Enter the 6-digit code to confirm', placeholder='123456',
+                                max_chars=6, key='totp_setup_code',
+                            )
+                            verify_submitted = st.form_submit_button(
+                                'Verify and enable', icon=':material/check:', width='stretch',
+                            )
+                    else:
+                        verify_submitted = False
+
                     if st.button('Cancel', key='totp_setup_cancel'):
                         st.session_state.totp_setup_secret = None
                         st.rerun()
                     if verify_submitted:
+                        _secret = st.session_state.totp_setup_secret
                         if setup_code and pyotp.TOTP(_secret).verify(setup_code.strip(), valid_window=1):
                             if set_totp_secret(_email, _secret):
                                 st.session_state.totp_setup_secret = None
