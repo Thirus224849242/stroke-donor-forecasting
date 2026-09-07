@@ -87,7 +87,7 @@ import ui
 from ui import (
     CACHED_RUN_BANNER_PAGES, card, chart, empty_state, inject_global_css, kpi,
     new_execution_log, overall_progress, page_header, pill, render_cached_run_banner,
-    render_footer, render_overview_skeleton, render_sidebar, render_startup_progress,
+    render_footer, render_nav_transition_overlay, render_sidebar, render_startup_progress,
     stage_row, upload_slot,
 )
 
@@ -931,15 +931,35 @@ st.session_state.page_export_filename = (
     f"sf_{page.lower().replace(' ', '_')}_export.csv" if _export_csv else None
 )
 
-# Read BEFORE inject_global_css() -- it consumes and clears this same
-# one-shot nav_loading flag itself (for the nav-only loading overlay),
-# so by the time render_cached_run_banner() below would try to read it,
-# inject_global_css() has already reset it to False. Captured here and
-# handed down as a plain argument instead.
+# One-shot flag: True only for the single rerun immediately following a
+# sidebar nav click or the account menu's "My profile" (both set this
+# right before their own st.rerun() -- see render_sidebar() and
+# page_header() in ui.py), read and reset here so it can never leak
+# into a later, unrelated rerun (a widget tweak, a Data Pipeline
+# upload, the pipeline's own multi-stage run all rerun the script the
+# same way at the DOM level, but aren't a page navigation).
 _nav_just_happened = bool(st.session_state.get('nav_loading'))
+st.session_state.nav_loading = False
 
 inject_global_css()
 render_sidebar()
+
+# Opaque full-viewport cover, held open through this entire page's
+# render (cleared at the very end, alongside the sign-in overlay --
+# search _nav_overlay_ph below) -- see render_nav_transition_overlay()'s
+# docstring for why this replaced an earlier CSS-only blur/spinner:
+# reproduced live, that approach left the previous page's stale content
+# AND a just-opened account-menu popover (portal-rendered outside the
+# main content area entirely) visible alongside the new page's content
+# until the run finished, showing as a duplicated page header/subtitle
+# sandwiching the real one. Placed before the cached-run banner below
+# so the overlay also covers that during the transition -- the banner
+# still reveals itself right as the transition ends, same as before.
+_nav_overlay_ph = None
+if _nav_just_happened:
+    _nav_overlay_ph = st.empty()
+    with _nav_overlay_ph.container():
+        render_nav_transition_overlay(show_skeleton=(page == 'Overview'))
 
 # CACHED_RUN_BANNER_PAGES, not every page -- reported live, this used to
 # show (and could auto-reveal, via the nav_loading flag "My profile" now
@@ -1340,23 +1360,6 @@ elif page == 'Overview':
 
     if not st.session_state.pipeline_run:
         empty_state()
-
-    # Skeleton prototype, nav-triggered only (not on every rerun -- a
-    # widget tweak on this page would replay it otherwise) -- shown into
-    # its own placeholder, held for a short, deliberate, perceptible
-    # beat (real data is already sitting in session_state, so nothing is
-    # actually being waited on here; same reasoning as the 2FA QR
-    # placeholder's and complete_sign_out()'s equivalent pauses), then
-    # cleared so the real content below renders normally in this same
-    # run. inject_global_css()'s _skip_nav_overlay skips the generic
-    # blur/spinner for this one page so the two never stack.
-    if _nav_just_happened:
-        _skeleton_ph = st.empty()
-        with _skeleton_ph.container():
-            render_overview_skeleton()
-        import time
-        time.sleep(0.35)
-        _skeleton_ph.empty()
 
     forecast_df = st.session_state.forecast_df
     monthly     = st.session_state.monthly
@@ -3100,4 +3103,20 @@ render_footer()
 if _signing_in_overlay_ph is not None:
     _signing_in_overlay_ph.empty()
     st.session_state.is_signing_in = False
+
+# Matches the placeholder opened right after render_sidebar() (search
+# _nav_overlay_ph) -- same reasoning as the sign-in overlay just above:
+# clearing only here, after the destination page's entire render
+# (content and footer both) has been queued, is what guarantees the
+# browser never shows a half-built page, and never the previous page's
+# stale content either (the actual bug this overlay replaced a plain
+# CSS blur to fix -- see render_nav_transition_overlay()'s docstring).
+# The brief sleep first is a deliberate, perceptible hold, not a
+# readiness check -- the page above has already fully finished
+# rendering by this point; same reasoning as the 2FA QR placeholder's
+# and complete_sign_out()'s equivalent pauses.
+if _nav_overlay_ph is not None:
+    import time
+    time.sleep(0.35)
+    _nav_overlay_ph.empty()
 
