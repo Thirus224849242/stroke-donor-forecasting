@@ -2807,16 +2807,36 @@ elif page == 'Profile':
                 # abandoned value in this session that a rerun/new session
                 # never sees again.
                 if not st.session_state.get('totp_setup_secret'):
-                    if st.button('Set up 2FA', key='totp_setup_start',
-                                  icon=':material/qr_code_2:', width='stretch'):
+                    # A placeholder, not a bare st.button() call, specifically so
+                    # a successful click can clear the button back out again
+                    # below -- st.button() always renders its widget regardless
+                    # of the True/False it returns, so without this the button
+                    # would stay sitting on screen, now doing nothing, right
+                    # alongside the QR code that falls through and renders
+                    # underneath it in this same pass (confirmed live: exactly
+                    # that happened before this placeholder was added).
+                    _setup_btn_ph = st.empty()
+                    if _setup_btn_ph.button('Set up 2FA', key='totp_setup_start',
+                                              icon=':material/qr_code_2:', width='stretch'):
                         try:
                             import pyotp
                             st.session_state.totp_setup_secret = pyotp.random_base32()
-                            st.rerun()
+                            _setup_btn_ph.empty()
+                            # No st.rerun() -- falls straight through to the
+                            # generation block below in this SAME script pass,
+                            # rather than ending this run early just to trigger a
+                            # second one that immediately re-enters this branch
+                            # anyway. Confirmed live: the perceptible "freeze"
+                            # this section was reported to have was mostly that
+                            # extra full-page rerun round trip, not the (genuinely
+                            # sub-second) QR generation itself -- cutting it out
+                            # is what actually makes st.spinner() below meaningful
+                            # to see rather than flashing across two page loads.
                         except Exception:
                             st.error('Two-factor setup is unavailable right now. Try again shortly, '
                                       'or contact an administrator.', icon=':material/error:')
-                else:
+
+                if st.session_state.get('totp_setup_secret'):
                     # Everything from here on can fail (a missing/broken pyotp or
                     # qrcode install, an unpicklable secret, etc) -- caught so a
                     # setup-time error shows as a normal in-card message instead of

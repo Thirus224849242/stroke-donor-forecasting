@@ -504,8 +504,15 @@ def inject_global_css():
     the right edge of its parent to match -- justify-content on the
     wrapper's own box (tried first) did nothing, since a box with no
     slack of its own has nothing for justify-content to redistribute. */
-    .st-key-topbar_user_menu {{ margin-left: auto; }}
-    .st-key-topbar_user_menu button {{
+    /* [class*="st-key-topbar_user_menu_"] (CONTAINS, not an exact class
+    match) -- the popover's own key is now suffixed per-page (see its
+    st.popover() call site below) so its open/closed state doesn't
+    survive a page navigation; the exact class name it renders under
+    therefore varies by page too, and a plain .st-key-topbar_user_menu
+    selector would only ever match the literal (now-unused) unsuffixed
+    name. */
+    [class*="st-key-topbar_user_menu_"] {{ margin-left: auto; }}
+    [class*="st-key-topbar_user_menu_"] button {{
         display: flex !important; align-items: center !important; gap: 8px !important;
         background: transparent !important; border: none !important;
         padding: 4px 10px 4px 4px !important; border-radius: 20px !important;
@@ -597,14 +604,14 @@ def inject_global_css():
     # half at a safe rule boundary rather than chase the precise cutoff.
     st.html(f"""
     <style>
-    .st-key-topbar_user_menu button:hover {{ background: {SURFACE2} !important; }}
-    .st-key-topbar_user_menu button::before {{
+    [class*="st-key-topbar_user_menu_"] button:hover {{ background: {SURFACE2} !important; }}
+    [class*="st-key-topbar_user_menu_"] button::before {{
         display: flex !important; align-items: center !important; justify-content: center !important;
         width: 30px !important; height: 30px !important; min-width: 30px !important;
         border-radius: 50% !important; background: {NAVY} !important; color: white !important;
         font-size: 11px !important; font-weight: 700 !important; flex-shrink: 0 !important;
     }}
-    .st-key-topbar_user_menu button p {{
+    [class*="st-key-topbar_user_menu_"] button p {{
         font-size: 12px !important; font-weight: 600 !important; color: {TEXT} !important; margin: 0 !important;
     }}
     /* Sits directly under the avatar+name button in the same narrow
@@ -1197,9 +1204,26 @@ def page_header(eyebrow, title, sub='', meta='', info=None):
             # leaving a tag open across calls). A real st.popover() inside a
             # real st.columns() cell is what actually works.
             st.html(f"""<style>
-            .st-key-topbar_user_menu button::before {{ content: "{initials(user['name'])}"; }}
+            [class*="st-key-topbar_user_menu_"] button::before {{ content: "{initials(user['name'])}"; }}
             </style>""")
-            with st.popover(user['name'], key='topbar_user_menu'):
+            # Keyed per page (not a fixed 'topbar_user_menu') -- a popover's
+            # open/closed state is tracked by Streamlit's frontend against
+            # its widget id, which includes this key, and PERSISTS across a
+            # rerun as long as the same key is reproduced. Clicking "My
+            # profile" below navigates to a different page by setting
+            # st.session_state.page + st.rerun() -- but that new page calls
+            # this same function again with the SAME fixed key, so the
+            # popover would still count as "the same widget" and stay open,
+            # floating over the new page's content underneath it (confirmed
+            # live: reproducible on every navigation via this menu, not
+            # just "My profile" -- Log out is a separate full-screen
+            # transition so it isn't affected the same way). Suffixing the
+            # key with the current page's title means navigating to a
+            # different page is a genuinely different widget as far as the
+            # frontend is concerned, closed by default; staying on the SAME
+            # page (e.g. toggling dark mode, which also reruns) keeps the
+            # same key and correctly preserves the open state.
+            with st.popover(user['name'], key=f'topbar_user_menu_{_slug(title)}'):
                 # Name + status stacked (not "Signed in as X · Role" on one
                 # line), a dark-mode toggle, then Log out -- all plain
                 # top-to-bottom Streamlit elements, no st.columns anywhere in
