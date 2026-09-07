@@ -1,0 +1,20 @@
+# Mirrors stroke_forecasting_tool/requirements.txt -- kept here too because
+# Hugging Face Spaces' Streamlit SDK only ever installs from a
+# requirements.txt at the repo root, not from a subdirectory. Update both
+# files together.
+streamlit==1.61.1
+pandas==2.3.3
+numpy==2.5.1
+plotly==6.9.0
+scipy==1.18.0
+lifelines==0.30.3
+lifetimes==0.11.3
+scikit-learn==1.9.0
+statsmodels==0.15.0
+openpyxl==3.1.5
+Authlib==1.7.2
+httpx==0.28.1
+SQLAlchemy==2.0.52
+psycopg2-binary==2.9.12
+pyotp==2.10.0
+qrcode==8.2
