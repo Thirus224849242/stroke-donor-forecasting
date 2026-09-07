@@ -625,15 +625,27 @@ def _render_2fa_card(_email):
                     qrcode.make(_uri).save(_buf, format='PNG')
                     _buf.seek(0)
                     time.sleep(0.6)
-                    _qr_ph.empty()
-                    st.image(_buf, width=176)
-                    st.caption('Scan this with your authenticator app, or enter the key '
-                               f'manually: `{_secret}`')
+                    # _qr_ph.container() again, not _qr_ph.empty() followed by
+                    # bare st.image()/st.error() calls -- .empty() clears the
+                    # placeholder back to zero height FIRST, and the
+                    # replacement content only lands (and only actually
+                    # finishes painting once the image itself decodes) a
+                    # beat later, as a SEPARATE element after it -- reported
+                    # live as the loading box visibly collapsing shut and
+                    # then reopening for the QR, rather than one smoothly
+                    # stays-expanded swap. Drawing straight into the same
+                    # placeholder replaces its content in one step, so the
+                    # box never passes through an empty/collapsed state at
+                    # all -- confirmed live.
+                    with _qr_ph.container():
+                        st.image(_buf, width=176)
+                        st.caption('Scan this with your authenticator app, or enter the key '
+                                   f'manually: `{_secret}`')
                 except Exception:
                     _qr_error = True
-                    _qr_ph.empty()
-                    st.error('Could not generate a setup code right now. Try again shortly, '
-                              'or contact an administrator.', icon=':material/error:')
+                    with _qr_ph.container():
+                        st.error('Could not generate a setup code right now. Try again shortly, '
+                                  'or contact an administrator.', icon=':material/error:')
 
                 if not _qr_error:
                     with st.form('totp_verify_form', border=False):

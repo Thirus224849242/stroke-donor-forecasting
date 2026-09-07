@@ -199,19 +199,41 @@ def initials(name: str) -> str:
 
 
 def sign_out():
-    """Two-step sign-out, not one -- this function ONLY sets a flag and
-    reruns; the actual state-clearing happens in complete_sign_out()
-    below, called at the very top of app.py on the NEXT run, before any
-    dashboard content renders. Clearing everything HERE (the original
-    version) meant the still-rendering dashboard -- everything below
-    wherever this was called from, e.g. the account popover in the page
-    header -- got its data pulled out from under it mid-script, then
-    Streamlit streamed that half-torn-down state to the browser for a
-    moment before the new run (driven by this same st.rerun()) replaced
-    it with the login page: reported live as data visibly "dropping out"
-    right before logging out. Splitting it into two runs means the
-    browser only ever sees a clean loading screen in between the full
-    dashboard and the login page, never that broken intermediate frame."""
+    """Two-step sign-out, not one -- this function sets a flag and reruns;
+    the actual state-clearing happens in complete_sign_out() below, called
+    at the very top of app.py on the NEXT run, before any dashboard
+    content renders. Clearing everything HERE (an earlier version) meant
+    the still-rendering dashboard -- everything below wherever this was
+    called from, e.g. the account popover in the page header -- got its
+    data pulled out from under it mid-script, then Streamlit streamed
+    that half-torn-down state to the browser for a moment before the new
+    run (driven by this same st.rerun()) replaced it with the login page:
+    reported live as data visibly "dropping out" right before logging out.
+    Splitting it into two runs means the browser only ever sees a clean
+    loading screen in between the full dashboard and the login page,
+    never that broken intermediate frame.
+
+    The overlay itself is now rendered HERE too, immediately, not only in
+    complete_sign_out() on the next run -- reported live as a white
+    "freeze"/fade flash appearing BEFORE the "Signing out" screen, not
+    just going straight to it. Root cause: the instant st.rerun() below
+    fires, Streamlit's own frontend starts fading every element of THIS
+    (still-visible) dashboard toward transparent, since none of them will
+    be reproduced by the upcoming run -- that fade is what read as
+    "freezing"/turning white, and it was happening in the gap before
+    complete_sign_out() got a chance to paint anything on the new run.
+    Painting the exact same overlay here, in this still-live run, closes
+    that gap entirely: the browser has something solid covering the
+    dashboard from the very first frame of the transition, not just from
+    whenever the next run's script happens to reach it."""
+    st.html("""
+    <style>
+    [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"],
+    [data-testid="stHeader"], [data-testid="stToolbar"] { display: none !important; }
+    #stFloatingOverlayPortal { display: none !important; }
+    </style>
+    """)
+    _render_transition_spinner('Signing out')
     st.session_state['_signing_out'] = True
     st.rerun()
 
