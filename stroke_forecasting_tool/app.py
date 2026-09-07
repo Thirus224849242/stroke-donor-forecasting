@@ -557,6 +557,18 @@ if not st.session_state.pipeline_run and db_configured():
             st.session_state.data_loaded_at  = _cached_at
     render_startup_progress(_startup_bar, done=True)
 
+# The "Signing in" state (set in auth.py's render_login(), survives the
+# st.rerun() into this run) ends here, unconditionally, whether or not the
+# block above actually ran -- this is the one place in the whole login
+# flow that's reached only once the authenticated app is about to render,
+# which is exactly the handoff point auth.py's render_login() comment
+# describes. When the block above did run, it was the visible "page
+# loader" continuing that same wait; when it didn't (no DB, or a run
+# already loaded this session), there was nothing to wait for, so nothing
+# needed to have shown in between -- either way, this is genuinely the
+# first moment the authenticated page has taken over.
+st.session_state.is_signing_in = False
+
 page = st.session_state.page
 # page_header() (called once per page, inside each page's own routing
 # block below) reads these two straight from session_state to render the
@@ -2813,18 +2825,26 @@ elif page == 'Profile':
                     # here never leaves the user stuck without a way back.
                     _qr_error = False
                     try:
-                        import io
+                        # Contained within this card via st.spinner() -- Streamlit's
+                        # own component-level loading indicator, rendered exactly
+                        # where it's called rather than as a full-page overlay, so
+                        # the rest of the Profile page (nav, other cards) stays
+                        # visually stable while this runs. Wraps only the actual
+                        # generation, not the st.image()/caption below, so the
+                        # spinner is gone by the time the QR code appears.
+                        with st.spinner('Generating QR code...'):
+                            import io
 
-                        import pyotp
-                        import qrcode
+                            import pyotp
+                            import qrcode
 
-                        _secret = st.session_state.totp_setup_secret
-                        _uri = pyotp.TOTP(_secret).provisioning_uri(
-                            name=_email, issuer_name='Stroke Foundation Donor Forecasting',
-                        )
-                        _buf = io.BytesIO()
-                        qrcode.make(_uri).save(_buf, format='PNG')
-                        _buf.seek(0)
+                            _secret = st.session_state.totp_setup_secret
+                            _uri = pyotp.TOTP(_secret).provisioning_uri(
+                                name=_email, issuer_name='Stroke Foundation Donor Forecasting',
+                            )
+                            _buf = io.BytesIO()
+                            qrcode.make(_uri).save(_buf, format='PNG')
+                            _buf.seek(0)
                         st.image(_buf, width=176)
                         st.caption('Scan this with your authenticator app, or enter the key '
                                    f'manually: `{_secret}`')

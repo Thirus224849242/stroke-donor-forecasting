@@ -30,6 +30,7 @@ GOOGLE_EXTRA_ALLOWED_EMAILS = {'thirumalreddyenugu@gmail.com'}
 SESSION_KEYS = [
     'master', 'forecast_df', 'monthly', 'mape',
     'pipeline_run', 'page', 'authenticated', 'user', 'auth_method', 'pending_2fa', 'totp_setup_secret',
+    'is_signing_in', 'is_signing_out',
     'ml_importances', 'ml_trend_slope',
     'forecast_df_linear', 'mape_linear', 'mape_stockflow',
     'ltv_results', 'ltv_tuning', 'ltv_metrics', 'ltv_error', 'ltv_monthly', 'ltv_histogram',
@@ -270,6 +271,15 @@ def complete_sign_out():
     st.session_state.page = 'Overview'
     st.session_state.pipeline_running = False
     st.session_state['_signing_out'] = False
+    # Set AFTER the wipe above (which would otherwise reset it right back
+    # to None, since it's in SESSION_KEYS too) -- this is the user-facing
+    # "still transitioning" flag, distinct from the internal one-shot
+    # `_signing_out` trigger just cleared on the line above. It stays True
+    # across the st.rerun()/st.logout() below and into the very next run,
+    # where render_login() -- the only other place that reads it -- clears
+    # it once the login form itself is actually the thing being rendered,
+    # not merely once this function is done clearing state.
+    st.session_state.is_signing_out = True
     if method == 'google':
         st.logout()  # clears Streamlit's identity cookie and reruns itself
     else:
@@ -290,6 +300,11 @@ def _render_auth_shell():
     [data-testid="stHeader"] { background: transparent !important; }
     footer, [data-testid="stDecoration"], [data-testid="stAppDeployButton"],
     [data-testid="stMainMenu"] { display: none !important; }
+    /* Same native top-right "Running..."/Stop indicator hidden in
+    ui.py's inject_global_css() -- that function only runs post-login, so
+    this screen (submit, wrong password, the 2FA code form, etc.) needs
+    its own copy to stay unwanted-icon-free before authentication too. */
+    [data-testid="stStatusWidget"] { display: none !important; }
     @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600&family=Inter:wght@400;500;600&display=swap');
     .stApp {
         background:
@@ -456,10 +471,17 @@ def render_login():
                                 'email': pending['email'], 'name': pending['name'], 'role': pending['role'],
                             }
                             st.session_state.pending_2fa = None
+                            st.session_state.is_signing_in = True
                             just_signed_in = True
                         else:
                             st.error('Incorrect code. Please try again.', icon=':material/error:')
             else:
+                # The login form is the destination complete_sign_out() is
+                # transitioning to -- reaching this branch at all means
+                # it's about to actually render, so this is where the
+                # "Signing out" state ends (see complete_sign_out()'s
+                # is_signing_out comment in this same file).
+                st.session_state.is_signing_out = False
                 st.markdown("**Sign in to your account**")
                 st.caption('Enter your credentials to access the F2F forecasting dashboard.')
 
@@ -483,12 +505,21 @@ def render_login():
                     )
 
                 if submitted:
+                    # Set immediately, before the DB call below -- this is
+                    # what makes the "Signing in" state deterministic
+                    # rather than tied to how fast that call happens to
+                    # return. Cleared on every failure/hand-off path below;
+                    # left True on an actual success, through to app.py's
+                    # post-login section, which is the only other place
+                    # that clears it (see its own comment there for why).
+                    st.session_state.is_signing_in = True
                     clean_email = email.strip().lower()
                     if not db_configured():
                         # Distinct from a wrong password -- this means local login
                         # can't work at all right now (local_accounts lives in the
                         # same Supabase database as everything else in db.py), not
                         # that this particular attempt failed.
+                        st.session_state.is_signing_in = False
                         st.error('Local sign-in is unavailable right now (no database configured). '
                                   'Try Google sign-in instead, or contact an administrator.',
                                   icon=':material/error:')
@@ -512,7 +543,7 @@ def render_login():
                         # have already finished loading) avoids that.
                         from ui import render_startup_progress
                         _login_bar = st.empty()
-                        render_startup_progress(_login_bar)
+                        render_startup_progress(_login_bar, label='Signing in')
                         account = get_local_account(clean_email)
                         if account and verify_password(password, account['password_hash']):
                             # Same domain restriction Google sign-in enforces
@@ -525,6 +556,7 @@ def render_login():
                             domain = clean_email.rsplit('@', 1)[-1] if '@' in clean_email else ''
                             if domain not in ALLOWED_GOOGLE_DOMAINS and clean_email not in GOOGLE_EXTRA_ALLOWED_EMAILS:
                                 _login_bar.empty()
+                                st.session_state.is_signing_in = False
                                 st.error('This account is not on an authorised domain. Contact an administrator.',
                                           icon=':material/block:')
                             elif account.get('totp_secret'):
@@ -532,8 +564,12 @@ def render_login():
                                 # not authenticated yet. Cleared rather than left
                                 # showing: the wait from here is on the USER typing
                                 # a code, not on a network/DB call, so "connecting"
-                                # language would be actively misleading.
+                                # language would be actively misleading. Same reasoning
+                                # for is_signing_in -- entering a code is a distinct
+                                # interactive step, not a continuation of "signing in";
+                                # it's set True again above once that code verifies.
                                 _login_bar.empty()
+                                st.session_state.is_signing_in = False
                                 st.session_state.pending_2fa = {
                                     'email': clean_email, 'name': account['name'],
                                     'role': account['role'], 'secret': account['totp_secret'],
@@ -551,9 +587,12 @@ def render_login():
                                 # _login_bar deliberately left showing -- just_signed_in
                                 # below clears the whole page (this bar included) and
                                 # replaces it with the transition spinner before the
-                                # rerun, so there's no gap here either.
+                                # rerun, so there's no gap here either. is_signing_in
+                                # stays True (set at submit time above) straight through
+                                # that handoff into app.py.
                         else:
                             _login_bar.empty()
+                            st.session_state.is_signing_in = False
                             # Deliberately the SAME message whether the email has no
                             # local account at all or the password was just wrong --
                             # distinguishing them would let this form be used to

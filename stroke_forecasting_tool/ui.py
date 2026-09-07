@@ -163,6 +163,18 @@ def inject_global_css():
     <style>
     footer, [data-testid="stDecoration"], [data-testid="stAppDeployButton"],
     [data-testid="stMainMenu"] {{ display: none !important; }}
+    /* Streamlit's own top-right "Running..."/Stop indicator -- fires on
+    EVERY rerun (any button, any widget tweak), not just the deliberate
+    moments this app already has purpose-built loaders for (the nav
+    overlay below, render_startup_progress(), _render_transition_spinner()
+    in auth.py, and st.spinner() calls at individual call sites). Reported
+    as an unwanted stray icon; hidden outright rather than replaced, since
+    those purpose-built loaders already cover every case worth signalling.
+    display:none only hides its paint -- the element itself still exists
+    in the DOM for the exact same instant it always did, so the nav
+    overlay's :has([data-testid="stStatusWidget"]) detection below is
+    unaffected. */
+    [data-testid="stStatusWidget"] {{ display: none !important; }}
     /* pointer-events:none so this invisible native bar can never again
     swallow real clicks meant for whatever sits under/behind it (this is
     exactly what broke the topbar's popover before) -- every button it
@@ -1495,7 +1507,7 @@ def overall_progress(placeholder, done: int, total: int):
     """, unsafe_allow_html=True)
 
 
-def render_startup_progress(placeholder, done: bool = False):
+def render_startup_progress(placeholder, done: bool = False, label: str | None = None):
     """A single thin bar, STICKY to the top of the viewport, using the
     exact dimensions and animation of stage_row()'s own indeterminate
     "running" bar (search .sf-stage-bar-fill.running above): 4px track,
@@ -1526,11 +1538,23 @@ def render_startup_progress(placeholder, done: bool = False):
     its one genuinely slow operation.
 
     done: clears the bar entirely (call once, when the whole flow --
-    success, empty, or failed -- is finished)."""
+    success, empty, or failed -- is finished).
+
+    label: optional small caption pinned above the bar's left edge (e.g.
+    "Signing in") -- auth.py's credential-verification step passes this so
+    that stretch of the login flow reads as one consistent, named loading
+    state instead of an unlabelled bar, without changing this function's
+    unlabelled behaviour for its other call site (app.py's post-login
+    dashboard-data restore, which stays exactly as it was)."""
     if done:
         placeholder.empty()
         return
-    placeholder.markdown(f"""<div style="position:fixed;top:0;left:0;right:0;height:4px;z-index:999999;
+    _label_html = (
+        f'<div style="position:fixed;top:10px;left:16px;z-index:999999;'
+        'font-family:\'Space Grotesk\',system-ui,sans-serif;font-size:11px;font-weight:600;'
+        f'color:{TEXT};letter-spacing:0.06em;text-transform:uppercase;">{label}&hellip;</div>'
+    ) if label else ''
+    placeholder.markdown(f"""{_label_html}<div style="position:fixed;top:0;left:0;right:0;height:4px;z-index:999999;
 background:rgba(0,0,0,0.08);overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.15);">
 <div style="height:100%;width:40%;left:-40%;position:absolute;top:0;
 background:{GREEN};animation:sf-startup-bar-slide 1.1s ease-in-out infinite;"></div>
