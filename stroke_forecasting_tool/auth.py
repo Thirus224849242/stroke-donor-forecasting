@@ -271,9 +271,20 @@ def render_transition_spinner(label: str):
     before the next rerun replaced them -- reported live as "broken CSS
     a moment before the login loads". A fixed, full-viewport, opaque
     overlay covers that regardless of what's still sitting in the
-    document behind it."""
+    document behind it.
+
+    z-index 999999999, not 999999 -- ui.py's .sf-cached-run-banner (the
+    "Showing the run from..." peekaboo strip) uses z-index: 999999 too,
+    and reported live: revealed while this overlay is up (a stray mouse
+    touch near the very top edge of the window is all its own JS needs
+    to trigger that, unrelated to anything auth-related), it painted ON
+    TOP of this overlay -- equal z-index falls back to DOM/paint order,
+    and that banner's element is inserted later in the very same run
+    that opened this overlay (app.py calls it after this placeholder is
+    created). A comfortably higher z-index here wins regardless of
+    ordering, without needing to touch the banner's own value."""
     st.markdown(f"""
-    <div style="position:fixed;inset:0;z-index:999999;background:#FFFFFF;
+    <div style="position:fixed;inset:0;z-index:999999999;background:#FFFFFF;
         display:flex;align-items:center;justify-content:center;">
         <div style="text-align:center;">
             <div style="width:34px;height:34px;border-radius:50%;margin:0 auto 16px;

@@ -121,6 +121,19 @@ ADMIN_ONLY_NAV_ITEMS = {'Data Pipeline', 'Users'}
 # power. See render_sidebar()'s is_super_admin filter below.
 SUPER_ADMIN_ONLY_NAV_ITEMS = {'Users'}
 
+# The exact page set render_cached_run_banner() ("Showing the run
+# from...") is relevant for -- the Dashboards section above, i.e. pages
+# that actually display pipeline output. Reported live: app.py used to
+# call that banner unconditionally whenever data_source == 'cached',
+# regardless of which page was open, so it also showed (and could
+# auto-reveal, via the same nav_loading flag "My profile" now sets too)
+# on Data Pipeline, Run History, Users, and Profile -- none of which
+# have anything to do with "which pipeline run's data you're viewing",
+# and Profile's own page_header() layout isn't built to accommodate a
+# fixed top strip the way the dashboard pages' is, which is what read
+# as the banner "not filling" properly there.
+CACHED_RUN_BANNER_PAGES = {name for name, _ in dict(NAV_SECTIONS)['Dashboards']}
+
 
 def _slug(text: str) -> str:
     return re.sub(r'[^a-z0-9]+', '_', text.lower()).strip('_')

@@ -85,9 +85,9 @@ from db import (
 # current module attribute at the moment it's actually used.
 import ui
 from ui import (
-    card, chart, empty_state, inject_global_css, kpi, new_execution_log,
-    overall_progress, page_header, pill, render_cached_run_banner, render_footer,
-    render_sidebar, render_startup_progress, stage_row, upload_slot,
+    CACHED_RUN_BANNER_PAGES, card, chart, empty_state, inject_global_css, kpi,
+    new_execution_log, overall_progress, page_header, pill, render_cached_run_banner,
+    render_footer, render_sidebar, render_startup_progress, stage_row, upload_slot,
 )
 
 
@@ -817,7 +817,14 @@ _nav_just_happened = bool(st.session_state.get('nav_loading'))
 inject_global_css()
 render_sidebar()
 
-if st.session_state.data_source == 'cached':
+# CACHED_RUN_BANNER_PAGES, not every page -- reported live, this used to
+# show (and could auto-reveal, via the nav_loading flag "My profile" now
+# also sets) on Data Pipeline, Run History, Users, and Profile too, none
+# of which have anything to do with "which pipeline run's data you're
+# viewing" -- and on Profile specifically, whose page_header() layout
+# isn't built to accommodate a fixed top strip the way the dashboard
+# pages' is, that read as the banner "not filling" properly.
+if st.session_state.data_source == 'cached' and page in CACHED_RUN_BANNER_PAGES:
     loaded_str = (pd.to_datetime(st.session_state.data_loaded_at).strftime('%d %b %Y, %H:%M')
                   if st.session_state.data_loaded_at else 'a previous run')
     render_cached_run_banner(loaded_str, nav_triggered=_nav_just_happened)
