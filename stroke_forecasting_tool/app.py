@@ -699,6 +699,129 @@ def _render_2fa_card(_email):
                         st.error('Incorrect code. Please try again.', icon=':material/error:')
 
 
+@st.fragment
+def _render_profile_details_card(_email):
+    """The Profile page's "Profile details" card, Super Admin editing case
+    only -- as its own fragment for the same reason as _render_2fa_card
+    above: toggling Edit/Cancel is a widget interaction, and without
+    fragment isolation that fades the whole page the same way clicking
+    Set up 2FA used to. Collapsed (read-only name/email) by default,
+    matching how the read-only Analyst/Administrator/Google branches
+    below already look -- Edit swaps in the same form this used to show
+    unconditionally.
+
+    _email is threaded in the same way _render_2fa_card's is; _user and
+    the account row are both re-read from session_state/the DB fresh on
+    every fragment run rather than captured as snapshot arguments, so a
+    Cancel-triggered fragment-scoped rerun always reflects the real
+    current values.
+    """
+    _user = st.session_state.user or {}
+    _account = get_local_account(_email)
+    _editing = st.session_state.get('profile_details_editing', False)
+    with card(title='Profile details', sub='Only Super Admins can change their own name or email.'):
+        if not _editing:
+            st.markdown(f"""
+            <div style="display:flex;gap:28px;">
+                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
+                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
+                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
+                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button('Edit', key='profile_details_edit', icon=':material/edit:', width='stretch'):
+                st.session_state.profile_details_editing = True
+                st.rerun(scope='fragment')
+        else:
+            with st.form('profile_details_form', border=False):
+                new_name = st.text_input('Name', value=_user.get('name', ''))
+                new_email = st.text_input('Work email', value=_email)
+                current_pw_profile = st.text_input(
+                    'Current password, to confirm', type='password', key='profile_confirm_pw',
+                )
+                profile_submitted = st.form_submit_button(
+                    'Save changes', icon=':material/check:', width='stretch',
+                )
+            if st.button('Cancel', key='profile_details_cancel'):
+                st.session_state.profile_details_editing = False
+                st.rerun(scope='fragment')
+            if profile_submitted:
+                clean_new_email = new_email.strip().lower()
+                if not _account or not verify_password(current_pw_profile, _account['password_hash']):
+                    st.error('Current password is incorrect.', icon=':material/error:')
+                elif not new_name.strip():
+                    st.error('Name cannot be empty.', icon=':material/error:')
+                elif not clean_new_email or '@' not in clean_new_email:
+                    st.error('Enter a valid email address.', icon=':material/error:')
+                elif new_name.strip() == _user.get('name') and clean_new_email == _email:
+                    st.info('Nothing to save -- name and email are unchanged.', icon=':material/info:')
+                elif update_local_account_profile(_email, new_name.strip(), clean_new_email):
+                    # A full st.rerun(), not scope='fragment' -- unlike Cancel/
+                    # Edit above, this changes st.session_state.user, which the
+                    # sidebar, page_header's account-menu button, and this same
+                    # page's own "Account details" card above all read too, and
+                    # those live OUTSIDE this fragment. A fragment-scoped rerun
+                    # would leave all of them showing the old name/email until
+                    # some later full rerun happened to come along.
+                    st.session_state.user = {
+                        **_user, 'name': new_name.strip(), 'email': clean_new_email,
+                    }
+                    st.session_state.profile_details_editing = False
+                    st.success('Profile updated.', icon=':material/check_circle:')
+                    st.rerun()
+                else:
+                    st.error('Could not save those changes -- that email may already be in use.',
+                              icon=':material/error:')
+
+
+@st.fragment
+def _render_change_password_card(_email):
+    """The Profile page's "Change password" card, as its own fragment --
+    same reasoning as _render_2fa_card and _render_profile_details_card
+    above. Collapsed by default behind a single "Change password"
+    button rather than always showing three open password fields.
+    """
+    _account = get_local_account(_email)
+    _editing = st.session_state.get('change_password_editing', False)
+    with card(title='Change password'):
+        if not _editing:
+            st.caption('Update the password used to sign in.')
+            if st.button('Change password', key='change_password_start',
+                          icon=':material/lock_reset:', width='stretch'):
+                st.session_state.change_password_editing = True
+                st.rerun(scope='fragment')
+        else:
+            with st.form('change_password_form', border=False):
+                current_pw = st.text_input('Current password', type='password', key='cp_current')
+                new_pw = st.text_input('New password', type='password', key='cp_new')
+                confirm_pw = st.text_input('Confirm new password', type='password', key='cp_confirm')
+                change_submitted = st.form_submit_button(
+                    'Update password', icon=':material/check:', width='stretch',
+                )
+            if st.button('Cancel', key='change_password_cancel'):
+                st.session_state.change_password_editing = False
+                st.rerun(scope='fragment')
+            if change_submitted:
+                # Re-verify the CURRENT password server-side rather than
+                # trusting the already-authenticated session alone -- this
+                # is the standard "confirm you're still you" step before a
+                # sensitive change, and it doubles as proof the account
+                # (and the DB) is actually reachable right now.
+                if not _account or not verify_password(current_pw, _account['password_hash']):
+                    st.error('Current password is incorrect.', icon=':material/error:')
+                elif len(new_pw) < 8:
+                    st.error('New password must be at least 8 characters.', icon=':material/error:')
+                elif new_pw != confirm_pw:
+                    st.error("New passwords don't match.", icon=':material/error:')
+                elif update_local_account_password(_email, new_pw):
+                    st.session_state.change_password_editing = False
+                    st.success('Password updated.', icon=':material/check_circle:')
+                    st.rerun(scope='fragment')
+                else:
+                    st.error('Could not update your password right now. Try again shortly.',
+                              icon=':material/error:')
+
+
 init_session_state()
 
 # layout is now a fixed 'wide', not conditional on authenticated the way
@@ -2907,42 +3030,7 @@ elif page == 'Profile':
     # user's own explicit spec for this page -- only a Super Admin edits
     # their own name/email, everyone else just sees it.
     if _is_local and _user.get('role') == 'Super Admin':
-        with card(title='Profile details', sub='Only Super Admins can change their own name or email.'):
-            with st.form('profile_details_form', border=False):
-                new_name = st.text_input('Name', value=_user.get('name', ''))
-                new_email = st.text_input('Work email', value=_email)
-                current_pw_profile = st.text_input(
-                    'Current password, to confirm', type='password', key='profile_confirm_pw',
-                )
-                profile_submitted = st.form_submit_button(
-                    'Save changes', icon=':material/check:', width='stretch',
-                )
-            if profile_submitted:
-                clean_new_email = new_email.strip().lower()
-                if not _account or not verify_password(current_pw_profile, _account['password_hash']):
-                    st.error('Current password is incorrect.', icon=':material/error:')
-                elif not new_name.strip():
-                    st.error('Name cannot be empty.', icon=':material/error:')
-                elif not clean_new_email or '@' not in clean_new_email:
-                    st.error('Enter a valid email address.', icon=':material/error:')
-                elif new_name.strip() == _user.get('name') and clean_new_email == _email:
-                    st.info('Nothing to save -- name and email are unchanged.', icon=':material/info:')
-                elif update_local_account_profile(_email, new_name.strip(), clean_new_email):
-                    # Keeps the CURRENT session in sync immediately -- without
-                    # this, every other place that reads st.session_state.user
-                    # (sidebar, page_header, this page's own avatar above)
-                    # would keep showing the OLD name/email until the next
-                    # sign-in, and a changed email specifically would break
-                    # get_local_account(_email) on this exact page's next
-                    # rerun, since that row no longer exists under the old key.
-                    st.session_state.user = {
-                        **_user, 'name': new_name.strip(), 'email': clean_new_email,
-                    }
-                    st.success('Profile updated.', icon=':material/check_circle:')
-                    st.rerun()
-                else:
-                    st.error('Could not save those changes -- that email may already be in use.',
-                              icon=':material/error:')
+        _render_profile_details_card(_email)
     elif _is_local:
         with card(title='Profile details'):
             st.caption('Only a Super Admin can change your name or email. Contact one if these need updating.')
@@ -2971,32 +3059,7 @@ elif page == 'Profile':
     # account has no password in this app at all, and its own 2FA (if any)
     # is Google's, not ours (same reasoning as the docstring history above).
     if _is_local:
-        with card(title='Change password'):
-            with st.form('change_password_form', border=False):
-                current_pw = st.text_input('Current password', type='password', key='cp_current')
-                new_pw = st.text_input('New password', type='password', key='cp_new')
-                confirm_pw = st.text_input('Confirm new password', type='password', key='cp_confirm')
-                change_submitted = st.form_submit_button(
-                    'Update password', icon=':material/check:', width='stretch',
-                )
-            if change_submitted:
-                # Re-verify the CURRENT password server-side rather than
-                # trusting the already-authenticated session alone -- this
-                # is the standard "confirm you're still you" step before a
-                # sensitive change, and it doubles as proof the account
-                # (and the DB) is actually reachable right now.
-                if not _account or not verify_password(current_pw, _account['password_hash']):
-                    st.error('Current password is incorrect.', icon=':material/error:')
-                elif len(new_pw) < 8:
-                    st.error('New password must be at least 8 characters.', icon=':material/error:')
-                elif new_pw != confirm_pw:
-                    st.error("New passwords don't match.", icon=':material/error:')
-                elif update_local_account_password(_email, new_pw):
-                    st.success('Password updated.', icon=':material/check_circle:')
-                else:
-                    st.error('Could not update your password right now. Try again shortly.',
-                              icon=':material/error:')
-
+        _render_change_password_card(_email)
         _render_2fa_card(_email)
     else:
         with card(title='Sign-in security'):
