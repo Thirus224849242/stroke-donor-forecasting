@@ -1,4 +1,4 @@
-import streamlit as st
+﻿import streamlit as st
 
 from branding import logo_data_uri
 from db import db_configured, get_local_account, get_user, request_access, upsert_approved_user, verify_password
@@ -30,6 +30,8 @@ GOOGLE_EXTRA_ALLOWED_EMAILS = {'thirumalreddyenugu@gmail.com'}
 SESSION_KEYS = [
     'master', 'forecast_df', 'monthly', 'mape',
     'pipeline_run', 'page', 'authenticated', 'user', 'auth_method', 'pending_2fa', 'totp_setup_secret',
+    'totp_qr_cache',
+    'is_signing_in', 'is_signing_out',
     'ml_importances', 'ml_trend_slope',
     'forecast_df_linear', 'mape_linear', 'mape_stockflow',
     'ltv_results', 'ltv_tuning', 'ltv_metrics', 'ltv_error', 'ltv_monthly', 'ltv_histogram',
@@ -198,35 +200,92 @@ def initials(name: str) -> str:
 
 
 def sign_out():
-    """Two-step sign-out, not one -- this function ONLY sets a flag and
-    reruns; the actual state-clearing happens in complete_sign_out()
-    below, called at the very top of app.py on the NEXT run, before any
-    dashboard content renders. Clearing everything HERE (the original
-    version) meant the still-rendering dashboard -- everything below
-    wherever this was called from, e.g. the account popover in the page
-    header -- got its data pulled out from under it mid-script, then
-    Streamlit streamed that half-torn-down state to the browser for a
-    moment before the new run (driven by this same st.rerun()) replaced
-    it with the login page: reported live as data visibly "dropping out"
-    right before logging out. Splitting it into two runs means the
-    browser only ever sees a clean loading screen in between the full
-    dashboard and the login page, never that broken intermediate frame."""
+    """Two-step sign-out, not one -- this function sets a flag and reruns;
+    the actual state-clearing happens in complete_sign_out() below, called
+    at the very top of app.py on the NEXT run, before any dashboard
+    content renders. Clearing everything HERE (an earlier version) meant
+    the still-rendering dashboard -- everything below wherever this was
+    called from, e.g. the account popover in the page header -- got its
+    data pulled out from under it mid-script, then Streamlit streamed
+    that half-torn-down state to the browser for a moment before the new
+    run (driven by this same st.rerun()) replaced it with the login page:
+    reported live as data visibly "dropping out" right before logging out.
+    Splitting it into two runs means the browser only ever sees a clean
+    loading screen in between the full dashboard and the login page,
+    never that broken intermediate frame.
+
+    The overlay itself is now rendered HERE too, immediately, not only in
+    complete_sign_out() on the next run -- reported live as a white
+    "freeze"/fade flash appearing BEFORE the "Signing out" screen, not
+    just going straight to it. Root cause: the instant st.rerun() below
+    fires, Streamlit's own frontend starts fading every element of THIS
+    (still-visible) dashboard toward transparent, since none of them will
+    be reproduced by the upcoming run -- that fade is what read as
+    "freezing"/turning white, and it was happening in the gap before
+    complete_sign_out() got a chance to paint anything on the new run.
+    Painting the exact same overlay here, in this still-live run, closes
+    that gap entirely: the browser has something solid covering the
+    dashboard from the very first frame of the transition, not just from
+    whenever the next run's script happens to reach it."""
+    st.html("""
+    <style>
+    [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"],
+    [data-testid="stHeader"], [data-testid="stToolbar"] { display: none !important; }
+    #stFloatingOverlayPortal { display: none !important; }
+    </style>
+    """)
+    render_transition_spinner('Signing out')
     st.session_state['_signing_out'] = True
     st.rerun()
 
 
-def _render_transition_spinner(label: str):
+def render_transition_spinner(label: str):
     """Small branded loading indicator for the brief moment between two
     major auth-state transitions (signing in, signing out) -- rendered
     right before a screen-clearing st.rerun()/st.logout() so the browser
     has something clean to show instead of the previous screen's now-
     stale content lingering visibly until the next run's real content
-    arrives. Two call sites: complete_sign_out() below (dashboard ->
-    login) and render_login()'s successful-submit branch (login ->
-    dashboard) -- factored out here specifically so both directions of
-    that same transition look and behave identically."""
+    arrives. Not private to this module (no leading underscore) since
+    app.py also holds this open, via its own placeholder, through the
+    authenticated page's own first render after signing in -- see its
+    is_signing_in handling near the top of the page-routing section.
+    Three call sites in total: complete_sign_out() below (dashboard ->
+    login), render_login()'s successful-submit branch (login ->
+    dashboard transition, the brief moment before the rerun), and
+    app.py (continuing that same dashboard transition through the new
+    page's own render) -- factored out here specifically so all of them
+    look and behave identically.
+
+    position:fixed + inset:0 + an opaque background, not a plain
+    height:80vh block flowing in normal document order -- confirmed live
+    (via an artificial delay here, long enough to actually see this
+    frame rather than it flashing past): the old height:80vh version
+    only ADDED this spinner block after whatever else was already on the
+    page, it never covered it. render_login()'s call site never showed
+    that, because it first clears its own content via page.empty()
+    before calling this -- but complete_sign_out() has no such
+    placeholder to clear (the dashboard content it's transitioning away
+    from was rendered by the PREVIOUS run, not this one, so there's
+    nothing here to call .empty() on), so the old dashboard cards stayed
+    fully visible underneath/around this spinner for the whole gap
+    before the next rerun replaced them -- reported live as "broken CSS
+    a moment before the login loads". A fixed, full-viewport, opaque
+    overlay covers that regardless of what's still sitting in the
+    document behind it.
+
+    z-index 999999999, not 999999 -- ui.py's .sf-cached-run-banner (the
+    "Showing the run from..." peekaboo strip) uses z-index: 999999 too,
+    and reported live: revealed while this overlay is up (a stray mouse
+    touch near the very top edge of the window is all its own JS needs
+    to trigger that, unrelated to anything auth-related), it painted ON
+    TOP of this overlay -- equal z-index falls back to DOM/paint order,
+    and that banner's element is inserted later in the very same run
+    that opened this overlay (app.py calls it after this placeholder is
+    created). A comfortably higher z-index here wins regardless of
+    ordering, without needing to touch the banner's own value."""
     st.markdown(f"""
-    <div style="display:flex;align-items:center;justify-content:center;height:80vh;">
+    <div style="position:fixed;inset:0;z-index:999999999;background:#FFFFFF;
+        display:flex;align-items:center;justify-content:center;">
         <div style="text-align:center;">
             <div style="width:34px;height:34px;border-radius:50%;margin:0 auto 16px;
                 border:3px solid #E2E8F0;border-top-color:#00897B;
@@ -260,9 +319,33 @@ def complete_sign_out():
     <style>
     [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"],
     [data-testid="stHeader"], [data-testid="stToolbar"] { display: none !important; }
+    /* The account-menu popover (ui.py's page_header()) renders its open
+    body into #stFloatingOverlayPortal, appended near document.body, not
+    as a normal descendant of the page -- confirmed live, its stacking
+    layer sits ABOVE render_transition_spinner()'s full-viewport overlay
+    (a plain z-index on the overlay isn't enough to cover something in a
+    different, higher portal layer -- and #stFloatingOverlayPortal is NOT
+    the same element as [data-testid="portal"], a separate, unrelated
+    overlay root). If "Log out" is clicked while that menu is still open
+    (the normal way to reach it), its now-stale body stayed visible,
+    floating on top of the sign-out transition. Hidden outright since
+    nothing in this portal has any reason to be visible during a
+    full-screen auth transition. */
+    #stFloatingOverlayPortal { display: none !important; }
     </style>
     """)
-    _render_transition_spinner('Signing out')
+    render_transition_spinner('Signing out')
+    # Clearing session_state below is just dict assignment -- no real wait
+    # to cover -- so without a deliberate pause here, this whole screen
+    # flashed past in well under a frame and landed straight on the login
+    # page: reported live as feeling raw/abrupt, and as "the signing-out
+    # loader isn't working" even though it WAS rendering, just never for
+    # long enough to actually see. A short fixed pause (not a readiness
+    # check -- there's nothing here to wait for) is the deliberate fix,
+    # matching the same reasoning as the 2FA QR placeholder's pause in
+    # app.py's _render_2fa_card().
+    import time
+    time.sleep(0.6)
 
     for k in SESSION_KEYS:
         st.session_state[k] = None
@@ -270,6 +353,15 @@ def complete_sign_out():
     st.session_state.page = 'Overview'
     st.session_state.pipeline_running = False
     st.session_state['_signing_out'] = False
+    # Set AFTER the wipe above (which would otherwise reset it right back
+    # to None, since it's in SESSION_KEYS too) -- this is the user-facing
+    # "still transitioning" flag, distinct from the internal one-shot
+    # `_signing_out` trigger just cleared on the line above. It stays True
+    # across the st.rerun()/st.logout() below and into the very next run,
+    # where render_login() -- the only other place that reads it -- clears
+    # it once the login form itself is actually the thing being rendered,
+    # not merely once this function is done clearing state.
+    st.session_state.is_signing_out = True
     if method == 'google':
         st.logout()  # clears Streamlit's identity cookie and reruns itself
     else:
@@ -290,6 +382,11 @@ def _render_auth_shell():
     [data-testid="stHeader"] { background: transparent !important; }
     footer, [data-testid="stDecoration"], [data-testid="stAppDeployButton"],
     [data-testid="stMainMenu"] { display: none !important; }
+    /* Same native top-right "Running..."/Stop indicator hidden in
+    ui.py's inject_global_css() -- that function only runs post-login, so
+    this screen (submit, wrong password, the 2FA code form, etc.) needs
+    its own copy to stay unwanted-icon-free before authentication too. */
+    [data-testid="stStatusWidget"] { display: none !important; }
     @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600&family=Inter:wght@400;500;600&display=swap');
     .stApp {
         background:
@@ -368,7 +465,7 @@ def _render_auth_shell():
 
 def _render_auth_footer():
     st.markdown(
-        '<div class="sf-login-footer">Stroke Foundation of Australia · '
+        '<div class="sf-login-footer">Stroke Foundation of Australia Â· '
         'Face-to-Face Regular Giving Program</div>',
         unsafe_allow_html=True,
     )
@@ -387,7 +484,7 @@ def render_login():
     the next run's dashboard (sidebar included) started streaming in
     underneath/around it -- a broken hybrid of both screens at once,
     not a clean transition. Clearing the placeholder and rendering
-    _render_transition_spinner() before the rerun (same technique
+    render_transition_spinner() before the rerun (same technique
     complete_sign_out() uses for the reverse transition) means the
     browser sees login page -> clean spinner -> dashboard instead.
 
@@ -432,25 +529,41 @@ def render_login():
                     st.session_state.pending_2fa = None
                     st.rerun()
                 if totp_submitted:
-                    # Local import -- pyotp is only ever needed here and in
-                    # ui.py's setup/disable flow, not on the hot path of
-                    # every other page load.
-                    import pyotp
-                    # valid_window=1 accepts the current 30s step plus one
-                    # step either side -- standard TOTP tolerance for clock
-                    # drift between the server and the user's phone, same
-                    # default most authenticator-backed logins use.
-                    if code and pyotp.TOTP(pending['secret']).verify(code.strip(), valid_window=1):
-                        st.session_state.authenticated = True
-                        st.session_state.auth_method = 'password'
-                        st.session_state.user = {
-                            'email': pending['email'], 'name': pending['name'], 'role': pending['role'],
-                        }
-                        st.session_state.pending_2fa = None
-                        just_signed_in = True
+                    try:
+                        # Local import -- pyotp is only ever needed here and in
+                        # app.py's Profile-page setup/disable flow, not on the
+                        # hot path of every other page load.
+                        import pyotp
+                        # valid_window=1 accepts the current 30s step plus one
+                        # step either side -- standard TOTP tolerance for clock
+                        # drift between the server and the user's phone, same
+                        # default most authenticator-backed logins use.
+                        code_ok = bool(code) and pyotp.TOTP(pending['secret']).verify(
+                            code.strip(), valid_window=1,
+                        )
+                    except Exception:
+                        code_ok = False
+                        st.error('Two-factor verification is unavailable right now. Try again '
+                                  'shortly, or contact an administrator.', icon=':material/error:')
                     else:
-                        st.error('Incorrect code. Please try again.', icon=':material/error:')
+                        if code_ok:
+                            st.session_state.authenticated = True
+                            st.session_state.auth_method = 'password'
+                            st.session_state.user = {
+                                'email': pending['email'], 'name': pending['name'], 'role': pending['role'],
+                            }
+                            st.session_state.pending_2fa = None
+                            st.session_state.is_signing_in = True
+                            just_signed_in = True
+                        else:
+                            st.error('Incorrect code. Please try again.', icon=':material/error:')
             else:
+                # The login form is the destination complete_sign_out() is
+                # transitioning to -- reaching this branch at all means
+                # it's about to actually render, so this is where the
+                # "Signing out" state ends (see complete_sign_out()'s
+                # is_signing_out comment in this same file).
+                st.session_state.is_signing_out = False
                 st.markdown("**Sign in to your account**")
                 st.caption('Enter your credentials to access the F2F forecasting dashboard.')
 
@@ -474,12 +587,21 @@ def render_login():
                     )
 
                 if submitted:
+                    # Set immediately, before the DB call below -- this is
+                    # what makes the "Signing in" state deterministic
+                    # rather than tied to how fast that call happens to
+                    # return. Cleared on every failure/hand-off path below;
+                    # left True on an actual success, through to app.py's
+                    # post-login section, which is the only other place
+                    # that clears it (see its own comment there for why).
+                    st.session_state.is_signing_in = True
                     clean_email = email.strip().lower()
                     if not db_configured():
                         # Distinct from a wrong password -- this means local login
                         # can't work at all right now (local_accounts lives in the
                         # same Supabase database as everything else in db.py), not
                         # that this particular attempt failed.
+                        st.session_state.is_signing_in = False
                         st.error('Local sign-in is unavailable right now (no database configured). '
                                   'Try Google sign-in instead, or contact an administrator.',
                                   icon=':material/error:')
@@ -503,7 +625,7 @@ def render_login():
                         # have already finished loading) avoids that.
                         from ui import render_startup_progress
                         _login_bar = st.empty()
-                        render_startup_progress(_login_bar)
+                        render_startup_progress(_login_bar, label='Signing in')
                         account = get_local_account(clean_email)
                         if account and verify_password(password, account['password_hash']):
                             # Same domain restriction Google sign-in enforces
@@ -516,6 +638,7 @@ def render_login():
                             domain = clean_email.rsplit('@', 1)[-1] if '@' in clean_email else ''
                             if domain not in ALLOWED_GOOGLE_DOMAINS and clean_email not in GOOGLE_EXTRA_ALLOWED_EMAILS:
                                 _login_bar.empty()
+                                st.session_state.is_signing_in = False
                                 st.error('This account is not on an authorised domain. Contact an administrator.',
                                           icon=':material/block:')
                             elif account.get('totp_secret'):
@@ -523,8 +646,12 @@ def render_login():
                                 # not authenticated yet. Cleared rather than left
                                 # showing: the wait from here is on the USER typing
                                 # a code, not on a network/DB call, so "connecting"
-                                # language would be actively misleading.
+                                # language would be actively misleading. Same reasoning
+                                # for is_signing_in -- entering a code is a distinct
+                                # interactive step, not a continuation of "signing in";
+                                # it's set True again above once that code verifies.
                                 _login_bar.empty()
+                                st.session_state.is_signing_in = False
                                 st.session_state.pending_2fa = {
                                     'email': clean_email, 'name': account['name'],
                                     'role': account['role'], 'secret': account['totp_secret'],
@@ -542,9 +669,12 @@ def render_login():
                                 # _login_bar deliberately left showing -- just_signed_in
                                 # below clears the whole page (this bar included) and
                                 # replaces it with the transition spinner before the
-                                # rerun, so there's no gap here either.
+                                # rerun, so there's no gap here either. is_signing_in
+                                # stays True (set at submit time above) straight through
+                                # that handoff into app.py.
                         else:
                             _login_bar.empty()
+                            st.session_state.is_signing_in = False
                             # Deliberately the SAME message whether the email has no
                             # local account at all or the password was just wrong --
                             # distinguishing them would let this form be used to
@@ -555,7 +685,7 @@ def render_login():
 
     if just_signed_in:
         page.empty()
-        _render_transition_spinner('Signing in')
+        render_transition_spinner('Signing in')
         st.rerun()
     st.stop()
 

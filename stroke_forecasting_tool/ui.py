@@ -121,6 +121,19 @@ ADMIN_ONLY_NAV_ITEMS = {'Data Pipeline', 'Users'}
 # power. See render_sidebar()'s is_super_admin filter below.
 SUPER_ADMIN_ONLY_NAV_ITEMS = {'Users'}
 
+# The exact page set render_cached_run_banner() ("Showing the run
+# from...") is relevant for -- the Dashboards section above, i.e. pages
+# that actually display pipeline output. Reported live: app.py used to
+# call that banner unconditionally whenever data_source == 'cached',
+# regardless of which page was open, so it also showed (and could
+# auto-reveal, via the same nav_loading flag "My profile" now sets too)
+# on Data Pipeline, Run History, Users, and Profile -- none of which
+# have anything to do with "which pipeline run's data you're viewing",
+# and Profile's own page_header() layout isn't built to accommodate a
+# fixed top strip the way the dashboard pages' is, which is what read
+# as the banner "not filling" properly there.
+CACHED_RUN_BANNER_PAGES = {name for name, _ in dict(NAV_SECTIONS)['Dashboards']}
+
 
 def _slug(text: str) -> str:
     return re.sub(r'[^a-z0-9]+', '_', text.lower()).strip('_')
@@ -148,21 +161,55 @@ def inject_global_css():
     # extra, deliberately-narrow signal was added.
     _nav_loading = st.session_state.get('nav_loading', False)
     st.session_state.nav_loading = False
+    # A fixed-duration animation (plays once, then settles into its 100%
+    # end state permanently), not the earlier version's live
+    # :has([data-testid="stStatusWidget"]) matching -- confirmed live,
+    # that version's blur/spinner kept reappearing on every FUTURE rerun
+    # too, not just the one nav transition it was meant for, on any page
+    # that also contains an st.fragment (the Profile page's 2FA card):
+    # a fragment's own reruns never call inject_global_css() again, so
+    # whatever stylesheet was active when the fragment was first reached
+    # -- including these rules, still live-matching stStatusWidget's
+    # reappearance on every later fragment rerun too -- just stays the
+    # active stylesheet indefinitely. A fixed-duration animation has no
+    # such failure mode: once its one iteration finishes (comfortably
+    # longer than any real page-to-page navigation in this app, which
+    # never re-fetches data mid-session), it's permanently inert
+    # regardless of anything that reruns afterwards, fragment or not.
     _nav_overlay_css = f"""
-    [data-testid="stAppViewContainer"]:has([data-testid="stStatusWidget"]) [data-testid="stMain"] {{
-        filter: blur(3px);
-        transition: filter 0.2s ease 0.2s;
-        pointer-events: none;
+    @keyframes sf-nav-blur-fade {{
+        0%, 15% {{ filter: blur(0); pointer-events: auto; }}
+        25%, 65% {{ filter: blur(3px); pointer-events: none; }}
+        100% {{ filter: blur(0); pointer-events: auto; }}
     }}
-    [data-testid="stAppViewContainer"]:has([data-testid="stStatusWidget"])::after {{
-        opacity: 1; animation: sf-spin 0.8s linear infinite;
-        transition: opacity 0.15s ease 0.2s;
+    @keyframes sf-nav-spin-fade {{
+        0%, 15% {{ opacity: 0; }}
+        25%, 65% {{ opacity: 1; }}
+        100% {{ opacity: 0; }}
+    }}
+    [data-testid="stMain"] {{
+        animation: sf-nav-blur-fade 1.4s ease-in-out forwards;
+    }}
+    [data-testid="stAppViewContainer"]::after {{
+        animation: sf-spin 0.8s linear infinite, sf-nav-spin-fade 1.4s ease-in-out forwards;
     }}
     """ if _nav_loading else ''
     st.html(f"""
     <style>
     footer, [data-testid="stDecoration"], [data-testid="stAppDeployButton"],
     [data-testid="stMainMenu"] {{ display: none !important; }}
+    /* Streamlit's own top-right "Running..."/Stop indicator -- fires on
+    EVERY rerun (any button, any widget tweak), not just the deliberate
+    moments this app already has purpose-built loaders for (the nav
+    overlay below, render_startup_progress(), _render_transition_spinner()
+    in auth.py, and st.spinner() calls at individual call sites). Reported
+    as an unwanted stray icon; hidden outright rather than replaced, since
+    those purpose-built loaders already cover every case worth signalling.
+    display:none only hides its paint -- the element itself still exists
+    in the DOM for the exact same instant it always did, so the nav
+    overlay's :has([data-testid="stStatusWidget"]) detection below is
+    unaffected. */
+    [data-testid="stStatusWidget"] {{ display: none !important; }}
     /* pointer-events:none so this invisible native bar can never again
     swallow real clicks meant for whatever sits under/behind it (this is
     exactly what broke the topbar's popover before) -- every button it
@@ -194,34 +241,40 @@ def inject_global_css():
     /* Streamlit's own indicator during a script run is a tiny top-right
     spinner plus a per-element fade on whatever's stale -- easy to miss,
     per feedback "very primitive". Replaced with a centered spinner over
-    a blurred main content area instead, but ONLY for an actual sidebar
-    page-to-page navigation -- not for every rerun in general (a widget
-    tweak, a Data Pipeline upload, the pipeline's own multi-stage run all
-    rerun the script exactly the same way at the DOM level, which was the
-    real bug behind an earlier version of this showing up on Data
-    Pipeline too: :has([data-testid="stStatusWidget"]) alone can't tell
-    those apart from a nav click). The two rules that actually turn the
-    overlay on are therefore built conditionally in Python, in
+    a blurred main content area instead, but ONLY for an actual page
+    navigation (sidebar nav clicks, and the account menu's "My profile")
+    -- not for every rerun in general (a widget tweak, a Data Pipeline
+    upload, the pipeline's own multi-stage run all rerun the script
+    exactly the same way at the DOM level). The two rules that actually
+    turn the overlay on are therefore built conditionally in Python, in
     _nav_overlay_css above -- included in this CSS only on the one rerun
     immediately following a nav click (that one-shot session_state flag
-    is set in render_sidebar()'s nav-button handler, right before its
-    st.rerun()) -- and spliced in below. Everything here stays a no-op
-    (never matches) on every other rerun, since [data-testid=
-    "stStatusWidget"] briefly existing is no longer sufficient on its own.
-    [data-testid="stStatusWidget"] itself -- confirmed live (polled the
-    DOM every 300ms through an artificial delay) -- is only present while
-    a script is actually running: appears the instant a rerun starts,
-    removed a beat after the new content finishes streaming in, so no
-    extra JavaScript is needed to know when to show/hide this.
-    A short transition-delay, present only on the WAY IN (not the way
-    out), additionally debounces this: a nav rerun that somehow completes
-    in well under 200ms wouldn't visibly flash it either. filter:blur()
-    is scoped to [data-testid="stMain"] only, not the sidebar, so nav
-    stays usable while a background rerun is still settling; the spinner
-    itself is a ::after on [data-testid="stAppViewContainer"] (stMain's
-    ANCESTOR, not stMain itself) specifically so stMain's blur filter --
-    which also applies to any pseudo-element that were its own -- never
-    blurs the spinner along with the content behind it. */
+    is set right before that click's st.rerun(), in render_sidebar()'s
+    nav-button handler and page_header()'s "My profile" handler) -- and
+    spliced in below as a fixed-duration CSS animation, not a live
+    [data-testid="stStatusWidget"]-presence match. An earlier version did
+    use a live :has([data-testid="stStatusWidget"]) match here, gated the
+    same way -- but confirmed live, that failed on any page containing an
+    st.fragment (the Profile page's 2FA card): a fragment's own reruns
+    never call inject_global_css() again, so whatever stylesheet was
+    active when the fragment was first reached -- these rules included,
+    still live-matching stStatusWidget's reappearance on every later
+    fragment rerun too -- just stayed the active stylesheet indefinitely,
+    reappearing on every 2FA interaction rather than only the one nav
+    transition. A fixed-duration animation (plays once, ends at its own
+    100% keyframe, stays there regardless of anything rerunning
+    afterwards) has no such failure mode, and needs no
+    [data-testid="stStatusWidget"] involvement at all -- 1.4s comfortably
+    covers a real page-to-page navigation in this app (never a fresh data
+    fetch mid-session, so effectively just render time), and simply
+    finishes before a user could plausibly reach a moment later that
+    happens to rerun something else. filter:blur() is scoped to
+    [data-testid="stMain"] only, not the sidebar, so nav stays usable
+    while the animation is still playing; the spinner itself is a ::after
+    on [data-testid="stAppViewContainer"] (stMain's ANCESTOR, not stMain
+    itself) specifically so stMain's blur filter -- which also applies to
+    any pseudo-element that were its own -- never blurs the spinner along
+    with the content behind it. */
     @keyframes sf-spin {{ to {{ transform: translate(-50%, -50%) rotate(360deg); }} }}
     [data-testid="stMain"] {{
         transition: filter 0.2s ease 0s;
@@ -492,8 +545,15 @@ def inject_global_css():
     the right edge of its parent to match -- justify-content on the
     wrapper's own box (tried first) did nothing, since a box with no
     slack of its own has nothing for justify-content to redistribute. */
-    .st-key-topbar_user_menu {{ margin-left: auto; }}
-    .st-key-topbar_user_menu button {{
+    /* [class*="st-key-topbar_user_menu_"] (CONTAINS, not an exact class
+    match) -- the popover's own key is now suffixed per-page (see its
+    st.popover() call site below) so its open/closed state doesn't
+    survive a page navigation; the exact class name it renders under
+    therefore varies by page too, and a plain .st-key-topbar_user_menu
+    selector would only ever match the literal (now-unused) unsuffixed
+    name. */
+    [class*="st-key-topbar_user_menu_"] {{ margin-left: auto; }}
+    [class*="st-key-topbar_user_menu_"] button {{
         display: flex !important; align-items: center !important; gap: 8px !important;
         background: transparent !important; border: none !important;
         padding: 4px 10px 4px 4px !important; border-radius: 20px !important;
@@ -585,14 +645,14 @@ def inject_global_css():
     # half at a safe rule boundary rather than chase the precise cutoff.
     st.html(f"""
     <style>
-    .st-key-topbar_user_menu button:hover {{ background: {SURFACE2} !important; }}
-    .st-key-topbar_user_menu button::before {{
+    [class*="st-key-topbar_user_menu_"] button:hover {{ background: {SURFACE2} !important; }}
+    [class*="st-key-topbar_user_menu_"] button::before {{
         display: flex !important; align-items: center !important; justify-content: center !important;
         width: 30px !important; height: 30px !important; min-width: 30px !important;
         border-radius: 50% !important; background: {NAVY} !important; color: white !important;
         font-size: 11px !important; font-weight: 700 !important; flex-shrink: 0 !important;
     }}
-    .st-key-topbar_user_menu button p {{
+    [class*="st-key-topbar_user_menu_"] button p {{
         font-size: 12px !important; font-weight: 600 !important; color: {TEXT} !important; margin: 0 !important;
     }}
     /* Sits directly under the avatar+name button in the same narrow
@@ -1185,9 +1245,26 @@ def page_header(eyebrow, title, sub='', meta='', info=None):
             # leaving a tag open across calls). A real st.popover() inside a
             # real st.columns() cell is what actually works.
             st.html(f"""<style>
-            .st-key-topbar_user_menu button::before {{ content: "{initials(user['name'])}"; }}
+            [class*="st-key-topbar_user_menu_"] button::before {{ content: "{initials(user['name'])}"; }}
             </style>""")
-            with st.popover(user['name'], key='topbar_user_menu'):
+            # Keyed per page (not a fixed 'topbar_user_menu') -- a popover's
+            # open/closed state is tracked by Streamlit's frontend against
+            # its widget id, which includes this key, and PERSISTS across a
+            # rerun as long as the same key is reproduced. Clicking "My
+            # profile" below navigates to a different page by setting
+            # st.session_state.page + st.rerun() -- but that new page calls
+            # this same function again with the SAME fixed key, so the
+            # popover would still count as "the same widget" and stay open,
+            # floating over the new page's content underneath it (confirmed
+            # live: reproducible on every navigation via this menu, not
+            # just "My profile" -- Log out is a separate full-screen
+            # transition so it isn't affected the same way). Suffixing the
+            # key with the current page's title means navigating to a
+            # different page is a genuinely different widget as far as the
+            # frontend is concerned, closed by default; staying on the SAME
+            # page (e.g. toggling dark mode, which also reruns) keeps the
+            # same key and correctly preserves the open state.
+            with st.popover(user['name'], key=f'topbar_user_menu_{_slug(title)}'):
                 # Name + status stacked (not "Signed in as X · Role" on one
                 # line), a dark-mode toggle, then Log out -- all plain
                 # top-to-bottom Streamlit elements, no st.columns anywhere in
@@ -1237,6 +1314,20 @@ def page_header(eyebrow, title, sub='', meta='', info=None):
                 if st.button('My profile', key='topbar_profile_btn', icon=':material/account_circle:',
                               width='stretch'):
                     st.session_state.page = 'Profile'
+                    # Same nav_loading = True render_sidebar()'s own nav
+                    # buttons set -- reported live as inconsistent for this
+                    # navigation specifically not to show the same loading
+                    # transition every other page gets. This WAS worth
+                    # skipping in an earlier version, because the overlay
+                    # used to be a live [data-testid="stStatusWidget"] match
+                    # that stayed permanently armed on any page containing an
+                    # st.fragment (the Profile page's own 2FA card) -- see
+                    # inject_global_css()'s nav-overlay comment in ui.py for
+                    # the full failure mode. Now that it's a fixed-duration
+                    # animation instead (same file), it can't leak into later
+                    # fragment reruns regardless of which page sets this flag,
+                    # so there's no longer a reason for this navigation to
+                    # skip it.
                     st.session_state.nav_loading = True
                     st.rerun()
 
@@ -1495,7 +1586,7 @@ def overall_progress(placeholder, done: int, total: int):
     """, unsafe_allow_html=True)
 
 
-def render_startup_progress(placeholder, done: bool = False):
+def render_startup_progress(placeholder, done: bool = False, label: str | None = None):
     """A single thin bar, STICKY to the top of the viewport, using the
     exact dimensions and animation of stage_row()'s own indeterminate
     "running" bar (search .sf-stage-bar-fill.running above): 4px track,
@@ -1526,11 +1617,23 @@ def render_startup_progress(placeholder, done: bool = False):
     its one genuinely slow operation.
 
     done: clears the bar entirely (call once, when the whole flow --
-    success, empty, or failed -- is finished)."""
+    success, empty, or failed -- is finished).
+
+    label: optional small caption pinned above the bar's left edge (e.g.
+    "Signing in") -- auth.py's credential-verification step passes this so
+    that stretch of the login flow reads as one consistent, named loading
+    state instead of an unlabelled bar, without changing this function's
+    unlabelled behaviour for its other call site (app.py's post-login
+    dashboard-data restore, which stays exactly as it was)."""
     if done:
         placeholder.empty()
         return
-    placeholder.markdown(f"""<div style="position:fixed;top:0;left:0;right:0;height:4px;z-index:999999;
+    _label_html = (
+        f'<div style="position:fixed;top:10px;left:16px;z-index:999999;'
+        'font-family:\'Space Grotesk\',system-ui,sans-serif;font-size:11px;font-weight:600;'
+        f'color:{TEXT};letter-spacing:0.06em;text-transform:uppercase;">{label}&hellip;</div>'
+    ) if label else ''
+    placeholder.markdown(f"""{_label_html}<div style="position:fixed;top:0;left:0;right:0;height:4px;z-index:999999;
 background:rgba(0,0,0,0.08);overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.15);">
 <div style="height:100%;width:40%;left:-40%;position:absolute;top:0;
 background:{GREEN};animation:sf-startup-bar-slide 1.1s ease-in-out infinite;"></div>

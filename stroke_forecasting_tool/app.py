@@ -48,7 +48,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from auth import complete_sign_out, handle_google_redirect, init_session_state, initials, render_login
+from auth import (
+    complete_sign_out, handle_google_redirect, init_session_state, initials, render_login,
+    render_transition_spinner,
+)
 from branding import TITLE_LOGO_PATH
 from db import (
     clear_totp_secret, create_local_account, db_configured, decide_access_request, delete_dashboard_run,
@@ -82,9 +85,9 @@ from db import (
 # current module attribute at the moment it's actually used.
 import ui
 from ui import (
-    card, chart, empty_state, inject_global_css, kpi, new_execution_log,
-    overall_progress, page_header, pill, render_cached_run_banner, render_footer,
-    render_sidebar, render_startup_progress, stage_row, upload_slot,
+    CACHED_RUN_BANNER_PAGES, card, chart, empty_state, inject_global_css, kpi,
+    new_execution_log, overall_progress, page_header, pill, render_cached_run_banner,
+    render_footer, render_sidebar, render_startup_progress, stage_row, upload_slot,
 )
 
 
@@ -492,6 +495,210 @@ def _tables_to_csv(tables: dict) -> str:
     return buf.getvalue()
 
 
+@st.fragment
+def _render_2fa_card(_email):
+    """The Profile page's "Two-factor authentication" card, as its own
+    fragment -- every interaction inside it (Set up 2FA, Cancel, Verify
+    and enable, Disable 2FA) reruns only this card, not the whole script.
+    Without this, Streamlit's normal full-script rerun behaviour fades
+    every OTHER element on the page while it re-executes -- reported live
+    as "the whole screen turning translucent white" on both Set up 2FA
+    and Cancel, exactly the full-page loading effect the local QR
+    spinner below was meant to avoid in the first place; a spinner inside
+    a fragment stays genuinely local since nothing outside the fragment
+    ever re-renders at all.
+
+    _email is the only thing threaded in from the Profile page's own
+    render -- everything else (the account row, whether 2FA is already
+    on) is read fresh from the database on every fragment run rather than
+    passed in as a snapshot, so a fragment-scoped rerun after enabling/
+    disabling always reflects the real current state, not a stale value
+    captured before this fragment last ran. st.rerun(scope='fragment')
+    (not the plain, whole-app st.rerun() used everywhere else in this
+    file) is what keeps those follow-up reruns local too.
+    """
+    _account = get_local_account(_email)
+    with card(title='Two-factor authentication'):
+        _totp_enabled = bool(_account and _account.get('totp_secret'))
+        if _totp_enabled:
+            st.success('Two-factor authentication is enabled.', icon=':material/check_circle:')
+            st.caption('Every sign-in will ask for a code from your authenticator app.')
+            # A second confirming step (current password, inside its own
+            # form) before actually turning it off -- same "prove you're
+            # still you" reasoning as Change password re-checking the
+            # current password above, for a change that lowers this
+            # account's security.
+            with st.form('totp_disable_form', border=False):
+                totp_disable_pw = st.text_input(
+                    'Enter your password to disable', type='password', key='totp_disable_pw',
+                )
+                disable_submitted = st.form_submit_button(
+                    'Disable 2FA', icon=':material/remove_moderator:', width='stretch',
+                )
+            if disable_submitted:
+                if not verify_password(totp_disable_pw, _account['password_hash']):
+                    st.error('Incorrect password.', icon=':material/error:')
+                elif clear_totp_secret(_email):
+                    st.success('Two-factor authentication disabled.', icon=':material/check_circle:')
+                    st.rerun(scope='fragment')
+                else:
+                    st.error('Could not disable two-factor authentication right now. '
+                              'Try again shortly.', icon=':material/error:')
+        else:
+            st.caption('Add an extra step at sign-in using an authenticator app '
+                       '(Google Authenticator, Authy, 1Password, etc).')
+            # The secret lives in session_state ONLY from here until a
+            # real code confirms it below -- set_totp_secret() (db.py)
+            # is never called until that verification succeeds, so a
+            # user who starts setup and never finishes it leaves no
+            # half-configured 2FA behind in the database, just an
+            # abandoned value in this session that a rerun/new session
+            # never sees again.
+            if not st.session_state.get('totp_setup_secret'):
+                # A placeholder, not a bare st.button() call, specifically so
+                # a successful click can clear the button back out again
+                # below -- st.button() always renders its widget regardless
+                # of the True/False it returns, so without this the button
+                # would stay sitting on screen, now doing nothing, right
+                # alongside the QR code that falls through and renders
+                # underneath it in this same pass.
+                _setup_btn_ph = st.empty()
+                if _setup_btn_ph.button('Set up 2FA', key='totp_setup_start',
+                                          icon=':material/qr_code_2:', width='stretch'):
+                    try:
+                        import pyotp
+                        st.session_state.totp_setup_secret = pyotp.random_base32()
+                        _setup_btn_ph.empty()
+                        # No st.rerun() -- falls straight through to the
+                        # generation block below in this SAME fragment pass
+                        # (fragments rerun automatically on their own widget
+                        # clicks regardless, same as the whole app normally
+                        # would, but scoped to just this card).
+                    except Exception:
+                        st.error('Two-factor setup is unavailable right now. Try again shortly, '
+                                  'or contact an administrator.', icon=':material/error:')
+
+            if st.session_state.get('totp_setup_secret'):
+                # Everything from here on can fail (a missing/broken pyotp or
+                # qrcode install, an unpicklable secret, etc) -- caught so a
+                # setup-time error shows as a normal in-card message instead of
+                # an uncaught traceback replacing the whole page. Cancel is
+                # rendered whether generation succeeded or not, so a failure
+                # here never leaves the user stuck without a way back.
+                _qr_error = False
+                _qr_ph = st.empty()
+                import pyotp
+
+                # The QR is generated ONCE per setup attempt and cached in
+                # session_state (raw PNG bytes), not regenerated on every
+                # fragment rerun of this card -- confirmed live: a fragment
+                # reruns its WHOLE body on any interaction inside it, so
+                # without this, clicking Cancel (or submitting the verify
+                # form with a wrong code) re-ran this entire generation
+                # block again first, from the top, before ever reaching the
+                # Cancel/verify handling below -- visibly re-showing
+                # "Generating QR code..." for another full 0.6s pause before
+                # actually collapsing, instead of collapsing immediately.
+                # Caching means a rerun triggered by something OTHER than
+                # freshly clicking "Set up 2FA" just reuses the
+                # already-generated bytes, near-instantly, with no repeat
+                # spinner/pause. Cleared alongside totp_setup_secret itself
+                # everywhere that's cleared, so a later "Set up 2FA" click
+                # always generates (and shows the loading state for) a
+                # genuinely fresh QR rather than a stale cached one.
+                if not st.session_state.get('totp_qr_cache'):
+                    # A placeholder sized to roughly the QR block's own final
+                    # footprint (image + caption), not st.spinner()'s single
+                    # text-and-icon line -- shown immediately so the card
+                    # expands to its eventual size right away instead of
+                    # jumping when the QR swaps in a moment later. Held for a
+                    # short, deliberate beat (real generation is sub-second)
+                    # so it's actually perceptible as a loading state,
+                    # matching the same reasoning as complete_sign_out()'s
+                    # equivalent pause in auth.py.
+                    with _qr_ph.container():
+                        st.html(f"""
+                        <div style="min-height:230px;display:flex;align-items:center;
+                            justify-content:center;">
+                            <div style="text-align:center;">
+                                <div style="width:28px;height:28px;border-radius:50%;margin:0 auto 12px;
+                                    border:3px solid {ui.LINE};border-top-color:{ui.TEAL};
+                                    animation:sf-2fa-spin 0.8s linear infinite;"></div>
+                                <div style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px;
+                                    font-weight:600;color:{ui.SLATE};letter-spacing:0.06em;
+                                    text-transform:uppercase;">Generating QR code&hellip;</div>
+                            </div>
+                        </div>
+                        <style>@keyframes sf-2fa-spin {{ to {{ transform: rotate(360deg); }} }}</style>
+                        """)
+                    try:
+                        import io
+                        import time
+
+                        import qrcode
+
+                        _secret = st.session_state.totp_setup_secret
+                        _uri = pyotp.TOTP(_secret).provisioning_uri(
+                            name=_email, issuer_name='Stroke Foundation Donor Forecasting',
+                        )
+                        _buf = io.BytesIO()
+                        qrcode.make(_uri).save(_buf, format='PNG')
+                        time.sleep(0.6)
+                        st.session_state.totp_qr_cache = _buf.getvalue()
+                    except Exception:
+                        _qr_error = True
+                        with _qr_ph.container():
+                            st.error('Could not generate a setup code right now. Try again shortly, '
+                                      'or contact an administrator.', icon=':material/error:')
+
+                if not _qr_error and st.session_state.get('totp_qr_cache'):
+                    # _qr_ph.container() again, not _qr_ph.empty() followed by
+                    # bare st.image() -- .empty() clears the placeholder back
+                    # to zero height FIRST, and the replacement content only
+                    # lands (and only actually finishes painting once the
+                    # image itself decodes) a beat later, as a SEPARATE
+                    # element after it -- reported live as the loading box
+                    # visibly collapsing shut and then reopening for the QR,
+                    # rather than one smoothly stays-expanded swap. Drawing
+                    # straight into the same placeholder replaces its content
+                    # in one step, so the box never passes through an
+                    # empty/collapsed state at all.
+                    with _qr_ph.container():
+                        st.image(st.session_state.totp_qr_cache, width=176)
+                        st.caption('Scan this with your authenticator app, or enter the key '
+                                   f'manually: `{st.session_state.totp_setup_secret}`')
+
+                if not _qr_error:
+                    with st.form('totp_verify_form', border=False):
+                        setup_code = st.text_input(
+                            'Enter the 6-digit code to confirm', placeholder='123456',
+                            max_chars=6, key='totp_setup_code',
+                        )
+                        verify_submitted = st.form_submit_button(
+                            'Verify and enable', icon=':material/check:', width='stretch',
+                        )
+                else:
+                    verify_submitted = False
+
+                if st.button('Cancel', key='totp_setup_cancel'):
+                    st.session_state.totp_setup_secret = None
+                    st.session_state.totp_qr_cache = None
+                    st.rerun(scope='fragment')
+                if verify_submitted:
+                    _secret = st.session_state.totp_setup_secret
+                    if setup_code and pyotp.TOTP(_secret).verify(setup_code.strip(), valid_window=1):
+                        if set_totp_secret(_email, _secret):
+                            st.session_state.totp_setup_secret = None
+                            st.session_state.totp_qr_cache = None
+                            st.success('Two-factor authentication enabled.', icon=':material/check_circle:')
+                            st.rerun(scope='fragment')
+                        else:
+                            st.error('Could not enable two-factor authentication right now. '
+                                      'Try again shortly.', icon=':material/error:')
+                    else:
+                        st.error('Incorrect code. Please try again.', icon=':material/error:')
+
+
 init_session_state()
 
 # layout is now a fixed 'wide', not conditional on authenticated the way
@@ -557,6 +764,31 @@ if not st.session_state.pipeline_run and db_configured():
             st.session_state.data_loaded_at  = _cached_at
     render_startup_progress(_startup_bar, done=True)
 
+# The "Signing in" state (set in auth.py's render_login(), survives the
+# st.rerun() into this run) used to end HERE, unconditionally, right
+# after the block above -- but that's before this run has rendered any
+# of the actual page content (KPIs, charts) for whichever page the user
+# lands on, which still has to happen below. Clearing the flag that
+# early meant nothing covered THAT render -- reported live as the
+# Overview page appearing blank for a moment, then its content
+# "flashing" in incrementally rather than appearing whole at once.
+# Instead, if we're still in this state, open the SAME full-screen
+# overlay used everywhere else in the login->dashboard transition (via
+# a placeholder held open, not cleared, for the rest of this script) --
+# matched by a single clearing point at the very end of the file, right
+# after render_footer(), which is the first point this run has actually
+# finished producing the whole page. Streamlit streams elements to the
+# browser in the order they're added, so everything queued in between
+# (sidebar, page content, footer) reaches the browser -- just hidden
+# under this fixed, opaque overlay -- before the "remove the overlay"
+# instruction does; the user only ever sees a blank instant, then the
+# complete, already-finished page, never the gap in between.
+_signing_in_overlay_ph = None
+if st.session_state.get('is_signing_in'):
+    _signing_in_overlay_ph = st.empty()
+    with _signing_in_overlay_ph.container():
+        render_transition_spinner('Signing in')
+
 page = st.session_state.page
 # page_header() (called once per page, inside each page's own routing
 # block below) reads these two straight from session_state to render the
@@ -585,7 +817,14 @@ _nav_just_happened = bool(st.session_state.get('nav_loading'))
 inject_global_css()
 render_sidebar()
 
-if st.session_state.data_source == 'cached':
+# CACHED_RUN_BANNER_PAGES, not every page -- reported live, this used to
+# show (and could auto-reveal, via the nav_loading flag "My profile" now
+# also sets) on Data Pipeline, Run History, Users, and Profile too, none
+# of which have anything to do with "which pipeline run's data you're
+# viewing" -- and on Profile specifically, whose page_header() layout
+# isn't built to accommodate a fixed top strip the way the dashboard
+# pages' is, that read as the banner "not filling" properly.
+if st.session_state.data_source == 'cached' and page in CACHED_RUN_BANNER_PAGES:
     loaded_str = (pd.to_datetime(st.session_state.data_loaded_at).strftime('%d %b %Y, %H:%M')
                   if st.session_state.data_loaded_at else 'a previous run')
     render_cached_run_banner(loaded_str, nav_triggered=_nav_just_happened)
@@ -2758,91 +2997,7 @@ elif page == 'Profile':
                     st.error('Could not update your password right now. Try again shortly.',
                               icon=':material/error:')
 
-        with card(title='Two-factor authentication'):
-            _totp_enabled = bool(_account and _account.get('totp_secret'))
-            if _totp_enabled:
-                st.success('Two-factor authentication is enabled.', icon=':material/check_circle:')
-                st.caption('Every sign-in will ask for a code from your authenticator app.')
-                # A second confirming step (current password, inside its own
-                # form) before actually turning it off -- same "prove you're
-                # still you" reasoning as Change password re-checking the
-                # current password above, for a change that lowers this
-                # account's security.
-                with st.form('totp_disable_form', border=False):
-                    totp_disable_pw = st.text_input(
-                        'Enter your password to disable', type='password', key='totp_disable_pw',
-                    )
-                    disable_submitted = st.form_submit_button(
-                        'Disable 2FA', icon=':material/remove_moderator:', width='stretch',
-                    )
-                if disable_submitted:
-                    if not verify_password(totp_disable_pw, _account['password_hash']):
-                        st.error('Incorrect password.', icon=':material/error:')
-                    elif clear_totp_secret(_email):
-                        st.success('Two-factor authentication disabled.', icon=':material/check_circle:')
-                        st.rerun()
-                    else:
-                        st.error('Could not disable two-factor authentication right now. '
-                                  'Try again shortly.', icon=':material/error:')
-            else:
-                st.caption('Add an extra step at sign-in using an authenticator app '
-                           '(Google Authenticator, Authy, 1Password, etc).')
-                # The secret lives in session_state ONLY from here until a
-                # real code confirms it below -- set_totp_secret() (db.py)
-                # is never called until that verification succeeds, so a
-                # user who starts setup and never finishes it leaves no
-                # half-configured 2FA behind in the database, just an
-                # abandoned value in this session that a rerun/new session
-                # never sees again.
-                if not st.session_state.get('totp_setup_secret'):
-                    if st.button('Set up 2FA', key='totp_setup_start',
-                                  icon=':material/qr_code_2:', width='stretch'):
-                        import pyotp
-                        st.session_state.totp_setup_secret = pyotp.random_base32()
-                        st.rerun()
-                else:
-                    import base64
-                    import io
-
-                    import pyotp
-                    import qrcode
-
-                    _secret = st.session_state.totp_setup_secret
-                    _uri = pyotp.TOTP(_secret).provisioning_uri(
-                        name=_email, issuer_name='Stroke Foundation Donor Forecasting',
-                    )
-                    _buf = io.BytesIO()
-                    qrcode.make(_uri).save(_buf, format='PNG')
-                    _qr_b64 = base64.b64encode(_buf.getvalue()).decode()
-                    st.markdown(
-                        f'<img src="data:image/png;base64,{_qr_b64}" width="176" '
-                        'style="display:block;margin:4px auto 10px;border-radius:4px;" />',
-                        unsafe_allow_html=True,
-                    )
-                    st.caption('Scan this with your authenticator app, or enter the key '
-                               f'manually: `{_secret}`')
-                    with st.form('totp_verify_form', border=False):
-                        setup_code = st.text_input(
-                            'Enter the 6-digit code to confirm', placeholder='123456',
-                            max_chars=6, key='totp_setup_code',
-                        )
-                        verify_submitted = st.form_submit_button(
-                            'Verify and enable', icon=':material/check:', width='stretch',
-                        )
-                    if st.button('Cancel', key='totp_setup_cancel'):
-                        st.session_state.totp_setup_secret = None
-                        st.rerun()
-                    if verify_submitted:
-                        if setup_code and pyotp.TOTP(_secret).verify(setup_code.strip(), valid_window=1):
-                            if set_totp_secret(_email, _secret):
-                                st.session_state.totp_setup_secret = None
-                                st.success('Two-factor authentication enabled.', icon=':material/check_circle:')
-                                st.rerun()
-                            else:
-                                st.error('Could not enable two-factor authentication right now. '
-                                          'Try again shortly.', icon=':material/error:')
-                        else:
-                            st.error('Incorrect code. Please try again.', icon=':material/error:')
+        _render_2fa_card(_email)
     else:
         with card(title='Sign-in security'):
             st.caption('Password and two-factor authentication are managed in your Google account, '
@@ -2854,4 +3009,14 @@ elif page == 'Profile':
 # regardless of which one matched.
 # ══════════════════════════════════════════════════════════════════════════════
 render_footer()
+
+# Matches the placeholder opened above (search _signing_in_overlay_ph) --
+# this is the actual end of the "Signing in" transition: everything this
+# run was going to render, page content and footer both, has now been
+# queued. Clearing the overlay here, not right after the post-login
+# restore step further up, is what keeps the browser from ever showing
+# a blank/half-built page in between.
+if _signing_in_overlay_ph is not None:
+    _signing_in_overlay_ph.empty()
+    st.session_state.is_signing_in = False
 
