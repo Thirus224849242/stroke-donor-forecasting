@@ -161,6 +161,14 @@ def inject_global_css():
     # extra, deliberately-narrow signal was added.
     _nav_loading = st.session_state.get('nav_loading', False)
     st.session_state.nav_loading = False
+    # Overview has its own skeleton placeholder (render_overview_skeleton(),
+    # shown from app.py's Overview page block) instead of this generic
+    # blur+spinner -- a prototype for whether a content-shaped skeleton
+    # reads better than blurring the real content for a fixed duration.
+    # Skipped here so the two loading treatments never stack on the one
+    # page that has both. Reverting the prototype is just deleting this
+    # line (and app.py's skeleton call) -- every other page is untouched.
+    _skip_nav_overlay = st.session_state.get('page') == 'Overview'
     # A fixed-duration animation (plays once, then settles into its 100%
     # end state permanently), not the earlier version's live
     # :has([data-testid="stStatusWidget"]) matching -- confirmed live,
@@ -193,7 +201,7 @@ def inject_global_css():
     [data-testid="stAppViewContainer"]::after {{
         animation: sf-spin 0.8s linear infinite, sf-nav-spin-fade 1.4s ease-in-out forwards;
     }}
-    """ if _nav_loading else ''
+    """ if (_nav_loading and not _skip_nav_overlay) else ''
     st.html(f"""
     <style>
     footer, [data-testid="stDecoration"], [data-testid="stAppDeployButton"],
@@ -1023,6 +1031,23 @@ def inject_global_css():
     }}
     </style>
     """)
+    # Skeleton-loader shimmer -- render_overview_skeleton()'s placeholder
+    # bars below use this class. A separate, minimal st.html() call for
+    # the same silent-failure-above-a-size-threshold reason as the splits
+    # above, not because this rule itself is large.
+    st.html(f"""
+    <style>
+    @keyframes sf-skeleton-shimmer {{
+        0% {{ background-position: 200% 0; }}
+        100% {{ background-position: -200% 0; }}
+    }}
+    .sf-skeleton {{
+        background: linear-gradient(90deg, {SURFACE2} 25%, {LINE} 37%, {SURFACE2} 63%);
+        background-size: 400% 100%;
+        animation: sf-skeleton-shimmer 1.6s ease-in-out infinite;
+    }}
+    </style>
+    """)
 
 
 # ── LAYOUT COMPONENTS ─────────────────────────────────────────────────────────
@@ -1770,6 +1795,54 @@ def plotly_cfg(fig, h=300):
 
 def chart(fig, h=300):
     st.plotly_chart(plotly_cfg(fig, h), width='stretch', config={'displayModeBar': False})
+
+
+def _skeleton_bar(width, height, margin_bottom=0):
+    st.markdown(
+        f'<div class="sf-skeleton" style="width:{width};height:{height}px;'
+        f'margin-bottom:{margin_bottom}px;"></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_overview_skeleton():
+    """Placeholder shapes matching the Overview page's real layout (a
+    4-tile KPI row, the main forecast chart card, then a 3-column row of
+    smaller cards) -- shown briefly in place of the generic blur/spinner
+    nav overlay while navigating TO Overview specifically, then swapped
+    for the real content in the same script run (see app.py's Overview
+    page block, right after its empty_state() guard).
+
+    Built from card()/st.container(horizontal=True)/st.columns() -- the
+    exact same layout primitives the real content below uses -- rather
+    than hand-rolled bordered divs, so the borders, spacing, and dark-
+    mode colours all come from the app's existing styling for free
+    instead of a second, separately-maintained copy of it.
+
+    Prototype: replaces the blur overlay for this one page only (see
+    inject_global_css()'s _skip_nav_overlay). If a content-shaped
+    skeleton doesn't actually read better than the blur it replaces
+    here, reverting is deleting this function, its app.py call site, and
+    un-skipping the blur gate for Overview -- nothing else depends on it.
+    """
+    with st.container(horizontal=True):
+        for _ in range(4):
+            with card():
+                _skeleton_bar('55%', 9, 14)
+                _skeleton_bar('75%', 20, 8)
+                _skeleton_bar('45%', 8)
+
+    with card():
+        _skeleton_bar('30%', 13, 8)
+        _skeleton_bar('50%', 9, 16)
+        _skeleton_bar('100%', 280)
+
+    col1, col2, col3 = st.columns([1, 1, 1])
+    for col, content_h in ((col1, 240), (col2, 240), (col3, 282)):
+        with col:
+            with card():
+                _skeleton_bar('40%', 12, 12)
+                _skeleton_bar('100%', content_h)
 
 
 def _peek_columns(f):

@@ -87,7 +87,8 @@ import ui
 from ui import (
     CACHED_RUN_BANNER_PAGES, card, chart, empty_state, inject_global_css, kpi,
     new_execution_log, overall_progress, page_header, pill, render_cached_run_banner,
-    render_footer, render_sidebar, render_startup_progress, stage_row, upload_slot,
+    render_footer, render_overview_skeleton, render_sidebar, render_startup_progress,
+    stage_row, upload_slot,
 )
 
 
@@ -1339,6 +1340,23 @@ elif page == 'Overview':
 
     if not st.session_state.pipeline_run:
         empty_state()
+
+    # Skeleton prototype, nav-triggered only (not on every rerun -- a
+    # widget tweak on this page would replay it otherwise) -- shown into
+    # its own placeholder, held for a short, deliberate, perceptible
+    # beat (real data is already sitting in session_state, so nothing is
+    # actually being waited on here; same reasoning as the 2FA QR
+    # placeholder's and complete_sign_out()'s equivalent pauses), then
+    # cleared so the real content below renders normally in this same
+    # run. inject_global_css()'s _skip_nav_overlay skips the generic
+    # blur/spinner for this one page so the two never stack.
+    if _nav_just_happened:
+        _skeleton_ph = st.empty()
+        with _skeleton_ph.container():
+            render_overview_skeleton()
+        import time
+        time.sleep(0.35)
+        _skeleton_ph.empty()
 
     forecast_df = st.session_state.forecast_df
     monthly     = st.session_state.monthly
