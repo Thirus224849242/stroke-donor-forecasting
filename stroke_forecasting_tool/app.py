@@ -48,7 +48,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from auth import complete_sign_out, handle_google_redirect, init_session_state, initials, render_login
+from auth import (
+    complete_sign_out, handle_google_redirect, init_session_state, initials, render_login,
+    render_transition_spinner,
+)
 from branding import TITLE_LOGO_PATH
 from db import (
     clear_totp_secret, create_local_account, db_configured, decide_access_request, delete_dashboard_run,
@@ -762,16 +765,29 @@ if not st.session_state.pipeline_run and db_configured():
     render_startup_progress(_startup_bar, done=True)
 
 # The "Signing in" state (set in auth.py's render_login(), survives the
-# st.rerun() into this run) ends here, unconditionally, whether or not the
-# block above actually ran -- this is the one place in the whole login
-# flow that's reached only once the authenticated app is about to render,
-# which is exactly the handoff point auth.py's render_login() comment
-# describes. When the block above did run, it was the visible "page
-# loader" continuing that same wait; when it didn't (no DB, or a run
-# already loaded this session), there was nothing to wait for, so nothing
-# needed to have shown in between -- either way, this is genuinely the
-# first moment the authenticated page has taken over.
-st.session_state.is_signing_in = False
+# st.rerun() into this run) used to end HERE, unconditionally, right
+# after the block above -- but that's before this run has rendered any
+# of the actual page content (KPIs, charts) for whichever page the user
+# lands on, which still has to happen below. Clearing the flag that
+# early meant nothing covered THAT render -- reported live as the
+# Overview page appearing blank for a moment, then its content
+# "flashing" in incrementally rather than appearing whole at once.
+# Instead, if we're still in this state, open the SAME full-screen
+# overlay used everywhere else in the login->dashboard transition (via
+# a placeholder held open, not cleared, for the rest of this script) --
+# matched by a single clearing point at the very end of the file, right
+# after render_footer(), which is the first point this run has actually
+# finished producing the whole page. Streamlit streams elements to the
+# browser in the order they're added, so everything queued in between
+# (sidebar, page content, footer) reaches the browser -- just hidden
+# under this fixed, opaque overlay -- before the "remove the overlay"
+# instruction does; the user only ever sees a blank instant, then the
+# complete, already-finished page, never the gap in between.
+_signing_in_overlay_ph = None
+if st.session_state.get('is_signing_in'):
+    _signing_in_overlay_ph = st.empty()
+    with _signing_in_overlay_ph.container():
+        render_transition_spinner('Signing in')
 
 page = st.session_state.page
 # page_header() (called once per page, inside each page's own routing
@@ -2986,4 +3002,14 @@ elif page == 'Profile':
 # regardless of which one matched.
 # ══════════════════════════════════════════════════════════════════════════════
 render_footer()
+
+# Matches the placeholder opened above (search _signing_in_overlay_ph) --
+# this is the actual end of the "Signing in" transition: everything this
+# run was going to render, page content and footer both, has now been
+# queued. Clearing the overlay here, not right after the post-login
+# restore step further up, is what keeps the browser from ever showing
+# a blank/half-built page in between.
+if _signing_in_overlay_ph is not None:
+    _signing_in_overlay_ph.empty()
+    st.session_state.is_signing_in = False
 

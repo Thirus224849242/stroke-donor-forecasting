@@ -148,15 +148,37 @@ def inject_global_css():
     # extra, deliberately-narrow signal was added.
     _nav_loading = st.session_state.get('nav_loading', False)
     st.session_state.nav_loading = False
+    # A fixed-duration animation (plays once, then settles into its 100%
+    # end state permanently), not the earlier version's live
+    # :has([data-testid="stStatusWidget"]) matching -- confirmed live,
+    # that version's blur/spinner kept reappearing on every FUTURE rerun
+    # too, not just the one nav transition it was meant for, on any page
+    # that also contains an st.fragment (the Profile page's 2FA card):
+    # a fragment's own reruns never call inject_global_css() again, so
+    # whatever stylesheet was active when the fragment was first reached
+    # -- including these rules, still live-matching stStatusWidget's
+    # reappearance on every later fragment rerun too -- just stays the
+    # active stylesheet indefinitely. A fixed-duration animation has no
+    # such failure mode: once its one iteration finishes (comfortably
+    # longer than any real page-to-page navigation in this app, which
+    # never re-fetches data mid-session), it's permanently inert
+    # regardless of anything that reruns afterwards, fragment or not.
     _nav_overlay_css = f"""
-    [data-testid="stAppViewContainer"]:has([data-testid="stStatusWidget"]) [data-testid="stMain"] {{
-        filter: blur(3px);
-        transition: filter 0.2s ease 0.2s;
-        pointer-events: none;
+    @keyframes sf-nav-blur-fade {{
+        0%, 15% {{ filter: blur(0); pointer-events: auto; }}
+        25%, 65% {{ filter: blur(3px); pointer-events: none; }}
+        100% {{ filter: blur(0); pointer-events: auto; }}
     }}
-    [data-testid="stAppViewContainer"]:has([data-testid="stStatusWidget"])::after {{
-        opacity: 1; animation: sf-spin 0.8s linear infinite;
-        transition: opacity 0.15s ease 0.2s;
+    @keyframes sf-nav-spin-fade {{
+        0%, 15% {{ opacity: 0; }}
+        25%, 65% {{ opacity: 1; }}
+        100% {{ opacity: 0; }}
+    }}
+    [data-testid="stMain"] {{
+        animation: sf-nav-blur-fade 1.4s ease-in-out forwards;
+    }}
+    [data-testid="stAppViewContainer"]::after {{
+        animation: sf-spin 0.8s linear infinite, sf-nav-spin-fade 1.4s ease-in-out forwards;
     }}
     """ if _nav_loading else ''
     st.html(f"""
@@ -206,34 +228,40 @@ def inject_global_css():
     /* Streamlit's own indicator during a script run is a tiny top-right
     spinner plus a per-element fade on whatever's stale -- easy to miss,
     per feedback "very primitive". Replaced with a centered spinner over
-    a blurred main content area instead, but ONLY for an actual sidebar
-    page-to-page navigation -- not for every rerun in general (a widget
-    tweak, a Data Pipeline upload, the pipeline's own multi-stage run all
-    rerun the script exactly the same way at the DOM level, which was the
-    real bug behind an earlier version of this showing up on Data
-    Pipeline too: :has([data-testid="stStatusWidget"]) alone can't tell
-    those apart from a nav click). The two rules that actually turn the
-    overlay on are therefore built conditionally in Python, in
+    a blurred main content area instead, but ONLY for an actual page
+    navigation (sidebar nav clicks, and the account menu's "My profile")
+    -- not for every rerun in general (a widget tweak, a Data Pipeline
+    upload, the pipeline's own multi-stage run all rerun the script
+    exactly the same way at the DOM level). The two rules that actually
+    turn the overlay on are therefore built conditionally in Python, in
     _nav_overlay_css above -- included in this CSS only on the one rerun
     immediately following a nav click (that one-shot session_state flag
-    is set in render_sidebar()'s nav-button handler, right before its
-    st.rerun()) -- and spliced in below. Everything here stays a no-op
-    (never matches) on every other rerun, since [data-testid=
-    "stStatusWidget"] briefly existing is no longer sufficient on its own.
-    [data-testid="stStatusWidget"] itself -- confirmed live (polled the
-    DOM every 300ms through an artificial delay) -- is only present while
-    a script is actually running: appears the instant a rerun starts,
-    removed a beat after the new content finishes streaming in, so no
-    extra JavaScript is needed to know when to show/hide this.
-    A short transition-delay, present only on the WAY IN (not the way
-    out), additionally debounces this: a nav rerun that somehow completes
-    in well under 200ms wouldn't visibly flash it either. filter:blur()
-    is scoped to [data-testid="stMain"] only, not the sidebar, so nav
-    stays usable while a background rerun is still settling; the spinner
-    itself is a ::after on [data-testid="stAppViewContainer"] (stMain's
-    ANCESTOR, not stMain itself) specifically so stMain's blur filter --
-    which also applies to any pseudo-element that were its own -- never
-    blurs the spinner along with the content behind it. */
+    is set right before that click's st.rerun(), in render_sidebar()'s
+    nav-button handler and page_header()'s "My profile" handler) -- and
+    spliced in below as a fixed-duration CSS animation, not a live
+    [data-testid="stStatusWidget"]-presence match. An earlier version did
+    use a live :has([data-testid="stStatusWidget"]) match here, gated the
+    same way -- but confirmed live, that failed on any page containing an
+    st.fragment (the Profile page's 2FA card): a fragment's own reruns
+    never call inject_global_css() again, so whatever stylesheet was
+    active when the fragment was first reached -- these rules included,
+    still live-matching stStatusWidget's reappearance on every later
+    fragment rerun too -- just stayed the active stylesheet indefinitely,
+    reappearing on every 2FA interaction rather than only the one nav
+    transition. A fixed-duration animation (plays once, ends at its own
+    100% keyframe, stays there regardless of anything rerunning
+    afterwards) has no such failure mode, and needs no
+    [data-testid="stStatusWidget"] involvement at all -- 1.4s comfortably
+    covers a real page-to-page navigation in this app (never a fresh data
+    fetch mid-session, so effectively just render time), and simply
+    finishes before a user could plausibly reach a moment later that
+    happens to rerun something else. filter:blur() is scoped to
+    [data-testid="stMain"] only, not the sidebar, so nav stays usable
+    while the animation is still playing; the spinner itself is a ::after
+    on [data-testid="stAppViewContainer"] (stMain's ANCESTOR, not stMain
+    itself) specifically so stMain's blur filter -- which also applies to
+    any pseudo-element that were its own -- never blurs the spinner along
+    with the content behind it. */
     @keyframes sf-spin {{ to {{ transform: translate(-50%, -50%) rotate(360deg); }} }}
     [data-testid="stMain"] {{
         transition: filter 0.2s ease 0s;
@@ -1273,24 +1301,21 @@ def page_header(eyebrow, title, sub='', meta='', info=None):
                 if st.button('My profile', key='topbar_profile_btn', icon=':material/account_circle:',
                               width='stretch'):
                     st.session_state.page = 'Profile'
-                    # NOT nav_loading = True here, unlike render_sidebar()'s own
-                    # nav buttons -- confirmed live this left the blur+spinner
-                    # overlay CSS permanently "armed" on the Profile page. That
-                    # overlay is a one-shot: inject_global_css() bakes its
-                    # blur/spin rules into the stylesheet for exactly one full
-                    # rerun, then omits them and resets the flag on the next.
-                    # But the Profile page's 2FA card is an st.fragment -- its
-                    # own reruns (Set up 2FA, Cancel, etc.) never reach
-                    # inject_global_css() at all, so whatever stylesheet was
-                    # last baked in (with the overlay rules still in it, from
-                    # THIS click) stays active for the rest of the session.
-                    # Since [data-testid="stStatusWidget"] reappears on every
-                    # rerun -- fragment reruns included -- that stale rule kept
-                    # re-matching and blurring the whole page on every 2FA
-                    # interaction, not just this one navigation. Profile has no
-                    # heavy data load like the dashboard pages nav_loading is
-                    # meant to cover, so skipping the effect here entirely is
-                    # the correct fix, not just a workaround.
+                    # Same nav_loading = True render_sidebar()'s own nav
+                    # buttons set -- reported live as inconsistent for this
+                    # navigation specifically not to show the same loading
+                    # transition every other page gets. This WAS worth
+                    # skipping in an earlier version, because the overlay
+                    # used to be a live [data-testid="stStatusWidget"] match
+                    # that stayed permanently armed on any page containing an
+                    # st.fragment (the Profile page's own 2FA card) -- see
+                    # inject_global_css()'s nav-overlay comment in ui.py for
+                    # the full failure mode. Now that it's a fixed-duration
+                    # animation instead (same file), it can't leak into later
+                    # fragment reruns regardless of which page sets this flag,
+                    # so there's no longer a reason for this navigation to
+                    # skip it.
+                    st.session_state.nav_loading = True
                     st.rerun()
 
                 if st.button('Log out', key='topbar_signout_btn', icon=':material/logout:',

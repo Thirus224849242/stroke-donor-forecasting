@@ -1,4 +1,4 @@
-import streamlit as st
+﻿import streamlit as st
 
 from branding import logo_data_uri
 from db import db_configured, get_local_account, get_user, request_access, upsert_approved_user, verify_password
@@ -234,21 +234,27 @@ def sign_out():
     #stFloatingOverlayPortal { display: none !important; }
     </style>
     """)
-    _render_transition_spinner('Signing out')
+    render_transition_spinner('Signing out')
     st.session_state['_signing_out'] = True
     st.rerun()
 
 
-def _render_transition_spinner(label: str):
+def render_transition_spinner(label: str):
     """Small branded loading indicator for the brief moment between two
     major auth-state transitions (signing in, signing out) -- rendered
     right before a screen-clearing st.rerun()/st.logout() so the browser
     has something clean to show instead of the previous screen's now-
     stale content lingering visibly until the next run's real content
-    arrives. Two call sites: complete_sign_out() below (dashboard ->
-    login) and render_login()'s successful-submit branch (login ->
-    dashboard) -- factored out here specifically so both directions of
-    that same transition look and behave identically.
+    arrives. Not private to this module (no leading underscore) since
+    app.py also holds this open, via its own placeholder, through the
+    authenticated page's own first render after signing in -- see its
+    is_signing_in handling near the top of the page-routing section.
+    Three call sites in total: complete_sign_out() below (dashboard ->
+    login), render_login()'s successful-submit branch (login ->
+    dashboard transition, the brief moment before the rerun), and
+    app.py (continuing that same dashboard transition through the new
+    page's own render) -- factored out here specifically so all of them
+    look and behave identically.
 
     position:fixed + inset:0 + an opaque background, not a plain
     height:80vh block flowing in normal document order -- confirmed live
@@ -305,7 +311,7 @@ def complete_sign_out():
     /* The account-menu popover (ui.py's page_header()) renders its open
     body into #stFloatingOverlayPortal, appended near document.body, not
     as a normal descendant of the page -- confirmed live, its stacking
-    layer sits ABOVE _render_transition_spinner()'s full-viewport overlay
+    layer sits ABOVE render_transition_spinner()'s full-viewport overlay
     (a plain z-index on the overlay isn't enough to cover something in a
     different, higher portal layer -- and #stFloatingOverlayPortal is NOT
     the same element as [data-testid="portal"], a separate, unrelated
@@ -317,7 +323,7 @@ def complete_sign_out():
     #stFloatingOverlayPortal { display: none !important; }
     </style>
     """)
-    _render_transition_spinner('Signing out')
+    render_transition_spinner('Signing out')
     # Clearing session_state below is just dict assignment -- no real wait
     # to cover -- so without a deliberate pause here, this whole screen
     # flashed past in well under a frame and landed straight on the login
@@ -448,7 +454,7 @@ def _render_auth_shell():
 
 def _render_auth_footer():
     st.markdown(
-        '<div class="sf-login-footer">Stroke Foundation of Australia · '
+        '<div class="sf-login-footer">Stroke Foundation of Australia Â· '
         'Face-to-Face Regular Giving Program</div>',
         unsafe_allow_html=True,
     )
@@ -467,7 +473,7 @@ def render_login():
     the next run's dashboard (sidebar included) started streaming in
     underneath/around it -- a broken hybrid of both screens at once,
     not a clean transition. Clearing the placeholder and rendering
-    _render_transition_spinner() before the rerun (same technique
+    render_transition_spinner() before the rerun (same technique
     complete_sign_out() uses for the reverse transition) means the
     browser sees login page -> clean spinner -> dashboard instead.
 
@@ -668,7 +674,7 @@ def render_login():
 
     if just_signed_in:
         page.empty()
-        _render_transition_spinner('Signing in')
+        render_transition_spinner('Signing in')
         st.rerun()
     st.stop()
 
