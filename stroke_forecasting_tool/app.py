@@ -492,6 +492,155 @@ def _tables_to_csv(tables: dict) -> str:
     return buf.getvalue()
 
 
+@st.fragment
+def _render_2fa_card(_email):
+    """The Profile page's "Two-factor authentication" card, as its own
+    fragment -- every interaction inside it (Set up 2FA, Cancel, Verify
+    and enable, Disable 2FA) reruns only this card, not the whole script.
+    Without this, Streamlit's normal full-script rerun behaviour fades
+    every OTHER element on the page while it re-executes -- reported live
+    as "the whole screen turning translucent white" on both Set up 2FA
+    and Cancel, exactly the full-page loading effect the local QR
+    spinner below was meant to avoid in the first place; a spinner inside
+    a fragment stays genuinely local since nothing outside the fragment
+    ever re-renders at all.
+
+    _email is the only thing threaded in from the Profile page's own
+    render -- everything else (the account row, whether 2FA is already
+    on) is read fresh from the database on every fragment run rather than
+    passed in as a snapshot, so a fragment-scoped rerun after enabling/
+    disabling always reflects the real current state, not a stale value
+    captured before this fragment last ran. st.rerun(scope='fragment')
+    (not the plain, whole-app st.rerun() used everywhere else in this
+    file) is what keeps those follow-up reruns local too.
+    """
+    _account = get_local_account(_email)
+    with card(title='Two-factor authentication'):
+        _totp_enabled = bool(_account and _account.get('totp_secret'))
+        if _totp_enabled:
+            st.success('Two-factor authentication is enabled.', icon=':material/check_circle:')
+            st.caption('Every sign-in will ask for a code from your authenticator app.')
+            # A second confirming step (current password, inside its own
+            # form) before actually turning it off -- same "prove you're
+            # still you" reasoning as Change password re-checking the
+            # current password above, for a change that lowers this
+            # account's security.
+            with st.form('totp_disable_form', border=False):
+                totp_disable_pw = st.text_input(
+                    'Enter your password to disable', type='password', key='totp_disable_pw',
+                )
+                disable_submitted = st.form_submit_button(
+                    'Disable 2FA', icon=':material/remove_moderator:', width='stretch',
+                )
+            if disable_submitted:
+                if not verify_password(totp_disable_pw, _account['password_hash']):
+                    st.error('Incorrect password.', icon=':material/error:')
+                elif clear_totp_secret(_email):
+                    st.success('Two-factor authentication disabled.', icon=':material/check_circle:')
+                    st.rerun(scope='fragment')
+                else:
+                    st.error('Could not disable two-factor authentication right now. '
+                              'Try again shortly.', icon=':material/error:')
+        else:
+            st.caption('Add an extra step at sign-in using an authenticator app '
+                       '(Google Authenticator, Authy, 1Password, etc).')
+            # The secret lives in session_state ONLY from here until a
+            # real code confirms it below -- set_totp_secret() (db.py)
+            # is never called until that verification succeeds, so a
+            # user who starts setup and never finishes it leaves no
+            # half-configured 2FA behind in the database, just an
+            # abandoned value in this session that a rerun/new session
+            # never sees again.
+            if not st.session_state.get('totp_setup_secret'):
+                # A placeholder, not a bare st.button() call, specifically so
+                # a successful click can clear the button back out again
+                # below -- st.button() always renders its widget regardless
+                # of the True/False it returns, so without this the button
+                # would stay sitting on screen, now doing nothing, right
+                # alongside the QR code that falls through and renders
+                # underneath it in this same pass.
+                _setup_btn_ph = st.empty()
+                if _setup_btn_ph.button('Set up 2FA', key='totp_setup_start',
+                                          icon=':material/qr_code_2:', width='stretch'):
+                    try:
+                        import pyotp
+                        st.session_state.totp_setup_secret = pyotp.random_base32()
+                        _setup_btn_ph.empty()
+                        # No st.rerun() -- falls straight through to the
+                        # generation block below in this SAME fragment pass
+                        # (fragments rerun automatically on their own widget
+                        # clicks regardless, same as the whole app normally
+                        # would, but scoped to just this card).
+                    except Exception:
+                        st.error('Two-factor setup is unavailable right now. Try again shortly, '
+                                  'or contact an administrator.', icon=':material/error:')
+
+            if st.session_state.get('totp_setup_secret'):
+                # Everything from here on can fail (a missing/broken pyotp or
+                # qrcode install, an unpicklable secret, etc) -- caught so a
+                # setup-time error shows as a normal in-card message instead of
+                # an uncaught traceback replacing the whole page. Cancel is
+                # rendered whether generation succeeded or not, so a failure
+                # here never leaves the user stuck without a way back.
+                _qr_error = False
+                try:
+                    # Contained within this card via st.spinner() -- Streamlit's
+                    # own component-level loading indicator, rendered exactly
+                    # where it's called rather than as a full-page overlay, so
+                    # the rest of the Profile page (nav, other cards) stays
+                    # visually stable while this runs. Wraps only the actual
+                    # generation, not the st.image()/caption below, so the
+                    # spinner is gone by the time the QR code appears.
+                    with st.spinner('Generating QR code...'):
+                        import io
+
+                        import pyotp
+                        import qrcode
+
+                        _secret = st.session_state.totp_setup_secret
+                        _uri = pyotp.TOTP(_secret).provisioning_uri(
+                            name=_email, issuer_name='Stroke Foundation Donor Forecasting',
+                        )
+                        _buf = io.BytesIO()
+                        qrcode.make(_uri).save(_buf, format='PNG')
+                        _buf.seek(0)
+                    st.image(_buf, width=176)
+                    st.caption('Scan this with your authenticator app, or enter the key '
+                               f'manually: `{_secret}`')
+                except Exception:
+                    _qr_error = True
+                    st.error('Could not generate a setup code right now. Try again shortly, '
+                              'or contact an administrator.', icon=':material/error:')
+
+                if not _qr_error:
+                    with st.form('totp_verify_form', border=False):
+                        setup_code = st.text_input(
+                            'Enter the 6-digit code to confirm', placeholder='123456',
+                            max_chars=6, key='totp_setup_code',
+                        )
+                        verify_submitted = st.form_submit_button(
+                            'Verify and enable', icon=':material/check:', width='stretch',
+                        )
+                else:
+                    verify_submitted = False
+
+                if st.button('Cancel', key='totp_setup_cancel'):
+                    st.session_state.totp_setup_secret = None
+                    st.rerun(scope='fragment')
+                if verify_submitted:
+                    _secret = st.session_state.totp_setup_secret
+                    if setup_code and pyotp.TOTP(_secret).verify(setup_code.strip(), valid_window=1):
+                        if set_totp_secret(_email, _secret):
+                            st.session_state.totp_setup_secret = None
+                            st.success('Two-factor authentication enabled.', icon=':material/check_circle:')
+                            st.rerun(scope='fragment')
+                        else:
+                            st.error('Could not enable two-factor authentication right now. '
+                                      'Try again shortly.', icon=':material/error:')
+                    else:
+                        st.error('Incorrect code. Please try again.', icon=':material/error:')
+
+
 init_session_state()
 
 # layout is now a fixed 'wide', not conditional on authenticated the way
@@ -2770,136 +2919,7 @@ elif page == 'Profile':
                     st.error('Could not update your password right now. Try again shortly.',
                               icon=':material/error:')
 
-        with card(title='Two-factor authentication'):
-            _totp_enabled = bool(_account and _account.get('totp_secret'))
-            if _totp_enabled:
-                st.success('Two-factor authentication is enabled.', icon=':material/check_circle:')
-                st.caption('Every sign-in will ask for a code from your authenticator app.')
-                # A second confirming step (current password, inside its own
-                # form) before actually turning it off -- same "prove you're
-                # still you" reasoning as Change password re-checking the
-                # current password above, for a change that lowers this
-                # account's security.
-                with st.form('totp_disable_form', border=False):
-                    totp_disable_pw = st.text_input(
-                        'Enter your password to disable', type='password', key='totp_disable_pw',
-                    )
-                    disable_submitted = st.form_submit_button(
-                        'Disable 2FA', icon=':material/remove_moderator:', width='stretch',
-                    )
-                if disable_submitted:
-                    if not verify_password(totp_disable_pw, _account['password_hash']):
-                        st.error('Incorrect password.', icon=':material/error:')
-                    elif clear_totp_secret(_email):
-                        st.success('Two-factor authentication disabled.', icon=':material/check_circle:')
-                        st.rerun()
-                    else:
-                        st.error('Could not disable two-factor authentication right now. '
-                                  'Try again shortly.', icon=':material/error:')
-            else:
-                st.caption('Add an extra step at sign-in using an authenticator app '
-                           '(Google Authenticator, Authy, 1Password, etc).')
-                # The secret lives in session_state ONLY from here until a
-                # real code confirms it below -- set_totp_secret() (db.py)
-                # is never called until that verification succeeds, so a
-                # user who starts setup and never finishes it leaves no
-                # half-configured 2FA behind in the database, just an
-                # abandoned value in this session that a rerun/new session
-                # never sees again.
-                if not st.session_state.get('totp_setup_secret'):
-                    # A placeholder, not a bare st.button() call, specifically so
-                    # a successful click can clear the button back out again
-                    # below -- st.button() always renders its widget regardless
-                    # of the True/False it returns, so without this the button
-                    # would stay sitting on screen, now doing nothing, right
-                    # alongside the QR code that falls through and renders
-                    # underneath it in this same pass (confirmed live: exactly
-                    # that happened before this placeholder was added).
-                    _setup_btn_ph = st.empty()
-                    if _setup_btn_ph.button('Set up 2FA', key='totp_setup_start',
-                                              icon=':material/qr_code_2:', width='stretch'):
-                        try:
-                            import pyotp
-                            st.session_state.totp_setup_secret = pyotp.random_base32()
-                            _setup_btn_ph.empty()
-                            # No st.rerun() -- falls straight through to the
-                            # generation block below in this SAME script pass,
-                            # rather than ending this run early just to trigger a
-                            # second one that immediately re-enters this branch
-                            # anyway. Confirmed live: the perceptible "freeze"
-                            # this section was reported to have was mostly that
-                            # extra full-page rerun round trip, not the (genuinely
-                            # sub-second) QR generation itself -- cutting it out
-                            # is what actually makes st.spinner() below meaningful
-                            # to see rather than flashing across two page loads.
-                        except Exception:
-                            st.error('Two-factor setup is unavailable right now. Try again shortly, '
-                                      'or contact an administrator.', icon=':material/error:')
-
-                if st.session_state.get('totp_setup_secret'):
-                    # Everything from here on can fail (a missing/broken pyotp or
-                    # qrcode install, an unpicklable secret, etc) -- caught so a
-                    # setup-time error shows as a normal in-card message instead of
-                    # an uncaught traceback replacing the whole page. Cancel is
-                    # rendered whether generation succeeded or not, so a failure
-                    # here never leaves the user stuck without a way back.
-                    _qr_error = False
-                    try:
-                        # Contained within this card via st.spinner() -- Streamlit's
-                        # own component-level loading indicator, rendered exactly
-                        # where it's called rather than as a full-page overlay, so
-                        # the rest of the Profile page (nav, other cards) stays
-                        # visually stable while this runs. Wraps only the actual
-                        # generation, not the st.image()/caption below, so the
-                        # spinner is gone by the time the QR code appears.
-                        with st.spinner('Generating QR code...'):
-                            import io
-
-                            import pyotp
-                            import qrcode
-
-                            _secret = st.session_state.totp_setup_secret
-                            _uri = pyotp.TOTP(_secret).provisioning_uri(
-                                name=_email, issuer_name='Stroke Foundation Donor Forecasting',
-                            )
-                            _buf = io.BytesIO()
-                            qrcode.make(_uri).save(_buf, format='PNG')
-                            _buf.seek(0)
-                        st.image(_buf, width=176)
-                        st.caption('Scan this with your authenticator app, or enter the key '
-                                   f'manually: `{_secret}`')
-                    except Exception:
-                        _qr_error = True
-                        st.error('Could not generate a setup code right now. Try again shortly, '
-                                  'or contact an administrator.', icon=':material/error:')
-
-                    if not _qr_error:
-                        with st.form('totp_verify_form', border=False):
-                            setup_code = st.text_input(
-                                'Enter the 6-digit code to confirm', placeholder='123456',
-                                max_chars=6, key='totp_setup_code',
-                            )
-                            verify_submitted = st.form_submit_button(
-                                'Verify and enable', icon=':material/check:', width='stretch',
-                            )
-                    else:
-                        verify_submitted = False
-
-                    if st.button('Cancel', key='totp_setup_cancel'):
-                        st.session_state.totp_setup_secret = None
-                        st.rerun()
-                    if verify_submitted:
-                        _secret = st.session_state.totp_setup_secret
-                        if setup_code and pyotp.TOTP(_secret).verify(setup_code.strip(), valid_window=1):
-                            if set_totp_secret(_email, _secret):
-                                st.session_state.totp_setup_secret = None
-                                st.success('Two-factor authentication enabled.', icon=':material/check_circle:')
-                                st.rerun()
-                            else:
-                                st.error('Could not enable two-factor authentication right now. '
-                                          'Try again shortly.', icon=':material/error:')
-                        else:
-                            st.error('Incorrect code. Please try again.', icon=':material/error:')
+        _render_2fa_card(_email)
     else:
         with card(title='Sign-in security'):
             st.caption('Password and two-factor authentication are managed in your Google account, '
