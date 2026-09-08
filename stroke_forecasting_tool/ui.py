@@ -892,9 +892,9 @@ def inject_global_css():
     #
     # The rule itself: render_cached_run_banner() (below) emits the
     # banner's own markdown div, THEN one or two st.html() <script> calls
-    # right after it (the always-on mousemove/ResizeObserver listener,
-    # plus a one-shot "show now" call on a nav-triggered render) -- each
-    # in its own stElementContainer. The banner-gap-fix rule above (in the
+    # right after it (the always-on mousemove listener, plus a one-shot
+    # "show now" call on a nav-triggered render) -- each in its own
+    # stElementContainer. The banner-gap-fix rule above (in the
     # first call) only ever targeted the markdown div's wrapper via :has()
     # -- the script wrappers aren't stMarkdown, so that rule never matched
     # them, and they kept counting as real flex children: same zero-
@@ -932,6 +932,55 @@ def inject_global_css():
     }}
     </style>
     """)
+    # Keeps --sf-sidebar-w matched to the sidebar's REAL current width
+    # (0 when collapsed; its actual rendered width otherwise, including a
+    # user drag-resize) rather than a hardcoded 300px -- every position:
+    # fixed element that needs to sit beside the sidebar without
+    # overlapping/underlapping it (render_cached_run_banner()'s own left
+    # offset, render_footer(), render_nav_transition_overlay()) reads
+    # this same variable. Lives here, not inside any one of those
+    # elements, specifically so it's tracked from the very first
+    # authenticated page render onward, on every page, regardless of
+    # which of those elements happens to render on it -- previously this
+    # ran only inside render_cached_run_banner()'s own script, so a
+    # session that never showed that banner never ran it at all, leaving
+    # every OTHER consumer (the footer in particular, which renders on
+    # literally every page) stuck on the var(..., 300px) fallback the
+    # whole time instead of tracking a collapsed/resized sidebar --
+    # reported live as the footer not expanding when the sidebar was
+    # collapsed. Self-guarded (window.__sfSidebarWidthInit) the same way
+    # as the banner's own always-on script, so inject_global_css()
+    # running again on every rerun doesn't stack a second ResizeObserver/
+    # MutationObserver pair on top of the first.
+    st.html("""
+    <script>
+    (function() {
+        if (window.__sfSidebarWidthInit) return;
+        window.__sfSidebarWidthInit = true;
+        var roTarget = null;
+        var ro = new ResizeObserver(updateSidebarWidthVar);
+        function updateSidebarWidthVar() {
+            var sb = document.querySelector('[data-testid="stSidebar"]');
+            if (sb && sb !== roTarget) {
+                if (roTarget) ro.unobserve(roTarget);
+                ro.observe(sb);
+                roTarget = sb;
+            }
+            var expanded = sb ? sb.getAttribute('aria-expanded') !== 'false' : false;
+            var w = (sb && expanded) ? sb.getBoundingClientRect().width : 0;
+            document.documentElement.style.setProperty('--sf-sidebar-w', w + 'px');
+        }
+        updateSidebarWidthVar();
+        // subtree + body-level (not tied to one sidebar DOM node) so a
+        // rerun that swaps the sidebar element for a new one still gets
+        // picked up -- updateSidebarWidthVar() re-queries fresh every
+        // call and re-targets the ResizeObserver itself when it does.
+        new MutationObserver(updateSidebarWidthVar).observe(document.body, {
+            subtree: true, attributes: true, attributeFilter: ['aria-expanded', 'style'],
+        });
+    })();
+    </script>
+    """, unsafe_allow_javascript=True)
 
 
 # ── LAYOUT COMPONENTS ─────────────────────────────────────────────────────────
@@ -1332,40 +1381,6 @@ def render_cached_run_banner(loaded_str: str, nav_triggered: bool = False):
         document.addEventListener('mousemove', function(e) {
             if (e.clientY <= 2) window.__sfBannerShow();
         });
-
-        // Keeps --sf-sidebar-w (the banner's left offset, referenced by
-        // the CSS rule in inject_global_css()) matched to the sidebar's
-        // REAL current width rather than a hardcoded 300px. Reported
-        // live: with the sidebar collapsed a fixed 300px left a blank
-        // gap at the left edge (fixed first by a CSS-only :has() rule
-        // toggling left:0), but then ALSO reported short/misaligned
-        // with the sidebar OPEN -- Streamlit's sidebar has a drag
-        // handle on its right edge, so its true rendered width can
-        // differ from the 300px default once a user has resized it,
-        // which a hardcoded value can never track. Reading the real
-        // width here fixes both cases with one mechanism instead of
-        // two (this replaces that :has() rule entirely).
-        var roTarget = null;
-        var ro = new ResizeObserver(updateSidebarWidthVar);
-        function updateSidebarWidthVar() {
-            var sb = document.querySelector('[data-testid="stSidebar"]');
-            if (sb && sb !== roTarget) {
-                if (roTarget) ro.unobserve(roTarget);
-                ro.observe(sb);
-                roTarget = sb;
-            }
-            var expanded = sb ? sb.getAttribute('aria-expanded') !== 'false' : false;
-            var w = (sb && expanded) ? sb.getBoundingClientRect().width : 0;
-            document.documentElement.style.setProperty('--sf-sidebar-w', w + 'px');
-        }
-        updateSidebarWidthVar();
-        // subtree + body-level (not tied to one sidebar DOM node) so a
-        // rerun that swaps the sidebar element for a new one still gets
-        // picked up -- updateSidebarWidthVar() re-queries fresh every
-        // call and re-targets the ResizeObserver itself when it does.
-        new MutationObserver(updateSidebarWidthVar).observe(document.body, {
-            subtree: true, attributes: true, attributeFilter: ['aria-expanded', 'style'],
-        });
     })();
     </script>
     """, unsafe_allow_javascript=True)
@@ -1389,23 +1404,38 @@ def render_footer():
     has enough reserved space at the bottom that the fixed footer can
     never sit on top of it, footer pinned AND nothing hidden behind it.
 
-    A solid navy band, full-bleed to both viewport edges (position:fixed
-    + left/right:0, not the earlier version's negative-margin trick --
-    that only cancelled .block-container's own padding, which no longer
-    matters now that this is fixed to the viewport rather than flowing
-    inside .block-container at all) -- reported live that an earlier
-    version (a thin hairline border above plain page-coloured text)
-    didn't actually read as a footer at all, just more page content, and
-    was too tall for what little it said. This is deliberately a single
-    compact row, not stacked lines, and deliberately fixed navy in BOTH
-    light and dark mode -- not the dynamic {{SURFACE}}/{{TEXT}} palette
-    the rest of the page follows -- same reasoning as the sidebar
-    elsewhere in this file: a footer band, like a sidebar, reads as a
-    constant brand element, not page content that should flip with the
-    theme toggle. z-index comfortably above ordinary page content but
-    below every purpose-built loading overlay in this app (999999999)
-    and the cached-run banner (999999) -- neither ever needs to show
-    through the footer, and the footer never needs to show through them.
+    A solid navy band, full-bleed to the RIGHT viewport edge only
+    (position:fixed + right:0, not the earlier version's negative-margin
+    trick -- that only cancelled .block-container's own padding, which
+    no longer matters now that this is fixed to the viewport rather than
+    flowing inside .block-container at all) -- reported live that an
+    earlier version (a thin hairline border above plain page-coloured
+    text) didn't actually read as a footer at all, just more page
+    content, and was too tall for what little it said. This is
+    deliberately a single compact row, not stacked lines, and
+    deliberately fixed navy in BOTH light and dark mode -- not the
+    dynamic {{SURFACE}}/{{TEXT}} palette the rest of the page follows --
+    same reasoning as the sidebar elsewhere in this file: a footer band,
+    like a sidebar, reads as a constant brand element, not page content
+    that should flip with the theme toggle. z-index comfortably above
+    ordinary page content but below every purpose-built loading overlay
+    in this app (999999999) and the cached-run banner (999999) --
+    neither ever needs to show through the footer, and the footer never
+    needs to show through them.
+
+    left:var(--sf-sidebar-w, 300px), not left:0 -- same CSS variable
+    inject_global_css() maintains (a ResizeObserver + MutationObserver
+    pair, self-guarded, running on every authenticated page from the
+    first render onward -- tracking the sidebar's real current width, 0
+    when collapsed) and render_cached_run_banner()/
+    render_nav_transition_overlay() already reuse, so this band gets the
+    exact same behaviour as the banner for free: it starts past the
+    sidebar's right edge while the sidebar is open (never overlapping
+    it) and expands to the full viewport width the instant the sidebar
+    collapses, live, with no separate tracking logic of its own -- per
+    explicit request, matching the banner's behaviour exactly rather
+    than staying full-bleed-left and overlapping/underlapping the
+    sidebar depending on its state.
 
     Plain inline styles on the elements themselves, not a new class
     added to inject_global_css()'s stylesheet -- deliberately, after
@@ -1431,7 +1461,7 @@ def render_footer():
         if _logo_uri else ''
     )
     st.markdown(f"""
-    <div style="position:fixed; left:0; right:0; bottom:0; z-index:999; padding:12px 2rem 16px;
+    <div style="position:fixed; left:var(--sf-sidebar-w, 300px); right:0; bottom:0; z-index:999; padding:12px 2rem 16px;
         background:#1E1E5F; display:flex; flex-wrap:wrap; align-items:center;
         justify-content:space-between; gap:10px 24px;">
         <div style="display:flex; align-items:center; gap:9px;">
@@ -1728,12 +1758,14 @@ def render_nav_transition_overlay():
     content is identical page to page, so Streamlit's own diffing
     reconciles it cleanly) and shouldn't go dark/unusable for a
     transition that's really only ever about the main content area.
-    Same CSS variable render_cached_run_banner() already tracks (via a
-    ResizeObserver in its own <script>, keeping it matched to the
-    sidebar's REAL current width -- collapsed, default, or user-
+    Same CSS variable inject_global_css() tracks (via a self-guarded
+    ResizeObserver + MutationObserver pair running on every
+    authenticated page from the first render onward, keeping it matched
+    to the sidebar's REAL current width -- collapsed, default, or user-
     resized) for the identical reason a fixed left offset can't track
-    any of those; the var(..., 300px) fallback covers every page that
-    script hasn't run on yet with the sidebar's actual default width.
+    any of those; the var(..., 300px) fallback only ever matters for the
+    fraction-of-a-frame gap before that script's own first call sets the
+    real value.
 
     width: calc(100% - ...), not right:0 -- reported live (confirmed via
     getBoundingClientRect()), this element's rendered width always
