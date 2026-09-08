@@ -955,9 +955,24 @@ render_sidebar()
 # sandwiching the real one. Placed before the cached-run banner below
 # so the overlay also covers that during the transition -- the banner
 # still reveals itself right as the transition ends, same as before.
-_nav_overlay_ph = None
+#
+# The placeholder itself is created UNCONDITIONALLY, on every single
+# run -- reported live (surviving a full browser + server restart, so
+# not a stale-session artifact): opening the account-menu popover is
+# its own rerun, separate from the later rerun the "My profile" button
+# itself triggers, and that first rerun does NOT set nav_loading, so
+# the placeholder used to not exist for it at all. That made two
+# back-to-back reruns -- one without an element at this script
+# position, one with -- structurally different at the exact same
+# position in the element tree, which is the kind of mismatch that can
+# break the frontend's reconciliation between runs instead of cleanly
+# replacing one run's elements with the next's, however it manifests
+# for a given browser/OS/network's timing. Keeping this element's
+# EXISTENCE unconditional (only its CONTENT and the sleep/clear below
+# are conditional) means every rerun has the identical structure at
+# this position regardless of what triggered it.
+_nav_overlay_ph = st.empty()
 if _nav_just_happened:
-    _nav_overlay_ph = st.empty()
     with _nav_overlay_ph.container():
         render_nav_transition_overlay()
 
@@ -3114,8 +3129,12 @@ if _signing_in_overlay_ph is not None:
 # The brief sleep first is a deliberate, perceptible hold, not a
 # readiness check -- the page above has already fully finished
 # rendering by this point; same reasoning as the 2FA QR placeholder's
-# and complete_sign_out()'s equivalent pauses.
-if _nav_overlay_ph is not None:
+# and complete_sign_out()'s equivalent pauses. Gated on _nav_just_happened,
+# not "is the placeholder not None" -- the placeholder itself now always
+# exists (see where it's created, right after render_sidebar()), so that
+# check would otherwise be true, and this sleep would fire, on every
+# single rerun rather than only nav-triggered ones.
+if _nav_just_happened:
     import time
     time.sleep(0.35)
     _nav_overlay_ph.empty()
