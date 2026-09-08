@@ -283,7 +283,7 @@ def render_transition_spinner(label: str):
     that opened this overlay (app.py calls it after this placeholder is
     created). A comfortably higher z-index here wins regardless of
     ordering, without needing to touch the banner's own value."""
-    st.markdown(f"""
+    st.html(f"""
     <div style="position:fixed;inset:0;z-index:999999999;background:#FFFFFF;
         display:flex;align-items:center;justify-content:center;">
         <div style="text-align:center;">
@@ -297,7 +297,7 @@ def render_transition_spinner(label: str):
         </div>
     </div>
     <style>@keyframes sf-transition-spin {{ to {{ transform: rotate(360deg); }} }}</style>
-    """, unsafe_allow_html=True)
+    """)
 
 
 def complete_sign_out():
@@ -484,9 +484,24 @@ def render_login():
     the next run's dashboard (sidebar included) started streaming in
     underneath/around it -- a broken hybrid of both screens at once,
     not a clean transition. Clearing the placeholder and rendering
-    render_transition_spinner() before the rerun (same technique
-    complete_sign_out() uses for the reverse transition) means the
-    browser sees login page -> clean spinner -> dashboard instead.
+    render_transition_spinner() before the rerun means the browser sees
+    login page -> clean spinner -> dashboard instead.
+
+    render_transition_spinner() is painted BEFORE page.empty(), not
+    after -- reported live as an intermittent thin green line (and a
+    flash of the "Signing in..." caption) visible in/around the spinner
+    for a moment right at submit: page still holds the sticky startup
+    bar (render_startup_progress()/_login_bar below) at that instant,
+    and page.empty() clearing it plus this function's own opaque overlay
+    appearing are two separate forward-messages the frontend doesn't
+    always finish reconciling on the same visual frame -- the still-
+    live bar can paint through the overlay while it's mid-fade-in.
+    Painting the overlay FIRST, while the old page is still fully intact
+    underneath, means it's already fully opaque before anything gets
+    cleared -- page.empty() right after is then invisible, covered by
+    the overlay already sitting on top. Same ordering principle
+    complete_sign_out() already uses (paint the covering overlay against
+    still-live content, not after clearing it).
 
     just_signed_in is set (not an immediate st.rerun() call) from deep
     inside the nested form-handling logic below, then acted on ONLY
@@ -684,8 +699,8 @@ def render_login():
         _render_auth_footer()
 
     if just_signed_in:
-        page.empty()
         render_transition_spinner('Signing in')
+        page.empty()
         st.rerun()
     st.stop()
 
