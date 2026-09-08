@@ -217,10 +217,21 @@ def inject_global_css():
     Widened well past normal desktop widths so it only kicks in on very
     large/ultrawide displays, instead of on every ordinary wide window. */
     .block-container {{
-        padding-top: 0.75rem !important; padding-bottom: 2.5rem !important;
+        padding-top: 0.75rem !important; padding-bottom: 4.5rem !important;
         padding-left: 2rem !important; padding-right: 2rem !important;
         max-width: 1920px !important; margin: 0 auto !important;
     }}
+    /* padding-bottom was 2.5rem -- bumped to reserve room for the fixed
+    footer render_footer() now pins to the bottom of the viewport
+    (ui.py) rather than letting it flow naturally after the last card.
+    Without this, the fixed footer would sit on top of whatever
+    content happened to end up at the bottom of a page -- exactly the
+    problem an earlier, non-fixed version of the footer existed to
+    avoid, reintroduced here on purpose per a later explicit request to
+    pin it, so this padding is what keeps that original problem from
+    coming back along with it. ~4.5rem comfortably clears the footer's
+    own height (its 12px/16px top/bottom padding plus its ~18px-tall
+    content) with room to spare. */
     /* padding-top was 2.5rem (40px) -- reported live as wasted empty
     space above every page's title, most obviously with the cached-run
     banner retracted (it's position:fixed and hidden above the
@@ -921,64 +932,6 @@ def inject_global_css():
     }}
     </style>
     """)
-    # render_nav_transition_overlay()'s container -- position:fixed+inset:0+
-    # opaque background, same proven pattern as auth.py's
-    # render_transition_spinner(), reused here for regular page navigation.
-    # Confirmed live (reproduced via a temporary long delay): navigating
-    # between two structurally different pages leaves Streamlit's own
-    # stale-content handling showing BOTH the previous page's still-
-    # lingering elements (including a just-opened account-menu popover,
-    # which renders through a portal near the end of <body>, entirely
-    # outside whatever a blur-the-main-content approach could ever reach)
-    # and the new page's freshly-streamed elements at once, until the run
-    # fully finishes -- reported live as a duplicated page header/subtitle
-    # sandwiching the real one. A CSS filter:blur() on just
-    # [data-testid="stMain"] (the earlier approach) cannot fix this: it
-    # never covered the popover's portal, and blur alone doesn't make
-    # duplicated TEXT illegible. An actual opaque, fixed cover (z-index
-    # 999999999, same reasoning as render_transition_spinner()'s own
-    # docstring -- comfortably above the cached-run banner's 999999 and
-    # everything else in this app) hides ALL of it regardless of DOM
-    # order, exactly like it already does for auth transitions.
-    #
-    # left: var(--sf-sidebar-w, 300px), not inset:0 -- reported live,
-    # covering the FULL viewport also swallowed the sidebar, which never
-    # actually has this bug (its NAV_SECTIONS content is identical page
-    # to page, so Streamlit's own diffing reconciles it cleanly with no
-    # stale duplication) and shouldn't go dark/unusable for a transition
-    # that's really only ever about the main content area. Same CSS
-    # variable render_cached_run_banner() already tracks (via a
-    # ResizeObserver in its own <script>, keeping it matched to the
-    # sidebar's REAL current width -- collapsed, default, or user-
-    # resized) for the identical reason: a fixed left offset can't track
-    # any of those. That script only runs on pages the banner itself can
-    # appear on, but the var(..., 300px) fallback here covers every
-    # other page with the sidebar's actual default width regardless.
-    #
-    # width: calc(100% - ...), not right:0 -- reported live, the spinner
-    # inside rendered off-centre to the right, spilling past the actual
-    # right edge of the screen. Confirmed via getBoundingClientRect():
-    # this element's rendered width always equalled the FULL viewport
-    # width regardless of the right:0 declared here, pushing its right
-    # edge exactly 300px (the sidebar's width) past the true viewport
-    # edge. Root cause: Streamlit's own default styling for this element
-    # type sets an explicit width -- and per the CSS spec, for a
-    # position:fixed element with left, width, AND right all specified,
-    # right is simply IGNORED in favour of left+width. No amount of
-    # !important on right can fix that; it has to be width itself that's
-    # overridden instead. calc(100% - var(...)) resolves the same
-    # intent (viewport width minus the sidebar) but as an explicit width
-    # declaration, which the CSS spec does honour.
-    st.html(f"""
-    <style>
-    .st-key-nav_transition_overlay {{
-        position: fixed !important; top: 0 !important; bottom: 0 !important;
-        left: var(--sf-sidebar-w, 300px) !important;
-        width: calc(100% - var(--sf-sidebar-w, 300px)) !important;
-        z-index: 999999999 !important; background: {BG} !important;
-    }}
-    </style>
-    """)
 
 
 # ── LAYOUT COMPONENTS ─────────────────────────────────────────────────────────
@@ -1423,28 +1376,36 @@ def render_cached_run_banner(loaded_str: str, nav_triggered: bool = False):
 
 
 def render_footer():
-    """Call once, last, after everything else on the page -- the
-    ordinary end-of-content site footer every page gets, not a
-    position:fixed bar (per explicit request: this app's dashboard
-    pages are already data-dense, and a permanently pinned bar would
-    sit on top of chart/table content on every one of them; this
-    version just naturally follows the last card, present even on a
-    short page since it's still the next real element in flow, but
-    scrolling away with everything else on a long one -- the ordinary
-    behaviour a website footer has).
+    """Call once, last, after everything else on the page -- a
+    position:fixed bar pinned to the bottom of the viewport, always
+    visible regardless of scroll position. An earlier version deliberately
+    was NOT position:fixed (per explicit request at the time: this app's
+    dashboard pages are already data-dense, and a permanently pinned bar
+    would sit on top of chart/table content on every one of them) --
+    reversed per a later explicit request to pin it again. The
+    .block-container padding-bottom bump in inject_global_css() (search
+    "reserve room for the fixed footer") is what actually avoids
+    reintroducing that original problem: real page content now always
+    has enough reserved space at the bottom that the fixed footer can
+    never sit on top of it, footer pinned AND nothing hidden behind it.
 
-    A solid navy band, full-bleed to the browser edge (negative margin
-    cancelling .block-container's own 2rem side padding, then reapplying
-    it as the band's own padding so its CONTENT still lines up with
-    every card above it) -- reported live that an earlier version (a
-    thin hairline border above plain page-coloured text) didn't actually
-    read as a footer at all, just more page content, and was too tall
-    for what little it said. This is deliberately a single compact row,
-    not stacked lines, and deliberately fixed navy in BOTH light and
-    dark mode -- not the dynamic {{SURFACE}}/{{TEXT}} palette the rest of
-    the page follows -- same reasoning as the sidebar elsewhere in this
-    file: a footer band, like a sidebar, reads as a constant brand
-    element, not page content that should flip with the theme toggle.
+    A solid navy band, full-bleed to both viewport edges (position:fixed
+    + left/right:0, not the earlier version's negative-margin trick --
+    that only cancelled .block-container's own padding, which no longer
+    matters now that this is fixed to the viewport rather than flowing
+    inside .block-container at all) -- reported live that an earlier
+    version (a thin hairline border above plain page-coloured text)
+    didn't actually read as a footer at all, just more page content, and
+    was too tall for what little it said. This is deliberately a single
+    compact row, not stacked lines, and deliberately fixed navy in BOTH
+    light and dark mode -- not the dynamic {{SURFACE}}/{{TEXT}} palette
+    the rest of the page follows -- same reasoning as the sidebar
+    elsewhere in this file: a footer band, like a sidebar, reads as a
+    constant brand element, not page content that should flip with the
+    theme toggle. z-index comfortably above ordinary page content but
+    below every purpose-built loading overlay in this app (999999999)
+    and the cached-run banner (999999) -- neither ever needs to show
+    through the footer, and the footer never needs to show through them.
 
     Plain inline styles on the elements themselves, not a new class
     added to inject_global_css()'s stylesheet -- deliberately, after
@@ -1470,8 +1431,9 @@ def render_footer():
         if _logo_uri else ''
     )
     st.markdown(f"""
-    <div style="margin:28px -2rem -2.5rem; padding:12px 2rem 16px; background:#1E1E5F;
-        display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px 24px;">
+    <div style="position:fixed; left:0; right:0; bottom:0; z-index:999; padding:12px 2rem 16px;
+        background:#1E1E5F; display:flex; flex-wrap:wrap; align-items:center;
+        justify-content:space-between; gap:10px 24px;">
         <div style="display:flex; align-items:center; gap:9px;">
             {_logo_html}
             <span style="font-family:'Space Grotesk',system-ui,sans-serif; font-size:11.5px;
@@ -1729,28 +1691,70 @@ def chart(fig, h=300):
 
 
 def render_nav_transition_overlay():
-    """Full-viewport, opaque loading cover for regular page-to-page
-    navigation (sidebar nav clicks, and the account menu's "My profile")
-    -- app.py holds this open, via its own placeholder, through the
-    entire render of the destination page, exactly like auth.py's
-    render_transition_spinner() already does for sign-in/out. See that
-    function's docstring for why an opaque position:fixed cover (not a
-    CSS blur on just the main content area) is what's actually needed:
-    reproduced live, a plain blur left both the previous page's stale,
-    still-lingering content AND a just-opened account-menu popover
-    (portal-rendered near the end of <body>, entirely outside the main
-    content area a blur could ever reach) visible at once alongside the
-    new page's content, until the run finished.
+    """Opaque loading cover for regular page-to-page navigation (sidebar
+    nav clicks, and the account menu's "My profile") -- app.py holds
+    this open, via its own placeholder, through the entire render of the
+    destination page, exactly like auth.py's render_transition_spinner()
+    already does for sign-in/out (see that function's docstring for why
+    an opaque position:fixed cover, not a CSS blur on just the main
+    content area, is what's actually needed: reproduced live, a plain
+    blur left both the previous page's stale, still-lingering content
+    AND a just-opened account-menu popover -- portal-rendered near the
+    end of <body>, entirely outside the main content area a blur could
+    ever reach -- visible at once alongside the new page's content,
+    until the run finished).
+
+    A single self-contained st.html() block, not st.container(key=...)
+    plus a separate CSS rule targeting its generated class (an earlier
+    version) -- now that this only ever draws a plain spinner (the
+    content-shaped skeleton this used to also be able to show for
+    Overview specifically was tried and reverted), there's no longer
+    any reason to route it through a real Streamlit container at all,
+    so it can just match render_transition_spinner()'s own proven
+    single-div pattern directly instead. That earlier version also had
+    a real, reported centering bug of its own: it relied on this div
+    inheriting height:100% from ITS PARENT (the container's generated
+    class) to fill the true available vertical space -- but percentage
+    heights only resolve if every ancestor in the chain has a definite
+    height of its own, and Streamlit's own intermediate wrapper divs
+    between that class and this content don't set one, so the
+    inheritance wasn't reliable. Here there's no ancestor chain to rely
+    on at all: this div sets its own position:fixed geometry directly,
+    the same way render_transition_spinner() does.
+
+    left: var(--sf-sidebar-w, 300px), not inset:0 -- reported live,
+    covering the FULL viewport also swallowed the sidebar, which never
+    actually has the stale-duplication bug above (its NAV_SECTIONS
+    content is identical page to page, so Streamlit's own diffing
+    reconciles it cleanly) and shouldn't go dark/unusable for a
+    transition that's really only ever about the main content area.
+    Same CSS variable render_cached_run_banner() already tracks (via a
+    ResizeObserver in its own <script>, keeping it matched to the
+    sidebar's REAL current width -- collapsed, default, or user-
+    resized) for the identical reason a fixed left offset can't track
+    any of those; the var(..., 300px) fallback covers every page that
+    script hasn't run on yet with the sidebar's actual default width.
+
+    width: calc(100% - ...), not right:0 -- reported live (confirmed via
+    getBoundingClientRect()), this element's rendered width always
+    equalled the FULL viewport width regardless of any right:0 declared
+    here, pushing its right edge exactly one sidebar-width past the true
+    viewport edge. Per the CSS spec, a position:fixed element with left,
+    width, AND right all specified simply ignores right in favour of
+    left+width -- calc(100% - var(...)) resolves the same intent
+    (viewport width minus the sidebar) as an explicit width instead,
+    which the spec does honour.
     """
-    with st.container(key='nav_transition_overlay'):
-        st.html(f"""
-        <div style="display:flex;align-items:center;justify-content:center;height:70vh;">
-            <div style="width:34px;height:34px;border-radius:50%;
-                border:3px solid {LINE};border-top-color:{TEAL};
-                animation:sf-nav-transition-spin 0.8s linear infinite;"></div>
-        </div>
-        <style>@keyframes sf-nav-transition-spin {{ to {{ transform: rotate(360deg); }} }}</style>
-        """)
+    st.markdown(f"""
+    <div style="position:fixed;top:0;bottom:0;left:var(--sf-sidebar-w, 300px);
+        width:calc(100% - var(--sf-sidebar-w, 300px));z-index:999999999;background:{BG};
+        display:flex;align-items:center;justify-content:center;">
+        <div style="width:34px;height:34px;border-radius:50%;
+            border:3px solid {LINE};border-top-color:{TEAL};
+            animation:sf-nav-transition-spin 0.8s linear infinite;"></div>
+    </div>
+    <style>@keyframes sf-nav-transition-spin {{ to {{ transform: rotate(360deg); }} }}</style>
+    """, unsafe_allow_html=True)
 
 
 def _peek_columns(f):
