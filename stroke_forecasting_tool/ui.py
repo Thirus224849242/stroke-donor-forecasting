@@ -148,18 +148,67 @@ def fmt_size(num_bytes: float) -> str:
 # ── GLOBAL CSS ────────────────────────────────────────────────────────────────
 def inject_global_css():
     _apply_palette()
+    # One-shot flag: True only for the single rerun immediately following a
+    # sidebar nav click (set there, right before its st.rerun() -- see
+    # render_sidebar()), read and immediately reset here so it can never
+    # leak into a LATER, unrelated rerun. This is what scopes the loading
+    # overlay below to page-to-page navigation specifically -- without it,
+    # :has([data-testid="stStatusWidget"]) alone can't tell a nav click
+    # apart from any other rerun (a widget tweak, a Data Pipeline upload,
+    # the pipeline's own multi-stage run), which was the actual bug behind
+    # "it's running on Data Pipeline too": every rerun looks identical at
+    # the DOM level, so the overlay showed for all of them until this
+    # extra, deliberately-narrow signal was added.
+    _nav_loading = st.session_state.get('nav_loading', False)
+    st.session_state.nav_loading = False
+    # A fixed-duration animation (plays once, then settles into its 100%
+    # end state permanently), not the earlier version's live
+    # :has([data-testid="stStatusWidget"]) matching -- confirmed live,
+    # that version's blur/spinner kept reappearing on every FUTURE rerun
+    # too, not just the one nav transition it was meant for, on any page
+    # that also contains an st.fragment (the Profile page's 2FA card):
+    # a fragment's own reruns never call inject_global_css() again, so
+    # whatever stylesheet was active when the fragment was first reached
+    # -- including these rules, still live-matching stStatusWidget's
+    # reappearance on every later fragment rerun too -- just stays the
+    # active stylesheet indefinitely. A fixed-duration animation has no
+    # such failure mode: once its one iteration finishes (comfortably
+    # longer than any real page-to-page navigation in this app, which
+    # never re-fetches data mid-session), it's permanently inert
+    # regardless of anything that reruns afterwards, fragment or not.
+    _nav_overlay_css = f"""
+    @keyframes sf-nav-blur-fade {{
+        0%, 15% {{ filter: blur(0); pointer-events: auto; }}
+        25%, 65% {{ filter: blur(3px); pointer-events: none; }}
+        100% {{ filter: blur(0); pointer-events: auto; }}
+    }}
+    @keyframes sf-nav-spin-fade {{
+        0%, 15% {{ opacity: 0; }}
+        25%, 65% {{ opacity: 1; }}
+        100% {{ opacity: 0; }}
+    }}
+    [data-testid="stMain"] {{
+        animation: sf-nav-blur-fade 1.4s ease-in-out forwards;
+    }}
+    [data-testid="stAppViewContainer"]::after {{
+        animation: sf-spin 0.8s linear infinite, sf-nav-spin-fade 1.4s ease-in-out forwards;
+    }}
+    """ if _nav_loading else ''
     st.html(f"""
     <style>
     footer, [data-testid="stDecoration"], [data-testid="stAppDeployButton"],
     [data-testid="stMainMenu"] {{ display: none !important; }}
     /* Streamlit's own top-right "Running..."/Stop indicator -- fires on
     EVERY rerun (any button, any widget tweak), not just the deliberate
-    moments this app already has purpose-built loaders for
-    (render_nav_transition_overlay() below, render_startup_progress(),
-    render_transition_spinner() in auth.py, and st.spinner() calls at
-    individual call sites). Reported as an unwanted stray icon; hidden
-    outright rather than replaced, since those purpose-built loaders
-    already cover every case worth signalling. */
+    moments this app already has purpose-built loaders for (the nav
+    overlay below, render_startup_progress(), _render_transition_spinner()
+    in auth.py, and st.spinner() calls at individual call sites). Reported
+    as an unwanted stray icon; hidden outright rather than replaced, since
+    those purpose-built loaders already cover every case worth signalling.
+    display:none only hides its paint -- the element itself still exists
+    in the DOM for the exact same instant it always did, so the nav
+    overlay's :has([data-testid="stStatusWidget"]) detection below is
+    unaffected. */
     [data-testid="stStatusWidget"] {{ display: none !important; }}
     /* pointer-events:none so this invisible native bar can never again
     swallow real clicks meant for whatever sits under/behind it (this is
@@ -187,6 +236,59 @@ def inject_global_css():
     {{TEXT}} colour here too. */
     [data-testid="stExpandSidebarButton"] {{ pointer-events: auto !important; }}
     [data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"] {{ color: {TEXT} !important; }}
+
+    /* ── Loading overlay (page navigation only) ── */
+    /* Streamlit's own indicator during a script run is a tiny top-right
+    spinner plus a per-element fade on whatever's stale -- easy to miss,
+    per feedback "very primitive". Replaced with a centered spinner over
+    a blurred main content area instead, but ONLY for an actual page
+    navigation (sidebar nav clicks, and the account menu's "My profile")
+    -- not for every rerun in general (a widget tweak, a Data Pipeline
+    upload, the pipeline's own multi-stage run all rerun the script
+    exactly the same way at the DOM level). The two rules that actually
+    turn the overlay on are therefore built conditionally in Python, in
+    _nav_overlay_css above -- included in this CSS only on the one rerun
+    immediately following a nav click (that one-shot session_state flag
+    is set right before that click's st.rerun(), in render_sidebar()'s
+    nav-button handler and page_header()'s "My profile" handler) -- and
+    spliced in below as a fixed-duration CSS animation, not a live
+    [data-testid="stStatusWidget"]-presence match. An earlier version did
+    use a live :has([data-testid="stStatusWidget"]) match here, gated the
+    same way -- but confirmed live, that failed on any page containing an
+    st.fragment (the Profile page's 2FA card): a fragment's own reruns
+    never call inject_global_css() again, so whatever stylesheet was
+    active when the fragment was first reached -- these rules included,
+    still live-matching stStatusWidget's reappearance on every later
+    fragment rerun too -- just stayed the active stylesheet indefinitely,
+    reappearing on every 2FA interaction rather than only the one nav
+    transition. A fixed-duration animation (plays once, ends at its own
+    100% keyframe, stays there regardless of anything rerunning
+    afterwards) has no such failure mode, and needs no
+    [data-testid="stStatusWidget"] involvement at all -- 1.4s comfortably
+    covers a real page-to-page navigation in this app (never a fresh data
+    fetch mid-session, so effectively just render time), and simply
+    finishes before a user could plausibly reach a moment later that
+    happens to rerun something else. filter:blur() is scoped to
+    [data-testid="stMain"] only, not the sidebar, so nav stays usable
+    while the animation is still playing; the spinner itself is a ::after
+    on [data-testid="stAppViewContainer"] (stMain's ANCESTOR, not stMain
+    itself) specifically so stMain's blur filter -- which also applies to
+    any pseudo-element that were its own -- never blurs the spinner along
+    with the content behind it. */
+    @keyframes sf-spin {{ to {{ transform: translate(-50%, -50%) rotate(360deg); }} }}
+    [data-testid="stMain"] {{
+        transition: filter 0.2s ease 0s;
+    }}
+    [data-testid="stAppViewContainer"] {{ position: relative; }}
+    [data-testid="stAppViewContainer"]::after {{
+        content: '';
+        position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        width: 40px; height: 40px; border-radius: 50%;
+        border: 3px solid {LINE}; border-top-color: {TEAL};
+        opacity: 0; pointer-events: none; z-index: 1000;
+        transition: opacity 0.15s ease 0s;
+    }}
+    {_nav_overlay_css}
 
     /* Swiss financial / data-dense analytics: pure white, hairline gray
     separators, tabular numerics, no rounded flourishes or shadows except
@@ -918,53 +1020,6 @@ def inject_global_css():
     comment at upload_area's definition for the full explanation). */
     [data-testid="stVerticalBlock"].st-key-pipeline_upload_area {{
         background: transparent !important; border: none !important; box-shadow: none !important;
-    }}
-    </style>
-    """)
-    # Skeleton-loader shimmer -- render_overview_skeleton()'s placeholder
-    # bars below use this class. A separate, minimal st.html() call for
-    # the same silent-failure-above-a-size-threshold reason as the splits
-    # above, not because this rule itself is large.
-    st.html(f"""
-    <style>
-    @keyframes sf-skeleton-shimmer {{
-        0% {{ background-position: 200% 0; }}
-        100% {{ background-position: -200% 0; }}
-    }}
-    .sf-skeleton {{
-        background: linear-gradient(90deg, {SURFACE2} 25%, {LINE} 37%, {SURFACE2} 63%);
-        background-size: 400% 100%;
-        animation: sf-skeleton-shimmer 1.6s ease-in-out infinite;
-    }}
-    </style>
-    """)
-    # render_nav_transition_overlay()'s container -- position:fixed+inset:0+
-    # opaque background, same proven pattern as auth.py's
-    # render_transition_spinner(), reused here for regular page navigation.
-    # Confirmed live (reproduced via a temporary long delay): navigating
-    # between two structurally different pages leaves Streamlit's own
-    # stale-content handling showing BOTH the previous page's still-
-    # lingering elements (including a just-opened account-menu popover,
-    # which renders through a portal near the end of <body>, entirely
-    # outside whatever the old blur-the-main-content approach could ever
-    # reach) and the new page's freshly-streamed elements at once, until
-    # the run fully finishes -- reported live as a duplicated page
-    # header/subtitle sandwiching the real one. A CSS filter:blur() on
-    # just [data-testid="stMain"] (the old approach) cannot fix this: it
-    # never covered the popover's portal, and blur alone doesn't make
-    # duplicated TEXT illegible. An actual opaque, fixed, full-viewport
-    # cover (z-index 999999999, same reasoning as render_transition_
-    # spinner()'s own docstring -- comfortably above the cached-run
-    # banner's 999999 and everything else in this app) hides ALL of it
-    # regardless of DOM order, exactly like it already does for auth
-    # transitions. overflow-y:auto since the Overview skeleton it can
-    # hold is taller than some viewports.
-    st.html(f"""
-    <style>
-    .st-key-nav_transition_overlay {{
-        position: fixed !important; inset: 0 !important; z-index: 999999999 !important;
-        background: {BG} !important; overflow-y: auto !important;
-        padding: 24px 32px !important;
     }}
     </style>
     """)
@@ -1715,87 +1770,6 @@ def plotly_cfg(fig, h=300):
 
 def chart(fig, h=300):
     st.plotly_chart(plotly_cfg(fig, h), width='stretch', config={'displayModeBar': False})
-
-
-def _skeleton_bar(width, height, margin_bottom=0):
-    st.markdown(
-        f'<div class="sf-skeleton" style="width:{width};height:{height}px;'
-        f'margin-bottom:{margin_bottom}px;"></div>',
-        unsafe_allow_html=True,
-    )
-
-
-def render_overview_skeleton():
-    """Placeholder shapes matching the Overview page's real layout (a
-    4-tile KPI row, the main forecast chart card, then a 3-column row of
-    smaller cards) -- shown inside render_nav_transition_overlay() below
-    while navigating TO Overview specifically, in place of that
-    overlay's generic spinner, then swapped for the real content once
-    the page has finished rendering (see app.py's nav-overlay handling,
-    right after inject_global_css()/render_sidebar()).
-
-    Built from card()/st.container(horizontal=True)/st.columns() -- the
-    exact same layout primitives the real content below uses -- rather
-    than hand-rolled bordered divs, so the borders, spacing, and dark-
-    mode colours all come from the app's existing styling for free
-    instead of a second, separately-maintained copy of it.
-
-    Prototype: if a content-shaped skeleton doesn't actually read better
-    than a plain spinner here, reverting is deleting this function and
-    swapping its app.py call for the same spinner every other page gets
-    -- nothing else depends on it.
-    """
-    with st.container(horizontal=True):
-        for _ in range(4):
-            with card():
-                _skeleton_bar('55%', 9, 14)
-                _skeleton_bar('75%', 20, 8)
-                _skeleton_bar('45%', 8)
-
-    with card():
-        _skeleton_bar('30%', 13, 8)
-        _skeleton_bar('50%', 9, 16)
-        _skeleton_bar('100%', 280)
-
-    col1, col2, col3 = st.columns([1, 1, 1])
-    for col, content_h in ((col1, 240), (col2, 240), (col3, 282)):
-        with col:
-            with card():
-                _skeleton_bar('40%', 12, 12)
-                _skeleton_bar('100%', content_h)
-
-
-def render_nav_transition_overlay(show_skeleton=False):
-    """Full-viewport, opaque loading cover for regular page-to-page
-    navigation (sidebar nav clicks, and the account menu's "My profile")
-    -- app.py holds this open, via its own placeholder, through the
-    entire render of the destination page, exactly like auth.py's
-    render_transition_spinner() already does for sign-in/out. See that
-    function's docstring for why an opaque position:fixed cover (not a
-    CSS blur on just the main content area) is what's actually needed:
-    reproduced live, a plain blur left both the previous page's stale,
-    still-lingering content AND a just-opened account-menu popover
-    (portal-rendered near the end of <body>, entirely outside the main
-    content area a blur could ever reach) visible at once alongside the
-    new page's content, until the run finished.
-
-    show_skeleton=True (Overview only, see its app.py call site) shows
-    render_overview_skeleton() instead of the plain spinner every other
-    page gets -- both are drawn INSIDE this same opaque cover, so
-    whichever one it is, nothing behind it can ever leak through.
-    """
-    with st.container(key='nav_transition_overlay'):
-        if show_skeleton:
-            render_overview_skeleton()
-        else:
-            st.html(f"""
-            <div style="display:flex;align-items:center;justify-content:center;height:70vh;">
-                <div style="width:34px;height:34px;border-radius:50%;
-                    border:3px solid {LINE};border-top-color:{TEAL};
-                    animation:sf-nav-transition-spin 0.8s linear infinite;"></div>
-            </div>
-            <style>@keyframes sf-nav-transition-spin {{ to {{ transform: rotate(360deg); }} }}</style>
-            """)
 
 
 def _peek_columns(f):
