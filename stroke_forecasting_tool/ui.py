@@ -935,17 +935,31 @@ def inject_global_css():
     # sandwiching the real one. A CSS filter:blur() on just
     # [data-testid="stMain"] (the earlier approach) cannot fix this: it
     # never covered the popover's portal, and blur alone doesn't make
-    # duplicated TEXT illegible. An actual opaque, fixed, full-viewport
-    # cover (z-index 999999999, same reasoning as render_transition_
-    # spinner()'s own docstring -- comfortably above the cached-run
-    # banner's 999999 and everything else in this app) hides ALL of it
-    # regardless of DOM order, exactly like it already does for auth
-    # transitions.
+    # duplicated TEXT illegible. An actual opaque, fixed cover (z-index
+    # 999999999, same reasoning as render_transition_spinner()'s own
+    # docstring -- comfortably above the cached-run banner's 999999 and
+    # everything else in this app) hides ALL of it regardless of DOM
+    # order, exactly like it already does for auth transitions.
+    #
+    # left: var(--sf-sidebar-w, 300px), not inset:0 -- reported live,
+    # covering the FULL viewport also swallowed the sidebar, which never
+    # actually has this bug (its NAV_SECTIONS content is identical page
+    # to page, so Streamlit's own diffing reconciles it cleanly with no
+    # stale duplication) and shouldn't go dark/unusable for a transition
+    # that's really only ever about the main content area. Same CSS
+    # variable render_cached_run_banner() already tracks (via a
+    # ResizeObserver in its own <script>, keeping it matched to the
+    # sidebar's REAL current width -- collapsed, default, or user-
+    # resized) for the identical reason: a fixed left offset can't track
+    # any of those. That script only runs on pages the banner itself can
+    # appear on, but the var(..., 300px) fallback here covers every
+    # other page with the sidebar's actual default width regardless.
     st.html(f"""
     <style>
     .st-key-nav_transition_overlay {{
-        position: fixed !important; inset: 0 !important; z-index: 999999999 !important;
-        background: {BG} !important;
+        position: fixed !important; top: 0 !important; bottom: 0 !important;
+        left: var(--sf-sidebar-w, 300px) !important; right: 0 !important;
+        z-index: 999999999 !important; background: {BG} !important;
     }}
     </style>
     """)
