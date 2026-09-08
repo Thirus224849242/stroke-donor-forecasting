@@ -954,11 +954,27 @@ def inject_global_css():
     # any of those. That script only runs on pages the banner itself can
     # appear on, but the var(..., 300px) fallback here covers every
     # other page with the sidebar's actual default width regardless.
+    #
+    # width: calc(100% - ...), not right:0 -- reported live, the spinner
+    # inside rendered off-centre to the right, spilling past the actual
+    # right edge of the screen. Confirmed via getBoundingClientRect():
+    # this element's rendered width always equalled the FULL viewport
+    # width regardless of the right:0 declared here, pushing its right
+    # edge exactly 300px (the sidebar's width) past the true viewport
+    # edge. Root cause: Streamlit's own default styling for this element
+    # type sets an explicit width -- and per the CSS spec, for a
+    # position:fixed element with left, width, AND right all specified,
+    # right is simply IGNORED in favour of left+width. No amount of
+    # !important on right can fix that; it has to be width itself that's
+    # overridden instead. calc(100% - var(...)) resolves the same
+    # intent (viewport width minus the sidebar) but as an explicit width
+    # declaration, which the CSS spec does honour.
     st.html(f"""
     <style>
     .st-key-nav_transition_overlay {{
         position: fixed !important; top: 0 !important; bottom: 0 !important;
-        left: var(--sf-sidebar-w, 300px) !important; right: 0 !important;
+        left: var(--sf-sidebar-w, 300px) !important;
+        width: calc(100% - var(--sf-sidebar-w, 300px)) !important;
         z-index: 999999999 !important; background: {BG} !important;
     }}
     </style>
