@@ -217,21 +217,10 @@ def inject_global_css():
     Widened well past normal desktop widths so it only kicks in on very
     large/ultrawide displays, instead of on every ordinary wide window. */
     .block-container {{
-        padding-top: 0.75rem !important; padding-bottom: 4.5rem !important;
+        padding-top: 0.75rem !important; padding-bottom: 2.5rem !important;
         padding-left: 2rem !important; padding-right: 2rem !important;
         max-width: 1920px !important; margin: 0 auto !important;
     }}
-    /* padding-bottom was 2.5rem -- bumped to reserve room for the fixed
-    footer render_footer() now pins to the bottom of the viewport
-    (ui.py) rather than letting it flow naturally after the last card.
-    Without this, the fixed footer would sit on top of whatever
-    content happened to end up at the bottom of a page -- exactly the
-    problem an earlier, non-fixed version of the footer existed to
-    avoid, reintroduced here on purpose per a later explicit request to
-    pin it, so this padding is what keeps that original problem from
-    coming back along with it. ~4.5rem comfortably clears the footer's
-    own height (its 12px/16px top/bottom padding plus its ~18px-tall
-    content) with room to spare. */
     /* padding-top was 2.5rem (40px) -- reported live as wasted empty
     space above every page's title, most obviously with the cached-run
     banner retracted (it's position:fixed and hidden above the
@@ -937,18 +926,16 @@ def inject_global_css():
     # user drag-resize) rather than a hardcoded 300px -- every position:
     # fixed element that needs to sit beside the sidebar without
     # overlapping/underlapping it (render_cached_run_banner()'s own left
-    # offset, render_footer(), render_nav_transition_overlay()) reads
-    # this same variable. Lives here, not inside any one of those
-    # elements, specifically so it's tracked from the very first
-    # authenticated page render onward, on every page, regardless of
-    # which of those elements happens to render on it -- previously this
-    # ran only inside render_cached_run_banner()'s own script, so a
-    # session that never showed that banner never ran it at all, leaving
-    # every OTHER consumer (the footer in particular, which renders on
-    # literally every page) stuck on the var(..., 300px) fallback the
-    # whole time instead of tracking a collapsed/resized sidebar --
-    # reported live as the footer not expanding when the sidebar was
-    # collapsed. Self-guarded (window.__sfSidebarWidthInit) the same way
+    # offset, render_nav_transition_overlay()) reads this same variable.
+    # Lives here, not inside any one of those elements, specifically so
+    # it's tracked from the very first authenticated page render onward,
+    # on every page, regardless of which of those elements happens to
+    # render on it -- previously this ran only inside
+    # render_cached_run_banner()'s own script, so a session that never
+    # showed that banner never ran it at all, leaving every OTHER
+    # consumer stuck on the var(..., 300px) fallback the whole time
+    # instead of tracking a collapsed/resized sidebar. Self-guarded
+    # (window.__sfSidebarWidthInit) the same way
     # as the banner's own always-on script, so inject_global_css()
     # running again on every rerun doesn't stack a second ResizeObserver/
     # MutationObserver pair on top of the first.
@@ -979,6 +966,102 @@ def inject_global_css():
             subtree: true, attributes: true, attributeFilter: ['aria-expanded', 'style'],
         });
     })();
+    </script>
+    """, unsafe_allow_javascript=True)
+    # Instant, client-only nav-transition overlay -- shows the instant a
+    # nav button is clicked, before ANY server round trip. Streamlit's
+    # own overlay (render_nav_transition_overlay(), a separate element)
+    # can only appear once a script run has actually started on the
+    # server; reported live as a visible gap on a cache-miss sidebar
+    # badge query (see clear_nav_overlay()'s docstring) even after that
+    # was fixed by reordering -- clicking a nav button ALWAYS costs at
+    # least one full round trip just to process the click itself (the
+    # script run that reads st.button()'s True/False and calls
+    # st.rerun() is itself a real network round trip, before the run
+    # that actually shows the server overlay even starts) -- no amount
+    # of Python-side reordering removes that, since Python code only
+    # ever runs after a round trip has already happened.
+    #
+    # Deliberately a raw DOM node appended straight to document.body via
+    # plain JS, NOT an st.markdown()/st.html() element -- this whole
+    # point is that it must survive being shown by a click and then
+    # sitting there UNCHANGED while at least one more full script rerun
+    # (the click-processing run) executes and re-renders this very
+    # function's own markup. If this div were part of inject_global_css()'s
+    # own st.html() output, that in-flight rerun would replace/recreate
+    # it (reset to hidden) before the real overlay ever got a chance to
+    # show, which would hide the loader mid-transition instead of
+    # holding it up -- confirmed by reasoning through the exact same
+    # "structural reconciliation" class of bug this file's nav-overlay
+    # docstring already documents elsewhere, not by guessing. Living
+    # entirely outside Streamlit's own reconciled tree is what makes it
+    # immune to that.
+    #
+    # Self-guarded (window.__sfInstantOverlayInit) so repeated
+    # inject_global_css() calls (every rerun) don't recreate the node or
+    # stack duplicate click listeners -- but colours ARE refreshed every
+    # call (outside the guard), since a dark-mode toggle is a real
+    # st.rerun() that changes {BG}/{LINE}/{TEAL} for the rest of the
+    # session; without this, the instant overlay would keep showing
+    # whichever theme was active the first time this script block ever
+    # ran, mismatched after a later toggle.
+    #
+    # Click target selectors match render_sidebar()'s nav buttons and
+    # page_header()'s "My profile" button -- the two places that
+    # actually set nav_loading + call st.rerun() today (a plain page
+    # navigation). :disabled is checked explicitly for clarity even
+    # though a genuinely disabled native <button> -- e.g. every sidebar
+    # nav button while a pipeline run is in progress -- never fires a
+    # click event in the first place.
+    #
+    # The 15s safety timeout is exactly that -- a safety net against a
+    # dropped connection or a rerun that never arrives, not a normal-
+    # path trigger. A real navigation clears this via
+    # window.__sfHideInstantOverlay() (called by clear_nav_overlay()
+    # below) well before 15s in every case that's ever been observed.
+    st.html(f"""
+    <style>@keyframes sf-instant-nav-spin {{ to {{ transform: rotate(360deg); }} }}</style>
+    <script>
+    (function() {{
+        var el = document.getElementById('sf-instant-nav-overlay');
+        if (!el) {{
+            el = document.createElement('div');
+            el.id = 'sf-instant-nav-overlay';
+            el.style.cssText = 'position:fixed;top:0;bottom:0;'
+                + 'left:var(--sf-sidebar-w, 300px);'
+                + 'width:calc(100% - var(--sf-sidebar-w, 300px));'
+                + 'z-index:999999999;display:none;align-items:center;justify-content:center;';
+            var spinner = document.createElement('div');
+            spinner.id = 'sf-instant-nav-overlay-spinner';
+            spinner.style.cssText = 'width:34px;height:34px;border-radius:50%;'
+                + 'animation:sf-instant-nav-spin 0.8s linear infinite;';
+            el.appendChild(spinner);
+            document.body.appendChild(el);
+
+            var hideTimer = null;
+            window.__sfShowInstantOverlay = function() {{
+                el.style.display = 'flex';
+                if (hideTimer) clearTimeout(hideTimer);
+                hideTimer = setTimeout(function() {{ el.style.display = 'none'; }}, 15000);
+            }};
+            window.__sfHideInstantOverlay = function() {{
+                el.style.display = 'none';
+                if (hideTimer) {{ clearTimeout(hideTimer); hideTimer = null; }}
+            }};
+
+            document.addEventListener('click', function(e) {{
+                var btn = e.target.closest(
+                    '[data-testid="stSidebar"] .stButton > button, .st-key-topbar_profile_btn button'
+                );
+                if (btn && !btn.disabled) {{ window.__sfShowInstantOverlay(); }}
+            }}, true);
+
+            window.__sfInstantOverlayInit = true;
+        }}
+        el.style.background = '{BG}';
+        var sp = document.getElementById('sf-instant-nav-overlay-spinner');
+        if (sp) {{ sp.style.border = '3px solid {LINE}'; sp.style.borderTopColor = '{TEAL}'; }}
+    }})();
     </script>
     """, unsafe_allow_javascript=True)
 
@@ -1390,95 +1473,6 @@ def render_cached_run_banner(loaded_str: str, nav_triggered: bool = False):
         """, unsafe_allow_javascript=True)
 
 
-def render_footer():
-    """Call once, last, after everything else on the page -- a
-    position:fixed bar pinned to the bottom of the viewport, always
-    visible regardless of scroll position. An earlier version deliberately
-    was NOT position:fixed (per explicit request at the time: this app's
-    dashboard pages are already data-dense, and a permanently pinned bar
-    would sit on top of chart/table content on every one of them) --
-    reversed per a later explicit request to pin it again. The
-    .block-container padding-bottom bump in inject_global_css() (search
-    "reserve room for the fixed footer") is what actually avoids
-    reintroducing that original problem: real page content now always
-    has enough reserved space at the bottom that the fixed footer can
-    never sit on top of it, footer pinned AND nothing hidden behind it.
-
-    A solid navy band, full-bleed to the RIGHT viewport edge only
-    (position:fixed + right:0, not the earlier version's negative-margin
-    trick -- that only cancelled .block-container's own padding, which
-    no longer matters now that this is fixed to the viewport rather than
-    flowing inside .block-container at all) -- reported live that an
-    earlier version (a thin hairline border above plain page-coloured
-    text) didn't actually read as a footer at all, just more page
-    content, and was too tall for what little it said. This is
-    deliberately a single compact row, not stacked lines, and
-    deliberately fixed navy in BOTH light and dark mode -- not the
-    dynamic {{SURFACE}}/{{TEXT}} palette the rest of the page follows --
-    same reasoning as the sidebar elsewhere in this file: a footer band,
-    like a sidebar, reads as a constant brand element, not page content
-    that should flip with the theme toggle. z-index comfortably above
-    ordinary page content but below every purpose-built loading overlay
-    in this app (999999999) and the cached-run banner (999999) --
-    neither ever needs to show through the footer, and the footer never
-    needs to show through them.
-
-    left:var(--sf-sidebar-w, 300px), not left:0 -- same CSS variable
-    inject_global_css() maintains (a ResizeObserver + MutationObserver
-    pair, self-guarded, running on every authenticated page from the
-    first render onward -- tracking the sidebar's real current width, 0
-    when collapsed) and render_cached_run_banner()/
-    render_nav_transition_overlay() already reuse, so this band gets the
-    exact same behaviour as the banner for free: it starts past the
-    sidebar's right edge while the sidebar is open (never overlapping
-    it) and expands to the full viewport width the instant the sidebar
-    collapses, live, with no separate tracking logic of its own -- per
-    explicit request, matching the banner's behaviour exactly rather
-    than staying full-bleed-left and overlapping/underlapping the
-    sidebar depending on its state.
-
-    Plain inline styles on the elements themselves, not a new class
-    added to inject_global_css()'s stylesheet -- deliberately, after
-    that file's own st.html() calls were confirmed live (more than
-    once) to silently drop their ENTIRE content once pushed over some
-    undetermined size threshold; a handful of one-off styles for a
-    footer that renders once per page isn't worth that risk for what
-    inject_global_css() would otherwise save (a few repeated class
-    names), and every other one-off block in this app (the cached-run
-    banner's own inner text, the sign-out loading screen in auth.py)
-    already follows this same inline-style convention for exactly that
-    reason.
-
-    Content is deliberately minimal and only ever states things already
-    true elsewhere in this app -- org name and "contact your Super Admin
-    for access" (the actual mechanism built this session, see the Users
-    page) -- no invented support email, and no Privacy Policy/Terms
-    links to pages that don't exist; a real marketing site's footer has
-    those because the pages exist, this app's doesn't."""
-    _logo_uri = logo_white_data_uri()
-    _logo_html = (
-        f'<img src="{_logo_uri}" alt="Stroke Foundation" style="height:18px;width:auto;flex-shrink:0;">'
-        if _logo_uri else ''
-    )
-    st.markdown(f"""
-    <div style="position:fixed; left:var(--sf-sidebar-w, 300px); right:0; bottom:0; z-index:999; padding:12px 2rem 16px;
-        background:#1E1E5F; display:flex; flex-wrap:wrap; align-items:center;
-        justify-content:space-between; gap:10px 24px;">
-        <div style="display:flex; align-items:center; gap:9px;">
-            {_logo_html}
-            <span style="font-family:'Space Grotesk',system-ui,sans-serif; font-size:11.5px;
-                font-weight:600; color:#FFFFFF;">Donor Forecasting Tool</span>
-            <span style="font-size:10.5px; color:rgba(255,255,255,0.45);">
-                &middot; Stroke Foundation of Australia
-            </span>
-        </div>
-        <div style="font-size:10.5px; color:rgba(255,255,255,0.45); white-space:nowrap;">
-            &copy; {pd.Timestamp.now().year} &middot; Internal use only &middot; Access issues: contact your Super Admin
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-
 def pill(text, color='green'):
     """Small rounded status badge -- 'Completed'/'Warning'/'Failed'-style
     pills used in Run History, the sidebar's active-run box, and pipeline
@@ -1696,6 +1690,7 @@ def empty_state():
             if st.button('Go to Data Pipeline', icon=':material/database:', type='primary', width='stretch'):
                 st.session_state.page = 'Data Pipeline'
                 st.rerun()
+    clear_nav_overlay()
     st.stop()
 
 
@@ -1787,6 +1782,76 @@ def render_nav_transition_overlay():
     </div>
     <style>@keyframes sf-nav-transition-spin {{ to {{ transform: rotate(360deg); }} }}</style>
     """, unsafe_allow_html=True)
+
+
+def clear_nav_overlay():
+    """Call from any early-exit path -- right before an st.stop() -- that
+    might fire on a run where the nav-transition overlay above was
+    opened. Without this, that overlay was reported live to sometimes
+    stay open indefinitely: app.py's own end-of-script clearing code
+    (search this same function's other call site there) only runs once
+    a page's ENTIRE body has finished rendering, but several pages call
+    st.stop() well before that -- Data Pipeline and Users' own
+    "Administrators/Super Admins only" permission gates, Run History's
+    "not configured"/"no runs yet" screens, and every dashboard page's
+    empty_state() below when no pipeline data is loaded. st.stop()
+    aborts the script immediately, so on any of those paths app.py's
+    clearing code simply never ran at all, leaving the overlay covering
+    the page (or, on some later unrelated rerun, however Streamlit
+    happened to reconcile the stale placeholder) rather than actually
+    revealing the permission-denied/empty-state message underneath it.
+
+    Reads the placeholder and the one-shot "was this run a real
+    navigation" flag from session_state rather than taking them as
+    parameters -- both are set in app.py, a different module from every
+    call site here (this file, and page bodies in app.py itself, both
+    too far from that module-level variable to close over it directly).
+    Same fixed pause as the normal path before clearing, so an early-
+    exit page's loading transition doesn't feel abruptly cut shorter
+    than every other page's. A no-op when this rerun was never a
+    navigation, or the overlay was already cleared -- safe to call
+    unconditionally, including from a page that never has anything to
+    clear.
+
+    Also hides the instant, client-only overlay (search
+    window.__sfShowInstantOverlay in inject_global_css()) via its own
+    __sfHideInstantOverlay() -- the ONE place both overlays get cleared,
+    so they can never drift out of sync with each other regardless of
+    which of this function's call sites actually fires on a given run.
+
+    That hide call is emitted UNCONDITIONALLY, before either early
+    return below, not only when _nav_overlay_active is true -- reported
+    live as an intermittent duplicate/stale page header (the exact
+    "structural mismatch between reruns" class of bug this file's nav-
+    overlay docstring already covers elsewhere, reproduced here via the
+    account-menu popover -> "My profile" path specifically, which costs
+    an extra rerun the plain sidebar nav path doesn't). This function is
+    always called from the SAME fixed script position for a given page
+    (either app.py's one normal end-of-script call, or one specific
+    page's own early-exit call), every single time that page renders --
+    but an EARLIER version only emitted this html() call when
+    _nav_overlay_active was true, meaning two consecutive renders of the
+    identical page (say, Income Forecast rendered plainly, then again
+    right after a nav-triggered load) had a DIFFERENT element present at
+    that same trailing position depending on nav status alone --
+    unrelated to the page's own content -- which is exactly the kind of
+    inconsistency that can break the frontend's reconciliation between
+    runs. window.__sfHideInstantOverlay() is a harmless no-op when
+    nothing is showing, so emitting it every time costs nothing and
+    keeps this position structurally identical across every render of a
+    given page, nav-triggered or not."""
+    st.html("""
+    <script>window.__sfHideInstantOverlay && window.__sfHideInstantOverlay();</script>
+    """, unsafe_allow_javascript=True)
+    if not st.session_state.get('_nav_overlay_active'):
+        return
+    ph = st.session_state.get('_nav_overlay_ph')
+    if ph is None:
+        return
+    import time
+    time.sleep(0.35)
+    ph.empty()
+    st.session_state['_nav_overlay_active'] = False
 
 
 def _peek_columns(f):
