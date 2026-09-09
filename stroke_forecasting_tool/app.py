@@ -87,8 +87,8 @@ import ui
 from ui import (
     CACHED_RUN_BANNER_PAGES, card, chart, clear_nav_overlay, empty_state, inject_global_css,
     kpi, new_execution_log, overall_progress, page_header, pill, render_cached_run_banner,
-    render_footer, render_nav_transition_overlay, render_sidebar, render_startup_progress,
-    stage_row, upload_slot,
+    render_nav_transition_overlay, render_sidebar, render_startup_progress, stage_row,
+    upload_slot,
 )
 
 
@@ -900,11 +900,11 @@ if not st.session_state.pipeline_run and db_configured():
 # overlay used everywhere else in the login->dashboard transition (via
 # a placeholder held open, not cleared, for the rest of this script) --
 # matched by a single clearing point at the very end of the file, right
-# after render_footer(), which is the first point this run has actually
-# finished producing the whole page. Streamlit streams elements to the
-# browser in the order they're added, so everything queued in between
-# (sidebar, page content, footer) reaches the browser -- just hidden
-# under this fixed, opaque overlay -- before the "remove the overlay"
+# after the page's own body finishes, which is the first point this run
+# has actually finished producing the whole page. Streamlit streams
+# elements to the browser in the order they're added, so everything
+# queued in between (sidebar, page content) reaches the browser -- just
+# hidden under this fixed, opaque overlay -- before the "remove the overlay"
 # instruction does; the user only ever sees a blank instant, then the
 # complete, already-finished page, never the gap in between.
 _signing_in_overlay_ph = None
@@ -3152,28 +3152,21 @@ elif page == 'Profile':
                        'not here -- your access to this app is tied to your Google sign-in.')
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# FOOTER -- every page, outside the elif chain above so it renders
-# regardless of which one matched.
-# ══════════════════════════════════════════════════════════════════════════════
-render_footer()
-
 # Matches the placeholder opened above (search _signing_in_overlay_ph) --
 # this is the actual end of the "Signing in" transition: everything this
-# run was going to render, page content and footer both, has now been
-# queued. Clearing the overlay here, not right after the post-login
-# restore step further up, is what keeps the browser from ever showing
-# a blank/half-built page in between.
+# run was going to render has now been queued. Clearing the overlay
+# here, not right after the post-login restore step further up, is what
+# keeps the browser from ever showing a blank/half-built page in between.
 if _signing_in_overlay_ph is not None:
     _signing_in_overlay_ph.empty()
     st.session_state.is_signing_in = False
 
 # Matches the placeholder opened right after render_sidebar() (search
 # _nav_overlay_ph) -- same reasoning as the sign-in overlay just above:
-# clearing only here, after the destination page's entire render
-# (content and footer both) has been queued, is what guarantees the
-# browser never shows a half-built page, and never the previous page's
-# stale content either (the actual bug this overlay replaced a plain
+# clearing only here, after the destination page's entire render has
+# been queued, is what guarantees the browser never shows a half-built
+# page, and never the previous page's stale content either (the actual
+# bug this overlay replaced a plain
 # CSS blur to fix -- see render_nav_transition_overlay()'s docstring).
 # This is the NORMAL path -- a page that ran all the way through without
 # hitting an early st.stop() (a permission gate, an empty-state screen).

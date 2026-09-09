@@ -217,21 +217,10 @@ def inject_global_css():
     Widened well past normal desktop widths so it only kicks in on very
     large/ultrawide displays, instead of on every ordinary wide window. */
     .block-container {{
-        padding-top: 0.75rem !important; padding-bottom: 4.5rem !important;
+        padding-top: 0.75rem !important; padding-bottom: 2.5rem !important;
         padding-left: 2rem !important; padding-right: 2rem !important;
         max-width: 1920px !important; margin: 0 auto !important;
     }}
-    /* padding-bottom was 2.5rem -- bumped to reserve room for the fixed
-    footer render_footer() now pins to the bottom of the viewport
-    (ui.py) rather than letting it flow naturally after the last card.
-    Without this, the fixed footer would sit on top of whatever
-    content happened to end up at the bottom of a page -- exactly the
-    problem an earlier, non-fixed version of the footer existed to
-    avoid, reintroduced here on purpose per a later explicit request to
-    pin it, so this padding is what keeps that original problem from
-    coming back along with it. ~4.5rem comfortably clears the footer's
-    own height (its 12px/16px top/bottom padding plus its ~18px-tall
-    content) with room to spare. */
     /* padding-top was 2.5rem (40px) -- reported live as wasted empty
     space above every page's title, most obviously with the cached-run
     banner retracted (it's position:fixed and hidden above the
@@ -937,18 +926,16 @@ def inject_global_css():
     # user drag-resize) rather than a hardcoded 300px -- every position:
     # fixed element that needs to sit beside the sidebar without
     # overlapping/underlapping it (render_cached_run_banner()'s own left
-    # offset, render_footer(), render_nav_transition_overlay()) reads
-    # this same variable. Lives here, not inside any one of those
-    # elements, specifically so it's tracked from the very first
-    # authenticated page render onward, on every page, regardless of
-    # which of those elements happens to render on it -- previously this
-    # ran only inside render_cached_run_banner()'s own script, so a
-    # session that never showed that banner never ran it at all, leaving
-    # every OTHER consumer (the footer in particular, which renders on
-    # literally every page) stuck on the var(..., 300px) fallback the
-    # whole time instead of tracking a collapsed/resized sidebar --
-    # reported live as the footer not expanding when the sidebar was
-    # collapsed. Self-guarded (window.__sfSidebarWidthInit) the same way
+    # offset, render_nav_transition_overlay()) reads this same variable.
+    # Lives here, not inside any one of those elements, specifically so
+    # it's tracked from the very first authenticated page render onward,
+    # on every page, regardless of which of those elements happens to
+    # render on it -- previously this ran only inside
+    # render_cached_run_banner()'s own script, so a session that never
+    # showed that banner never ran it at all, leaving every OTHER
+    # consumer stuck on the var(..., 300px) fallback the whole time
+    # instead of tracking a collapsed/resized sidebar. Self-guarded
+    # (window.__sfSidebarWidthInit) the same way
     # as the banner's own always-on script, so inject_global_css()
     # running again on every rerun doesn't stack a second ResizeObserver/
     # MutationObserver pair on top of the first.
@@ -1388,95 +1375,6 @@ def render_cached_run_banner(loaded_str: str, nav_triggered: bool = False):
         st.html("""
         <script>window.__sfBannerShow && window.__sfBannerShow();</script>
         """, unsafe_allow_javascript=True)
-
-
-def render_footer():
-    """Call once, last, after everything else on the page -- a
-    position:fixed bar pinned to the bottom of the viewport, always
-    visible regardless of scroll position. An earlier version deliberately
-    was NOT position:fixed (per explicit request at the time: this app's
-    dashboard pages are already data-dense, and a permanently pinned bar
-    would sit on top of chart/table content on every one of them) --
-    reversed per a later explicit request to pin it again. The
-    .block-container padding-bottom bump in inject_global_css() (search
-    "reserve room for the fixed footer") is what actually avoids
-    reintroducing that original problem: real page content now always
-    has enough reserved space at the bottom that the fixed footer can
-    never sit on top of it, footer pinned AND nothing hidden behind it.
-
-    A solid navy band, full-bleed to the RIGHT viewport edge only
-    (position:fixed + right:0, not the earlier version's negative-margin
-    trick -- that only cancelled .block-container's own padding, which
-    no longer matters now that this is fixed to the viewport rather than
-    flowing inside .block-container at all) -- reported live that an
-    earlier version (a thin hairline border above plain page-coloured
-    text) didn't actually read as a footer at all, just more page
-    content, and was too tall for what little it said. This is
-    deliberately a single compact row, not stacked lines, and
-    deliberately fixed navy in BOTH light and dark mode -- not the
-    dynamic {{SURFACE}}/{{TEXT}} palette the rest of the page follows --
-    same reasoning as the sidebar elsewhere in this file: a footer band,
-    like a sidebar, reads as a constant brand element, not page content
-    that should flip with the theme toggle. z-index comfortably above
-    ordinary page content but below every purpose-built loading overlay
-    in this app (999999999) and the cached-run banner (999999) --
-    neither ever needs to show through the footer, and the footer never
-    needs to show through them.
-
-    left:var(--sf-sidebar-w, 300px), not left:0 -- same CSS variable
-    inject_global_css() maintains (a ResizeObserver + MutationObserver
-    pair, self-guarded, running on every authenticated page from the
-    first render onward -- tracking the sidebar's real current width, 0
-    when collapsed) and render_cached_run_banner()/
-    render_nav_transition_overlay() already reuse, so this band gets the
-    exact same behaviour as the banner for free: it starts past the
-    sidebar's right edge while the sidebar is open (never overlapping
-    it) and expands to the full viewport width the instant the sidebar
-    collapses, live, with no separate tracking logic of its own -- per
-    explicit request, matching the banner's behaviour exactly rather
-    than staying full-bleed-left and overlapping/underlapping the
-    sidebar depending on its state.
-
-    Plain inline styles on the elements themselves, not a new class
-    added to inject_global_css()'s stylesheet -- deliberately, after
-    that file's own st.html() calls were confirmed live (more than
-    once) to silently drop their ENTIRE content once pushed over some
-    undetermined size threshold; a handful of one-off styles for a
-    footer that renders once per page isn't worth that risk for what
-    inject_global_css() would otherwise save (a few repeated class
-    names), and every other one-off block in this app (the cached-run
-    banner's own inner text, the sign-out loading screen in auth.py)
-    already follows this same inline-style convention for exactly that
-    reason.
-
-    Content is deliberately minimal and only ever states things already
-    true elsewhere in this app -- org name and "contact your Super Admin
-    for access" (the actual mechanism built this session, see the Users
-    page) -- no invented support email, and no Privacy Policy/Terms
-    links to pages that don't exist; a real marketing site's footer has
-    those because the pages exist, this app's doesn't."""
-    _logo_uri = logo_white_data_uri()
-    _logo_html = (
-        f'<img src="{_logo_uri}" alt="Stroke Foundation" style="height:18px;width:auto;flex-shrink:0;">'
-        if _logo_uri else ''
-    )
-    st.markdown(f"""
-    <div style="position:fixed; left:var(--sf-sidebar-w, 300px); right:0; bottom:0; z-index:999; padding:12px 2rem 16px;
-        background:#1E1E5F; display:flex; flex-wrap:wrap; align-items:center;
-        justify-content:space-between; gap:10px 24px;">
-        <div style="display:flex; align-items:center; gap:9px;">
-            {_logo_html}
-            <span style="font-family:'Space Grotesk',system-ui,sans-serif; font-size:11.5px;
-                font-weight:600; color:#FFFFFF;">Donor Forecasting Tool</span>
-            <span style="font-size:10.5px; color:rgba(255,255,255,0.45);">
-                &middot; Stroke Foundation of Australia
-            </span>
-        </div>
-        <div style="font-size:10.5px; color:rgba(255,255,255,0.45); white-space:nowrap;">
-            &copy; {pd.Timestamp.now().year} &middot; Internal use only &middot; Access issues: contact your Super Admin
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
 
 
 def pill(text, color='green'):
