@@ -968,6 +968,102 @@ def inject_global_css():
     })();
     </script>
     """, unsafe_allow_javascript=True)
+    # Instant, client-only nav-transition overlay -- shows the instant a
+    # nav button is clicked, before ANY server round trip. Streamlit's
+    # own overlay (render_nav_transition_overlay(), a separate element)
+    # can only appear once a script run has actually started on the
+    # server; reported live as a visible gap on a cache-miss sidebar
+    # badge query (see clear_nav_overlay()'s docstring) even after that
+    # was fixed by reordering -- clicking a nav button ALWAYS costs at
+    # least one full round trip just to process the click itself (the
+    # script run that reads st.button()'s True/False and calls
+    # st.rerun() is itself a real network round trip, before the run
+    # that actually shows the server overlay even starts) -- no amount
+    # of Python-side reordering removes that, since Python code only
+    # ever runs after a round trip has already happened.
+    #
+    # Deliberately a raw DOM node appended straight to document.body via
+    # plain JS, NOT an st.markdown()/st.html() element -- this whole
+    # point is that it must survive being shown by a click and then
+    # sitting there UNCHANGED while at least one more full script rerun
+    # (the click-processing run) executes and re-renders this very
+    # function's own markup. If this div were part of inject_global_css()'s
+    # own st.html() output, that in-flight rerun would replace/recreate
+    # it (reset to hidden) before the real overlay ever got a chance to
+    # show, which would hide the loader mid-transition instead of
+    # holding it up -- confirmed by reasoning through the exact same
+    # "structural reconciliation" class of bug this file's nav-overlay
+    # docstring already documents elsewhere, not by guessing. Living
+    # entirely outside Streamlit's own reconciled tree is what makes it
+    # immune to that.
+    #
+    # Self-guarded (window.__sfInstantOverlayInit) so repeated
+    # inject_global_css() calls (every rerun) don't recreate the node or
+    # stack duplicate click listeners -- but colours ARE refreshed every
+    # call (outside the guard), since a dark-mode toggle is a real
+    # st.rerun() that changes {BG}/{LINE}/{TEAL} for the rest of the
+    # session; without this, the instant overlay would keep showing
+    # whichever theme was active the first time this script block ever
+    # ran, mismatched after a later toggle.
+    #
+    # Click target selectors match render_sidebar()'s nav buttons and
+    # page_header()'s "My profile" button -- the two places that
+    # actually set nav_loading + call st.rerun() today (a plain page
+    # navigation). :disabled is checked explicitly for clarity even
+    # though a genuinely disabled native <button> -- e.g. every sidebar
+    # nav button while a pipeline run is in progress -- never fires a
+    # click event in the first place.
+    #
+    # The 15s safety timeout is exactly that -- a safety net against a
+    # dropped connection or a rerun that never arrives, not a normal-
+    # path trigger. A real navigation clears this via
+    # window.__sfHideInstantOverlay() (called by clear_nav_overlay()
+    # below) well before 15s in every case that's ever been observed.
+    st.html(f"""
+    <style>@keyframes sf-instant-nav-spin {{ to {{ transform: rotate(360deg); }} }}</style>
+    <script>
+    (function() {{
+        var el = document.getElementById('sf-instant-nav-overlay');
+        if (!el) {{
+            el = document.createElement('div');
+            el.id = 'sf-instant-nav-overlay';
+            el.style.cssText = 'position:fixed;top:0;bottom:0;'
+                + 'left:var(--sf-sidebar-w, 300px);'
+                + 'width:calc(100% - var(--sf-sidebar-w, 300px));'
+                + 'z-index:999999999;display:none;align-items:center;justify-content:center;';
+            var spinner = document.createElement('div');
+            spinner.id = 'sf-instant-nav-overlay-spinner';
+            spinner.style.cssText = 'width:34px;height:34px;border-radius:50%;'
+                + 'animation:sf-instant-nav-spin 0.8s linear infinite;';
+            el.appendChild(spinner);
+            document.body.appendChild(el);
+
+            var hideTimer = null;
+            window.__sfShowInstantOverlay = function() {{
+                el.style.display = 'flex';
+                if (hideTimer) clearTimeout(hideTimer);
+                hideTimer = setTimeout(function() {{ el.style.display = 'none'; }}, 15000);
+            }};
+            window.__sfHideInstantOverlay = function() {{
+                el.style.display = 'none';
+                if (hideTimer) {{ clearTimeout(hideTimer); hideTimer = null; }}
+            }};
+
+            document.addEventListener('click', function(e) {{
+                var btn = e.target.closest(
+                    '[data-testid="stSidebar"] .stButton > button, .st-key-topbar_profile_btn button'
+                );
+                if (btn && !btn.disabled) {{ window.__sfShowInstantOverlay(); }}
+            }}, true);
+
+            window.__sfInstantOverlayInit = true;
+        }}
+        el.style.background = '{BG}';
+        var sp = document.getElementById('sf-instant-nav-overlay-spinner');
+        if (sp) {{ sp.style.border = '3px solid {LINE}'; sp.style.borderTopColor = '{TEAL}'; }}
+    }})();
+    </script>
+    """, unsafe_allow_javascript=True)
 
 
 # ── LAYOUT COMPONENTS ─────────────────────────────────────────────────────────
@@ -1715,7 +1811,38 @@ def clear_nav_overlay():
     than every other page's. A no-op when this rerun was never a
     navigation, or the overlay was already cleared -- safe to call
     unconditionally, including from a page that never has anything to
-    clear."""
+    clear.
+
+    Also hides the instant, client-only overlay (search
+    window.__sfShowInstantOverlay in inject_global_css()) via its own
+    __sfHideInstantOverlay() -- the ONE place both overlays get cleared,
+    so they can never drift out of sync with each other regardless of
+    which of this function's call sites actually fires on a given run.
+
+    That hide call is emitted UNCONDITIONALLY, before either early
+    return below, not only when _nav_overlay_active is true -- reported
+    live as an intermittent duplicate/stale page header (the exact
+    "structural mismatch between reruns" class of bug this file's nav-
+    overlay docstring already covers elsewhere, reproduced here via the
+    account-menu popover -> "My profile" path specifically, which costs
+    an extra rerun the plain sidebar nav path doesn't). This function is
+    always called from the SAME fixed script position for a given page
+    (either app.py's one normal end-of-script call, or one specific
+    page's own early-exit call), every single time that page renders --
+    but an EARLIER version only emitted this html() call when
+    _nav_overlay_active was true, meaning two consecutive renders of the
+    identical page (say, Income Forecast rendered plainly, then again
+    right after a nav-triggered load) had a DIFFERENT element present at
+    that same trailing position depending on nav status alone --
+    unrelated to the page's own content -- which is exactly the kind of
+    inconsistency that can break the frontend's reconciliation between
+    runs. window.__sfHideInstantOverlay() is a harmless no-op when
+    nothing is showing, so emitting it every time costs nothing and
+    keeps this position structurally identical across every render of a
+    given page, nav-triggered or not."""
+    st.html("""
+    <script>window.__sfHideInstantOverlay && window.__sfHideInstantOverlay();</script>
+    """, unsafe_allow_javascript=True)
     if not st.session_state.get('_nav_overlay_active'):
         return
     ph = st.session_state.get('_nav_overlay_ph')
