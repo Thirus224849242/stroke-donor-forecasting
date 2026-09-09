@@ -1696,6 +1696,7 @@ def empty_state():
             if st.button('Go to Data Pipeline', icon=':material/database:', type='primary', width='stretch'):
                 st.session_state.page = 'Data Pipeline'
                 st.rerun()
+    clear_nav_overlay()
     st.stop()
 
 
@@ -1787,6 +1788,45 @@ def render_nav_transition_overlay():
     </div>
     <style>@keyframes sf-nav-transition-spin {{ to {{ transform: rotate(360deg); }} }}</style>
     """, unsafe_allow_html=True)
+
+
+def clear_nav_overlay():
+    """Call from any early-exit path -- right before an st.stop() -- that
+    might fire on a run where the nav-transition overlay above was
+    opened. Without this, that overlay was reported live to sometimes
+    stay open indefinitely: app.py's own end-of-script clearing code
+    (search this same function's other call site there) only runs once
+    a page's ENTIRE body has finished rendering, but several pages call
+    st.stop() well before that -- Data Pipeline and Users' own
+    "Administrators/Super Admins only" permission gates, Run History's
+    "not configured"/"no runs yet" screens, and every dashboard page's
+    empty_state() below when no pipeline data is loaded. st.stop()
+    aborts the script immediately, so on any of those paths app.py's
+    clearing code simply never ran at all, leaving the overlay covering
+    the page (or, on some later unrelated rerun, however Streamlit
+    happened to reconcile the stale placeholder) rather than actually
+    revealing the permission-denied/empty-state message underneath it.
+
+    Reads the placeholder and the one-shot "was this run a real
+    navigation" flag from session_state rather than taking them as
+    parameters -- both are set in app.py, a different module from every
+    call site here (this file, and page bodies in app.py itself, both
+    too far from that module-level variable to close over it directly).
+    Same fixed pause as the normal path before clearing, so an early-
+    exit page's loading transition doesn't feel abruptly cut shorter
+    than every other page's. A no-op when this rerun was never a
+    navigation, or the overlay was already cleared -- safe to call
+    unconditionally, including from a page that never has anything to
+    clear."""
+    if not st.session_state.get('_nav_overlay_active'):
+        return
+    ph = st.session_state.get('_nav_overlay_ph')
+    if ph is None:
+        return
+    import time
+    time.sleep(0.35)
+    ph.empty()
+    st.session_state['_nav_overlay_active'] = False
 
 
 def _peek_columns(f):

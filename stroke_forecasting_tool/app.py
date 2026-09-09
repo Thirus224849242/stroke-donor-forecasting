@@ -85,8 +85,8 @@ from db import (
 # current module attribute at the moment it's actually used.
 import ui
 from ui import (
-    CACHED_RUN_BANNER_PAGES, card, chart, empty_state, inject_global_css, kpi,
-    new_execution_log, overall_progress, page_header, pill, render_cached_run_banner,
+    CACHED_RUN_BANNER_PAGES, card, chart, clear_nav_overlay, empty_state, inject_global_css,
+    kpi, new_execution_log, overall_progress, page_header, pill, render_cached_run_banner,
     render_footer, render_nav_transition_overlay, render_sidebar, render_startup_progress,
     stage_row, upload_slot,
 )
@@ -941,9 +941,6 @@ st.session_state.page_export_filename = (
 _nav_just_happened = bool(st.session_state.get('nav_loading'))
 st.session_state.nav_loading = False
 
-inject_global_css()
-render_sidebar()
-
 # Opaque full-viewport cover, held open through this entire page's
 # render (cleared at the very end, alongside the sign-in overlay --
 # search _nav_overlay_ph below) -- see render_nav_transition_overlay()'s
@@ -955,6 +952,29 @@ render_sidebar()
 # sandwiching the real one. Placed before the cached-run banner below
 # so the overlay also covers that during the transition -- the banner
 # still reveals itself right as the transition ends, same as before.
+#
+# Created BEFORE inject_global_css()/render_sidebar(), not after --
+# reported live as an intermittent brief flash of the OLD page (Users
+# and Profile specifically, though never reliably reproducible on
+# demand, which pointed at something timing-dependent rather than a
+# structural per-page difference) before the loader ever appeared.
+# Root-caused via a live DOM probe: render_sidebar() runs its own DB
+# reads on every single render, not just when navigating to the pages
+# they back -- count_new_runs()/count_pending_requests() for the Run
+# History/Users nav badges -- cached, but with a short TTL specifically
+# because they run on every page's sidebar; a cache miss (typically
+# after the user's been reading a page for a while, letting that TTL
+# lapse -- exactly the pattern of pausing to read a dashboard before
+# opening the account menu or the Users page) makes that a genuine,
+# variable-latency DB round trip. With the overlay created AFTER
+# render_sidebar(), the script spent that whole round trip with no
+# overlay in the DOM yet at all, leaving Streamlit's own native stale-
+# content dimming as the only visible feedback until the overlay
+# finally appeared. Moving creation ahead of both calls means the
+# overlay is already covering the page before either one gets a chance
+# to run long, regardless of which page's badge query happens to miss
+# its cache -- not a fix specific to Users/Profile, since any page's
+# navigation could have hit this depending on timing.
 #
 # The placeholder itself is created UNCONDITIONALLY, on every single
 # run -- reported live (surviving a full browser + server restart, so
@@ -975,6 +995,30 @@ _nav_overlay_ph = st.empty()
 if _nav_just_happened:
     with _nav_overlay_ph.container():
         render_nav_transition_overlay()
+# Stashed in session_state so clear_nav_overlay() (ui.py) can reach this
+# SAME placeholder from an early-exit st.stop() deep inside a page body
+# (a permission gate, an empty-state screen) -- those live in ui.py and
+# in page bodies below, both too far from this module-level variable to
+# close over it directly, and st.stop() means they can never rely on
+# the normal end-of-script clearing block further down ever running.
+# See clear_nav_overlay()'s own docstring for why this matters: without
+# it, that clearing code simply never runs on those pages, leaving the
+# overlay open indefinitely.
+st.session_state['_nav_overlay_ph'] = _nav_overlay_ph
+st.session_state['_nav_overlay_active'] = _nav_just_happened
+
+# Runs AFTER the overlay above is already up, not before -- see that
+# block's own comment for why (render_sidebar()'s badge queries can be a
+# real, variable-latency DB round trip on a cache miss, and the overlay
+# needs to already be covering the page before that can happen, not
+# after). BG/LINE/TEAL (used by render_nav_transition_overlay() above,
+# via ui.py's module-level palette constants) still hold whatever
+# _apply_palette() set them to on the PREVIOUS rerun at this point --
+# fine here since a dark-mode toggle triggers its own plain st.rerun(),
+# never a nav-triggered one, so _nav_just_happened is never True on the
+# one rerun where those constants would actually be changing.
+inject_global_css()
+render_sidebar()
 
 # CACHED_RUN_BANNER_PAGES, not every page -- reported live, this used to
 # show (and could auto-reveal, via the nav_loading flag "My profile" now
@@ -1043,6 +1087,7 @@ if page == 'Data Pipeline':
                 </div>
             </div>
             """, unsafe_allow_html=True)
+        clear_nav_overlay()
         st.stop()
 
     if st.session_state.data_source == 'cached' and db_configured():
@@ -2414,6 +2459,7 @@ elif page == 'Run History':
                 </div>
             </div>
             """, unsafe_allow_html=True)
+        clear_nav_overlay()
         st.stop()
 
     runs = list_dashboard_runs()
@@ -2431,6 +2477,7 @@ elif page == 'Run History':
                 </div>
             </div>
             """, unsafe_allow_html=True)
+        clear_nav_overlay()
         st.stop()
 
     runs['run_at'] = pd.to_datetime(runs['run_at'])
@@ -2656,6 +2703,7 @@ elif page == 'Users':
                 </div>
             </div>
             """, unsafe_allow_html=True)
+        clear_nav_overlay()
         st.stop()
 
     if not db_configured():
@@ -2672,6 +2720,7 @@ elif page == 'Users':
                 </div>
             </div>
             """, unsafe_allow_html=True)
+        clear_nav_overlay()
         st.stop()
 
     current_email = (st.session_state.user or {}).get('email', '')
@@ -3126,16 +3175,14 @@ if _signing_in_overlay_ph is not None:
 # browser never shows a half-built page, and never the previous page's
 # stale content either (the actual bug this overlay replaced a plain
 # CSS blur to fix -- see render_nav_transition_overlay()'s docstring).
-# The brief sleep first is a deliberate, perceptible hold, not a
-# readiness check -- the page above has already fully finished
-# rendering by this point; same reasoning as the 2FA QR placeholder's
-# and complete_sign_out()'s equivalent pauses. Gated on _nav_just_happened,
-# not "is the placeholder not None" -- the placeholder itself now always
-# exists (see where it's created, right after render_sidebar()), so that
-# check would otherwise be true, and this sleep would fire, on every
-# single rerun rather than only nav-triggered ones.
-if _nav_just_happened:
-    import time
-    time.sleep(0.35)
-    _nav_overlay_ph.empty()
+# This is the NORMAL path -- a page that ran all the way through without
+# hitting an early st.stop() (a permission gate, an empty-state screen).
+# Those call clear_nav_overlay() themselves, right before their own
+# st.stop(), since script execution never reaches this point on that
+# path at all; both paths share the exact same function so neither one
+# can drift out of sync with the other (see its docstring for the
+# reasoning behind the sleep, and why this was a live, reported bug on
+# every page with an early-exit path -- Users and Data Pipeline's
+# permission gates, Run History and every dashboard's empty-data state).
+clear_nav_overlay()
 
