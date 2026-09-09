@@ -150,68 +150,6 @@ def inject_global_css():
     _apply_palette()
     st.html(f"""
     <style>
-    /* ── Motion system ────────────────────────────────────────────────
-    Centralised so every transition/animation in this stylesheet (plus
-    auth.py's pre-login screens, which duplicate just these variables
-    and the two shared keyframes below since they render before this
-    function ever runs) references one shared duration/easing
-    vocabulary instead of each rule picking its own numbers. fast =
-    hover/focus micro-interactions, base = content entrance, slow = the
-    upper bound this app intentionally never exceeds for a UI
-    transition. Reduced-motion below zeroes transition-duration on
-    EVERY element (the standard, robust way to cover this app's own
-    rules plus anything Streamlit's own frontend transitions, without
-    enumerating selectors one by one) and turns off the decorative
-    page-entrance animation -- deliberately leaves animation-duration
-    alone, so the handful of pre-existing indeterminate loading spinners/
-    bars (sf-spin/sf-slide below) keep communicating genuine in-progress
-    status rather than going motionless, the same distinction most
-    accessibility guidance draws between decorative and status motion. */
-    :root {{
-        --sf-motion-fast: 150ms; --sf-motion-base: 250ms; --sf-motion-slow: 350ms;
-        --sf-ease: ease; --sf-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-    }}
-    @media (prefers-reduced-motion: reduce) {{
-        *, *::before, *::after {{ transition-duration: 0.01ms !important; transition-delay: 0ms !important; }}
-        .sf-page-enter {{ animation: none !important; }}
-    }}
-    /* Shared keyframes -- sf-spin (rotate, used by every loading spinner
-    in this app) and sf-slide (the indeterminate progress-bar sweep used
-    by stage_row()'s running state and render_startup_progress()) used
-    to be five near-identical, differently-named copies scattered across
-    this file, auth.py, and app.py. One definition of each here for
-    every post-login call site (render_nav_transition_overlay() below,
-    app.py's 2FA setup spinner); render_startup_progress() below and
-    auth.py's render_transition_spinner() keep their own copy of
-    whichever one they use since both have call sites that render
-    BEFORE this function ever runs (the login page itself) and can't
-    depend on a stylesheet that isn't injected yet -- same name and
-    body as here, just not able to be the single source for those two. */
-    @keyframes sf-spin {{ to {{ transform: rotate(360deg); }} }}
-    @keyframes sf-slide {{ 0% {{ left: -40%; }} 100% {{ left: 100%; }} }}
-    /* One-shot page-entrance fade/slide -- added to .block-container by
-    a tiny script emitted only on the single rerun right after a real
-    navigation (search render_page_enter_effect() and _nav_just_happened
-    in app.py), never as a permanent class -- .block-container itself
-    never remounts across reruns (Streamlit swaps its CHILDREN, not the
-    node itself), so this has to be an explicit, gated class toggle
-    rather than a plain "animate on mount" CSS rule, or it would only
-    ever play once per browser tab for the whole session. Gating on that
-    one-shot flag (rather than making this unconditional) is also what
-    keeps it from replaying on every ordinary widget rerun -- an
-    unconditional rule here would fire on every dropdown change too. */
-    @keyframes sf-page-fade-slide-in {{
-        from {{ opacity: 0; transform: translateY(6px); }}
-        to {{ opacity: 1; transform: none; }}
-    }}
-    .sf-page-enter {{ animation: sf-page-fade-slide-in var(--sf-motion-base) var(--sf-ease-out); }}
-    /* Generic fade-in for content that only ever mounts in response to a
-    real, discrete event -- a popover opening, an st.error/st.success
-    appearing -- never on an ordinary rerun where the element already
-    exists (it doesn't replay just because its content updates in
-    place). Safe as an unconditional rule for exactly that reason. */
-    @keyframes sf-fade-in {{ from {{ opacity: 0; }} to {{ opacity: 1; }} }}
-
     footer, [data-testid="stDecoration"], [data-testid="stAppDeployButton"],
     [data-testid="stMainMenu"] {{ display: none !important; }}
     /* Streamlit's own top-right "Running..."/Stop indicator -- fires on
@@ -319,23 +257,16 @@ def inject_global_css():
         border: 1px solid {LINE} !important;
         box-shadow: none !important;
         border-radius: 0 !important;
-        transition: border-color var(--sf-motion-fast) var(--sf-ease);
+        transition: border-color 0.15s ease;
     }}
     [data-testid="stVerticalBlock"][overflow="visible"]:hover {{ border-color: {TEAL} !important; }}
-    /* KPI tiles (st.metric, via kpi() below) didn't share the card hover
-    above -- same border-only treatment extended here for consistency
-    (still no shadow/scale, per this app's flat "structure from the
-    border" look) rather than leaving statistic cards as the one
-    un-interactive tile type on the page. */
     [data-testid="stMetric"] {{
         background: {SURFACE} !important;
         border: 1px solid {LINE} !important;
         box-shadow: none !important;
         border-radius: 0 !important;
         padding: 18px 20px 16px !important;
-        transition: border-color var(--sf-motion-fast) var(--sf-ease);
     }}
-    [data-testid="stMetric"]:hover {{ border-color: {TEAL} !important; }}
     [data-testid="stMetricValue"] {{ white-space: nowrap; font-variant-numeric: tabular-nums; }}
     /* Streamlit wraps each card in its own single-child flex-direction:column
     wrapper. The old "flex: 1 1 210px" here set flex-basis: 210px meaning to
@@ -706,28 +637,6 @@ def inject_global_css():
     [data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]) {{
         background: {TEALLT} !important; color: {GREEN} !important;
     }}
-    /* Alerts (st.error/st.warning/st.success/st.info) only ever mount
-    when the condition showing them turns true -- genuinely new content
-    at that moment, not something already on screen being re-painted --
-    so a fade-in here can't replay on an unrelated rerun; it only plays
-    when the message itself first appears. */
-    [data-testid="stAlertContainer"] {{ animation: sf-fade-in var(--sf-motion-base) var(--sf-ease-out); }}
-    /* A :focus-within border-color override was tried here and reverted
-    -- confirmed live it's a genuine Streamlit limitation, not a
-    selector/specificity mistake: Streamlit's frontend wraps its own
-    styles in a CSS @layer, and per the Cascade Layers spec that
-    INVERTS !important precedence specifically -- an unlayered
-    !important rule (anything st.html() injects, this app's entire
-    stylesheet included) is the WEAKEST possible author-level !important
-    once any layered !important rule exists on the page, the opposite of
-    how !important normally wins. Streamlit's own focus-border rule
-    lives inside that layer, so no selector this app can write from
-    outside it will ever override just the focus state (the non-focus
-    border-color above still works fine -- that path isn't layered).
-    Matching our own rules against a moving, unnamed internal Streamlit
-    layer to "win" the cascade would be exactly the fragile, version-
-    dependent hack this app's own conventions rule out elsewhere. Left
-    undone rather than forced. */
     [data-testid="stTextInputRootElement"],
     [data-testid="stSelectbox"] [role="group"],
     [data-testid="stMultiSelect"] [role="group"],
@@ -735,21 +644,6 @@ def inject_global_css():
     [data-testid="stDateInput"] [role="group"] {{
         background: {SURFACE} !important; border-color: {LINE} !important;
     }}
-    /* Popover bodies (the account menu, Users-page Role/Manage popovers)
-    genuinely mount fresh each time they're opened -- Streamlit tears
-    them down when closed, not just hides them -- so this only ever
-    plays on an actual open click, never on an unrelated rerun while
-    already open. */
-    [data-testid="stPopoverBody"] {{ animation: sf-fade-in var(--sf-motion-fast) var(--sf-ease-out); }}
-    /* st.spinner()'s own container -- mounts fresh each time a `with
-    st.spinner():` block starts (the wrapping element genuinely appears/
-    disappears, it isn't hidden-and-shown), so a fade-in here plays
-    exactly once per spinner appearance, never on an unrelated rerun.
-    Only the outer container is targeted, not the icon/text inside it --
-    Streamlit's internal spinner markup isn't a stable public contract
-    the way data-testid values are, so reaching further in risks
-    breaking on a future Streamlit upgrade for a purely cosmetic gain. */
-    [data-testid="stSpinner"] {{ animation: sf-fade-in var(--sf-motion-base) var(--sf-ease-out); }}
     [data-testid="stTextInput"] input, [data-testid="stNumberInput"] input,
     [data-testid="stSelectbox"] input, [data-testid="stDateInput"] input {{
         color: {TEXT} !important;
@@ -861,7 +755,8 @@ def inject_global_css():
     .sf-stage-bar-fill.done    {{ width: 100%; left: 0; background: {GREEN}; }}
     .sf-stage-bar-fill.warning {{ width: 100%; left: 0; background: {AMBER}; }}
     .sf-stage-bar-fill.error   {{ width: 100%; left: 0; background: {RED}; }}
-    .sf-stage-bar-fill.running {{ width: 40%; background: {TEAL}; animation: sf-slide 1.1s ease-in-out infinite; }}
+    .sf-stage-bar-fill.running {{ width: 40%; background: {TEAL}; animation: sf-bar-slide 1.1s ease-in-out infinite; }}
+    @keyframes sf-bar-slide {{ 0% {{ left: -40%; }} 100% {{ left: 100%; }} }}
 
     /* ── Overall pipeline progress bar (Data Pipeline page) ── */
     /* margin-bottom is a real fix, not decoration: verified via a
@@ -917,31 +812,6 @@ def inject_global_css():
     .stButton > button, .stDownloadButton > button {{ font-weight: 500 !important; font-size: 13px !important; }}
     .stDownloadButton > button {{ background: {SURFACE} !important; color: {SLATE} !important; border: 1px solid {LINE} !important; }}
     .stDownloadButton > button:hover {{ border-color: {TEAL} !important; background: {TEAL} !important; color: white !important; }}
-    /* Universal hover/press feedback for every button in the main
-    content area (sidebar nav buttons and the download button above
-    already carry their own hover). [data-testid^="stBaseButton-"]
-    (starts-with, not an exact match -- same reasoning as the existing
-    comment on this pattern further up this file) catches every variant
-    Streamlit issues -- primary, secondary, the two form-submit ones --
-    with one rule instead of enumerating each. A translateY press on
-    :active, not a scale transform -- this app's buttons are square
-    (buttonRadius=0), and a scale reads oddly on a hard-cornered
-    rectangle in a way it wouldn't on a pill-shaped one. Disabled buttons
-    drop to a flat reduced opacity instead of each browser's own default
-    disabled rendering, which otherwise looks inconsistent between light
-    and dark mode here; already-more-specific rules (e.g. the sidebar's
-    own :disabled treatment) still win over this by CSS specificity. */
-    .stButton > button, .stFormSubmitButton > button, .stDownloadButton > button,
-    [data-testid^="stBaseButton-"] {{
-        transition: background-color var(--sf-motion-fast) var(--sf-ease),
-            border-color var(--sf-motion-fast) var(--sf-ease),
-            color var(--sf-motion-fast) var(--sf-ease),
-            opacity var(--sf-motion-fast) var(--sf-ease);
-    }}
-    .stButton > button:active, .stFormSubmitButton > button:active,
-    .stDownloadButton > button:active {{ transform: translateY(1px); }}
-    .stButton > button:disabled, .stFormSubmitButton > button:disabled,
-    .stDownloadButton > button:disabled {{ opacity: 0.55 !important; transform: none !important; }}
 
     /* ── Pipeline flow diagram -- flat, hairline border, no shadow ── */
     .sf-pipeline {{ display: flex; align-items: center; background: {SURFACE}; border: 1px solid {LINE};
@@ -1675,15 +1545,13 @@ def render_startup_progress(placeholder, done: bool = False, label: str | None =
     render_login() and app.py's post-login restore block).
 
     Deliberately not the shared .sf-stage-bar-track/.sf-stage-bar-fill
-    CSS classes (defined in inject_global_css()'s stylesheet): this bar
-    is shown starting from the login page itself, before
-    inject_global_css() has ever run for this session -- confirmed live,
-    referencing a class from a stylesheet that isn't on the page yet
-    renders unstyled. The values below are copied from stage_row()'s CSS
-    so the two look and move identically anyway. Its own @keyframes
-    below uses the same name (sf-slide) and body as inject_global_css()'s
-    shared one for the same reason -- this one can't rely on that
-    stylesheet already being on the page, so it keeps its own copy.
+    CSS classes or the shared @keyframes sf-bar-slide (both defined in
+    inject_global_css()'s stylesheet): this bar is shown starting from
+    the login page itself, before inject_global_css() has ever run for
+    this session -- confirmed live, referencing a class from a
+    stylesheet that isn't on the page yet renders unstyled. The values
+    below are copied from stage_row()'s CSS so the two look and move
+    identically anyway.
 
     Why this exists at all rather than just fixing the underlying delay:
     measured live against the real database, ~2.7s of the ~3.8s the
@@ -1716,9 +1584,9 @@ def render_startup_progress(placeholder, done: bool = False, label: str | None =
     placeholder.markdown(f"""{_label_html}<div style="position:fixed;top:0;left:0;right:0;height:4px;z-index:999999;
 background:rgba(0,0,0,0.08);overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.15);">
 <div style="height:100%;width:40%;left:-40%;position:absolute;top:0;
-background:{GREEN};animation:sf-slide 1.1s ease-in-out infinite;"></div>
+background:{GREEN};animation:sf-startup-bar-slide 1.1s ease-in-out infinite;"></div>
 </div>
-<style>@keyframes sf-slide {{ 0% {{ left:-40%; }} 100% {{ left:100%; }} }}</style>
+<style>@keyframes sf-startup-bar-slide {{ 0% {{ left:-40%; }} 100% {{ left:100%; }} }}</style>
 """, unsafe_allow_html=True)
 
 
@@ -1908,13 +1776,6 @@ def render_nav_transition_overlay():
     left+width -- calc(100% - var(...)) resolves the same intent
     (viewport width minus the sidebar) as an explicit width instead,
     which the spec does honour.
-
-    animation:sf-spin, no local @keyframes here (there used to be one,
-    named sf-nav-transition-spin) -- this function only ever renders
-    after inject_global_css() has already run earlier in the same
-    script run (app.py calls it right after render_sidebar()), so the
-    shared @keyframes sf-spin defined there is already on the page by
-    the time this markdown streams in.
     """
     st.markdown(f"""
     <div style="position:fixed;top:0;bottom:0;left:var(--sf-sidebar-w, 300px);
@@ -1922,54 +1783,10 @@ def render_nav_transition_overlay():
         display:flex;align-items:center;justify-content:center;">
         <div style="width:34px;height:34px;border-radius:50%;
             border:3px solid {LINE};border-top-color:{TEAL};
-            animation:sf-spin 0.8s linear infinite;"></div>
+            animation:sf-nav-transition-spin 0.8s linear infinite;"></div>
     </div>
+    <style>@keyframes sf-nav-transition-spin {{ to {{ transform: rotate(360deg); }} }}</style>
     """, unsafe_allow_html=True)
-
-
-def render_page_enter_effect():
-    """Call once, right after clearing the nav-transition overlay (search
-    _nav_overlay_ph.empty() in app.py) -- not any earlier. The fade
-    needs to play only once the overlay has actually lifted and the
-    destination page's content is what the browser is showing;
-    triggered any earlier, the animation would finish running while
-    still hidden behind the still-open overlay, so lifting the overlay
-    would just reveal the already-fully-faded-in end state instead of
-    the fade itself.
-
-    Toggles .sf-page-enter (defined in inject_global_css(), search
-    sf-page-fade-slide-in) on .block-container -- the one stable element
-    every page's content actually lives inside, and the reason this has
-    to be an explicit script rather than a plain always-on CSS rule:
-    .block-container itself never remounts across reruns (Streamlit
-    swaps its CHILDREN, not the node itself), so an unconditional
-    "animate on mount" rule on it would only ever play once per browser
-    tab for the whole session, not once per navigation.
-
-    No self-guard the way this file's other always-on scripts (the
-    banner's reveal listener, the sidebar-width tracker) need one --
-    this one is only ever emitted by app.py inside `if
-    _nav_just_happened:`, so it naturally runs at most once per real
-    navigation and never on an ordinary widget rerun; there's nothing
-    here that would double up if it somehow ran twice anyway.
-
-    void el.offsetWidth forces a reflow between removing and re-adding
-    the class -- without it, two navigations close enough together
-    would still have the class present from the first one when this
-    runs again, and re-adding a class that's already there doesn't
-    restart a CSS animation."""
-    st.html("""
-    <script>
-    (function() {
-        var el = document.querySelector('.block-container');
-        if (!el) return;
-        el.classList.remove('sf-page-enter');
-        void el.offsetWidth;
-        el.classList.add('sf-page-enter');
-        setTimeout(function() { el.classList.remove('sf-page-enter'); }, 400);
-    })();
-    </script>
-    """, unsafe_allow_javascript=True)
 
 
 def _peek_columns(f):

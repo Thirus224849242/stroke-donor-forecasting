@@ -289,14 +289,14 @@ def render_transition_spinner(label: str):
         <div style="text-align:center;">
             <div style="width:34px;height:34px;border-radius:50%;margin:0 auto 16px;
                 border:3px solid #E2E8F0;border-top-color:#00897B;
-                animation:sf-spin 0.8s linear infinite;"></div>
+                animation:sf-transition-spin 0.8s linear infinite;"></div>
             <div style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:12.5px;
                 font-weight:600;color:#64748B;letter-spacing:0.06em;text-transform:uppercase;">
                 {label}
             </div>
         </div>
     </div>
-    <style>@keyframes sf-spin {{ to {{ transform: rotate(360deg); }} }}</style>
+    <style>@keyframes sf-transition-spin {{ to {{ transform: rotate(360deg); }} }}</style>
     """)
 
 
