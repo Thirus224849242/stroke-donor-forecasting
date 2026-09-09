@@ -87,8 +87,8 @@ import ui
 from ui import (
     CACHED_RUN_BANNER_PAGES, card, chart, empty_state, inject_global_css, kpi,
     new_execution_log, overall_progress, page_header, pill, render_cached_run_banner,
-    render_footer, render_nav_transition_overlay, render_sidebar, render_startup_progress,
-    stage_row, upload_slot,
+    render_footer, render_nav_transition_overlay, render_page_enter_effect, render_sidebar,
+    render_startup_progress, stage_row, upload_slot,
 )
 
 
@@ -616,7 +616,10 @@ def _render_2fa_card(_email):
                     # short, deliberate beat (real generation is sub-second)
                     # so it's actually perceptible as a loading state,
                     # matching the same reasoning as complete_sign_out()'s
-                    # equivalent pause in auth.py.
+                    # equivalent pause in auth.py. animation:sf-spin, no
+                    # local @keyframes -- this page always renders after
+                    # inject_global_css() (earlier in this same script run),
+                    # whose shared @keyframes sf-spin is already on the page.
                     with _qr_ph.container():
                         st.html(f"""
                         <div style="min-height:230px;display:flex;align-items:center;
@@ -624,13 +627,12 @@ def _render_2fa_card(_email):
                             <div style="text-align:center;">
                                 <div style="width:28px;height:28px;border-radius:50%;margin:0 auto 12px;
                                     border:3px solid {ui.LINE};border-top-color:{ui.TEAL};
-                                    animation:sf-2fa-spin 0.8s linear infinite;"></div>
+                                    animation:sf-spin 0.8s linear infinite;"></div>
                                 <div style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px;
                                     font-weight:600;color:{ui.SLATE};letter-spacing:0.06em;
                                     text-transform:uppercase;">Generating QR code&hellip;</div>
                             </div>
                         </div>
-                        <style>@keyframes sf-2fa-spin {{ to {{ transform: rotate(360deg); }} }}</style>
                         """)
                     try:
                         import io
@@ -3138,4 +3140,5 @@ if _nav_just_happened:
     import time
     time.sleep(0.35)
     _nav_overlay_ph.empty()
+    render_page_enter_effect()
 
