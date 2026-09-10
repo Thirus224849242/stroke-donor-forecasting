@@ -1064,6 +1064,269 @@ def inject_global_css():
     }})();
     </script>
     """, unsafe_allow_javascript=True)
+    render_upload_progress_tracker()
+
+
+def render_upload_progress_tracker():
+    """Real, byte-level upload progress for every st.file_uploader() in the
+    app (currently the 4 CSV slots in upload_slot() -- pipeline_upload_area
+    in app.py), without replacing the widget or touching the backend.
+
+    THE PROBLEM: confirmed by reading Streamlit 1.61.1's own frontend
+    source (site-packages/streamlit/static/static/js/FileUploader.*.js).
+    The upload client DOES support a live progress callback --
+    FileUploadClient.uploadFile() passes {onUploadProgress: r} into its
+    underlying axios/XHR request -- but FileUploader.js calls that function
+    with `void 0` in the callback's argument slot. The plumbing exists;
+    the widget just never wires it up. So today the dropzone shows a bare
+    "uploading" spinner with no percentage for the full duration of a
+    multi-minute transfer.
+
+    THE FIX: intercept at the browser API level instead of replacing the
+    widget. axios's default browser adapter is XMLHttpRequest, so this
+    monkey-patches XMLHttpRequest.prototype.open/send ONCE, globally.
+    Every PUT to Streamlit's own upload endpoint (server.py's
+    UPLOAD_FILE_ENDPOINT = "/_stcore/upload_file") gets a REAL
+    xhr.upload.addEventListener('progress', ...) attached before the
+    genuine send() proceeds -- e.lengthComputable/e.loaded/e.total are
+    the browser's own numbers, never a timer or an estimate. The
+    filename and total size come straight out of the intercepted
+    FormData body (Streamlit appends the actual File object), so there
+    is no guessing which of the 4 slots an upload belongs to.
+
+    This deliberately does NOT touch Streamlit's own React-managed DOM
+    (no node is inserted inside the dropzone itself) -- the progress bar
+    is a detached element appended straight to document.body, exactly
+    like the instant-nav overlay above and for the same reason: living
+    outside the reconciled tree means a script rerun can never wipe it
+    out or throw trying to reconcile a child it didn't create. It is
+    then visually pinned beside that upload's own dropzone (per explicit
+    request -- shown right in the empty space next to the file chip,
+    not as a separate floating panel) by reading that dropzone's
+    getBoundingClientRect() on a rAF loop and positioning the bar with
+    position:fixed accordingly, so it tracks scrolling/resizing without
+    ever becoming a child Streamlit's own reconciliation has to know
+    about. Streamlit's own dropzone still shows its native (contentless)
+    spinner underneath -- left alone deliberately, since replacing it
+    would mean mutating React's own subtree.
+
+    Matching a given upload back to the dropzone it came from: the XHR
+    interception below only ever sees the request itself (method, URL,
+    FormData), which carries the file's name/size but no reference to
+    which of the 4 widgets it came from. A delegated 'change' listener
+    on every file <input> fixes that cheaply -- the instant a file is
+    picked, its dropzone ancestor is queued, and Streamlit starts the
+    matching PUT within milliseconds, so FIFO-popping that queue when a
+    real upload is detected reliably pairs them up. Worst case if two
+    uploads start in the same instant (rare -- each dropzone only
+    accepts one file) is the bar appearing beside the wrong one of the
+    two while the percentage itself stays exactly correct either way.
+
+    VERSION RISK, explicitly: this relies on (a) the "/_stcore/upload_file"
+    URL substring and (b) axios still using the XHR adapter with a
+    FormData body carrying a File/Blob value. If either changes in a
+    future Streamlit version, the `if` inside send() below simply never
+    matches -- the real upload proceeds exactly as before (OrigSend is
+    always called), so the worst case is silently falling back to
+    today's spinner-only behaviour, never a broken upload. The try/catch
+    around the whole detection block is the other half of that guarantee.
+
+    Idempotent (window.__sfUploadPatched guard) so this being called on
+    every rerun via inject_global_css() never re-patches the prototype
+    or double-attaches listeners."""
+    st.html(f"""
+    <script>
+    (function() {{
+        // Built with createElement/textContent, deliberately NOT innerHTML
+        // with an HTML-string template -- confirmed live that Streamlit's
+        // st.html(unsafe_allow_javascript=True) runs the whole body through
+        // DOMPurify first, which allows a script element through but then
+        // scans the ENTIRE script body as text. Any opening-and-closing
+        // element pair it recognises there -- even one that only ever
+        // existed as a JS string literal building a DOM template, never
+        // actually parsed as markup by a real browser -- reads to it as a
+        // smuggling attempt, and it silently drops the whole element with
+        // no error anywhere. That was reproduced directly (sanitizing an
+        // earlier innerHTML-based version of this same bar came back
+        // empty) and was the actual cause of this feature silently doing
+        // nothing end to end. Building every element via DOM calls instead
+        // means none of that punctuation ever appears in the script's own
+        // text, so there is nothing left for that heuristic to trip on.
+        function fmtBytes(n) {{
+            if (n >= 1e9) return (n / 1e9).toFixed(2) + ' GB';
+            if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
+            if (n >= 1e3) return (n / 1e3).toFixed(0) + ' KB';
+            return Math.max(0, n | 0) + ' B';
+        }}
+
+        function makeBar() {{
+            var wrap = document.createElement('div');
+            wrap.style.cssText = 'position:fixed;left:0;top:0;z-index:999999999;'
+                + 'display:flex;align-items:center;gap:8px;pointer-events:none;'
+                + 'font-family:inherit;';
+
+            // Square track/fill, no border-radius, matching the Data
+            // Pipeline page's own "Overall progress" bar exactly
+            // (.sf-overall-track/.sf-overall-fill in this same file) --
+            // this app's Swiss-financial aesthetic keeps every corner
+            // square (see config.toml's baseRadius = "0px"), so a rounded
+            // bar here would have been the one inconsistent shape on the
+            // whole page.
+            var track = document.createElement('div');
+            track.style.cssText = 'width:180px;height:6px;overflow:hidden;background:{SURFACE2};';
+            var fill = document.createElement('div');
+            fill.className = 'sf-up-fill';
+            fill.style.cssText = 'height:100%;width:0%;background:{TEAL};transition:width 0.3s ease;';
+            track.appendChild(fill);
+
+            var pctEl = document.createElement('span');
+            pctEl.className = 'sf-up-pct';
+            pctEl.style.cssText = 'font-size:12px;font-weight:600;color:{TEXT};min-width:34px;';
+            pctEl.textContent = '0%';
+
+            wrap.appendChild(track);
+            wrap.appendChild(pctEl);
+            document.body.appendChild(wrap);
+            return wrap;
+        }}
+
+        // Positions the bar in the blank space to the right of the file
+        // chip, vertically centred on the dropzone -- kept in sync via
+        // requestAnimationFrame (not a one-off measurement) so it tracks
+        // scrolling/window resizing while the upload is in flight.
+        //
+        // Anchored from the RIGHT edge of the dropzone, not the left --
+        // confirmed live the dropzone element spans the full width of its
+        // own card/column (it's the file chip that's narrow, not the
+        // dropzone containing it), so positioning at "dropzone right + gap"
+        // pushed the bar straight past the card boundary into whatever
+        // sits in the next column. Measuring the bar's own current width
+        // and placing it inset from the dropzone's right edge instead keeps
+        // it inside the same card no matter how wide the bar's content is.
+        function trackAnchor(wrap, anchorEl) {{
+            var raf = null;
+            function tick() {{
+                var rect = anchorEl.getBoundingClientRect();
+                if (rect.width > 0 || rect.height > 0) {{
+                    var wrapWidth = wrap.getBoundingClientRect().width;
+                    var pad = 16;
+                    wrap.style.left = Math.max(0, rect.right - wrapWidth - pad) + 'px';
+                    wrap.style.top = (rect.top + rect.height / 2) + 'px';
+                    wrap.style.transform = 'translateY(-50%)';
+                }}
+                raf = requestAnimationFrame(tick);
+            }}
+            tick();
+            return function stop() {{ if (raf) cancelAnimationFrame(raf); }};
+        }}
+
+        // stopTracking() is called by the caller BEFORE this, not in here --
+        // confirmed live the rAF position-tracking loop (getBoundingClientRect
+        // every frame, a forced layout read) was still running for the whole
+        // delay below, right through the moment Streamlit's own rerun starts
+        // reconciling the uploader's DOM once the file finishes -- one more
+        // thing competing for the main thread exactly when the browser is
+        // already busiest. Freezing the bar's position the instant the
+        // outcome is known and only delaying its removal (a cheap, static
+        // wait) keeps this from adding to that.
+        function removeBar(wrap, delay) {{
+            setTimeout(function() {{
+                if (wrap && wrap.parentNode) wrap.parentNode.removeChild(wrap);
+            }}, delay);
+        }}
+
+        // Queue of dropzones a file was just picked in, oldest first --
+        // see this function's docstring for why this is how an upload
+        // request (which carries no widget identity of its own) gets
+        // paired back up with the exact dropzone it came from.
+        var pendingAnchors = [];
+        document.addEventListener('change', function(e) {{
+            var input = e.target;
+            if (!input || input.tagName !== 'INPUT' || input.type !== 'file') return;
+            var dropzone = input.closest('[data-testid="stFileUploaderDropzone"]');
+            if (dropzone) pendingAnchors.push({{ el: dropzone, ts: Date.now() }});
+        }}, true);
+
+        if (window.__sfUploadPatched) return;
+        window.__sfUploadPatched = true;
+
+        var OrigOpen = XMLHttpRequest.prototype.open;
+        var OrigSend = XMLHttpRequest.prototype.send;
+
+        XMLHttpRequest.prototype.open = function(method, url) {{
+            this.__sfMethod = method;
+            this.__sfUrl = url;
+            return OrigOpen.apply(this, arguments);
+        }};
+
+        XMLHttpRequest.prototype.send = function(body) {{
+            try {{
+                if (this.__sfMethod === 'PUT' && typeof this.__sfUrl === 'string'
+                    && this.__sfUrl.indexOf('/_stcore/upload_file') !== -1
+                    && body instanceof FormData) {{
+                    var fileMeta = null;
+                    for (var pair of body.entries()) {{
+                        if (pair[1] instanceof File || pair[1] instanceof Blob) {{
+                            fileMeta = {{ name: pair[1].name || 'file', size: pair[1].size }};
+                            break;
+                        }}
+                    }}
+                    if (fileMeta) {{
+                        // Pop the oldest still-fresh queued dropzone (15s is
+                        // generous slack for dialog + network latency between
+                        // picking the file and the PUT actually starting).
+                        var anchorEl = null;
+                        var now0 = Date.now();
+                        while (pendingAnchors.length) {{
+                            var next = pendingAnchors.shift();
+                            if (now0 - next.ts < 15000) {{ anchorEl = next.el; break; }}
+                        }}
+                        if (anchorEl) {{
+                            var wrap = makeBar();
+                            var fill = wrap.querySelector('.sf-up-fill');
+                            var pctEl = wrap.querySelector('.sf-up-pct');
+                            var stopTracking = trackAnchor(wrap, anchorEl);
+
+                            this.upload.addEventListener('progress', function(e) {{
+                                if (!e.lengthComputable) return;
+                                var pct = Math.min(100, Math.round((e.loaded / e.total) * 100));
+                                fill.style.width = pct + '%';
+                                pctEl.textContent = pct + '%';
+                            }});
+
+                            this.addEventListener('loadend', function() {{
+                                stopTracking();
+                                if (this.status >= 200 && this.status < 300) {{
+                                    fill.style.width = '100%';
+                                    pctEl.textContent = '100%';
+                                    removeBar(wrap, 900);
+                                }} else if (this.status !== 0) {{
+                                    fill.style.background = '{RED}';
+                                    pctEl.textContent = 'Failed';
+                                    pctEl.style.color = '{RED}';
+                                    removeBar(wrap, 3000);
+                                }}
+                            }});
+                            this.addEventListener('error', function() {{
+                                stopTracking();
+                                fill.style.background = '{RED}';
+                                pctEl.textContent = 'Failed';
+                                pctEl.style.color = '{RED}';
+                                removeBar(wrap, 3000);
+                            }});
+                            this.addEventListener('abort', function() {{
+                                stopTracking();
+                                removeBar(wrap, 200);
+                            }});
+                        }}
+                    }}
+                }}
+            }} catch (err) {{ /* never let instrumentation break the real upload */ }}
+            return OrigSend.apply(this, arguments);
+        }};
+    }})();
+    </script>
+    """, unsafe_allow_javascript=True)
 
 
 # ── LAYOUT COMPONENTS ─────────────────────────────────────────────────────────
