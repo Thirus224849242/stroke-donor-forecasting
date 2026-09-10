@@ -365,9 +365,27 @@ def list_dashboard_runs() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(show_spinner=False, max_entries=20)
 def load_dashboard_run(run_id: str):
     """Returns (state_dict, run_at) for one specific run, or (None, None)
-    if it doesn't exist or the DB isn't reachable."""
+    if it doesn't exist or the DB isn't reachable.
+
+    Cached, no ttl -- a saved run's blob is write-once (nothing ever
+    updates a dashboard_runs row in place, only inserts or deletes one),
+    so unlike the ttl'd caches elsewhere in this file there's nothing for
+    a short expiry to protect against; delete_dashboard_run() below
+    clears this the same way it clears list_dashboard_runs(), for the
+    one case that actually invalidates an entry. Was uncached until this
+    was flagged as a source of "pages feel slow after a restart": the
+    app's every-page auto-restore-latest-run step (app.py) called this
+    on every fresh session with no cache at all, meaning a full DB round
+    trip plus gzip-decompressing the whole dashboard-state JSON blob
+    every single time someone signed in, even seconds apart, on top of
+    the connection-latency cost get_engine() already documents.
+    max_entries=20, same reasoning as cached_ml_forecast/friends in
+    app.py -- this is keyed on run_id, which is unbounded in principle
+    (every run anyone has ever saved), so it needs a cap to avoid an
+    unbounded memory leak on a host this memory-constrained."""
     engine = get_engine()
     if engine is None:
         return None, None
@@ -401,6 +419,7 @@ def delete_dashboard_run(run_id: str) -> bool:
             conn.execute(text('DELETE FROM dashboard_runs WHERE run_id = :run_id'), {'run_id': run_id})
         count_new_runs.clear()  # a deleted run shouldn't linger in anyone's "new" badge count
         list_dashboard_runs.clear()  # so it disappears from Overview/Run History immediately
+        load_dashboard_run.clear()  # so a stale blob can't be reloaded via a lingering run_id reference
         return True
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs

@@ -1064,7 +1064,6 @@ def inject_global_css():
     }})();
     </script>
     """, unsafe_allow_javascript=True)
-    render_upload_progress_tracker()
 
 
 def render_upload_progress_tracker():
@@ -1131,12 +1130,37 @@ def render_upload_progress_tracker():
     today's spinner-only behaviour, never a broken upload. The try/catch
     around the whole detection block is the other half of that guarantee.
 
-    Idempotent (window.__sfUploadPatched guard) so this being called on
-    every rerun via inject_global_css() never re-patches the prototype
-    or double-attaches listeners."""
+    Called from the Data Pipeline page only (app.py, right alongside the
+    4 upload_slot() calls it instruments), NOT from inject_global_css() --
+    it was originally wired up there, which meant every one of the other
+    9 pages (Overview, Income Forecast, Retention Analysis, Donor
+    Lifetime Value, Supplier Insights, Campaign ROI, Run History, Users,
+    Profile) was shipping and sanitizing this ~9KB script on every single
+    visit for a feature none of them have any use for -- confirmed as a
+    real contributor to those pages feeling slower than before, alongside
+    the separate, unrelated in-memory-cache-eviction cause of the same
+    complaint (see cached_ml_forecast/cached_linear_forecast and db.py's
+    @st.cache_data reads -- all wiped on every `streamlit run` restart,
+    which is most of what made this specific session's testing feel
+    slow).
+
+    The window.__sfUploadPatched guard now sits at the very TOP of the
+    IIFE below, before the change-listener registration -- it used to sit
+    after it, which meant EVERY call to this function (i.e. every rerun
+    of whichever page it was wired to) added another document-level
+    'change' listener that never got removed, since each is a fresh
+    anonymous function addEventListener has no way to recognise as a
+    duplicate. Harmless per call, but an unbounded leak over a session's
+    lifetime. Guarding the whole body, not just the XHR patch, means this
+    function's entire script now only ever truly executes once per page
+    load, no matter how many times Data Pipeline itself reruns while
+    someone's sitting on it."""
     st.html(f"""
     <script>
     (function() {{
+        if (window.__sfUploadPatched) return;
+        window.__sfUploadPatched = true;
+
         // Built with createElement/textContent, deliberately NOT innerHTML
         // with an HTML-string template -- confirmed live that Streamlit's
         // st.html(unsafe_allow_javascript=True) runs the whole body through
@@ -1246,9 +1270,6 @@ def render_upload_progress_tracker():
             var dropzone = input.closest('[data-testid="stFileUploaderDropzone"]');
             if (dropzone) pendingAnchors.push({{ el: dropzone, ts: Date.now() }});
         }}, true);
-
-        if (window.__sfUploadPatched) return;
-        window.__sfUploadPatched = true;
 
         var OrigOpen = XMLHttpRequest.prototype.open;
         var OrigSend = XMLHttpRequest.prototype.send;

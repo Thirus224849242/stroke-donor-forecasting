@@ -87,8 +87,8 @@ import ui
 from ui import (
     CACHED_RUN_BANNER_PAGES, card, chart, clear_nav_overlay, empty_state, inject_global_css,
     kpi, new_execution_log, overall_progress, page_header, pill, render_cached_run_banner,
-    render_nav_transition_overlay, render_sidebar, render_startup_progress, stage_row,
-    upload_slot,
+    render_nav_transition_overlay, render_sidebar, render_startup_progress,
+    render_upload_progress_tracker, stage_row, upload_slot,
 )
 
 
@@ -1182,6 +1182,13 @@ if page == 'Data Pipeline':
         </div>
         """, unsafe_allow_html=True)
 
+        # Called here, once, rather than from inject_global_css() (which
+        # runs on every page) -- this is the only page with any
+        # st.file_uploader() widgets, so this is the only page that needs
+        # it. See its own docstring in ui.py for why this used to run
+        # globally and what that cost every other page.
+        render_upload_progress_tracker()
+
         st.markdown('<div class="sf-eyebrow">Source files</div>', unsafe_allow_html=True)
         col1, col2 = st.columns(2)
         with col1:
@@ -1653,26 +1660,39 @@ elif page == 'Income Forecast':
     model_choice = model_choice or 'ML forecast'
     horizon = horizon or 24
 
+    # Both rows below read straight out of session_state instead of calling
+    # cached_ml_forecast/cached_linear_forecast again -- forecast_df/mape
+    # and forecast_df_linear/mape_linear are the EXACT result of those same
+    # two calls (monthly, n_forecast=24 / n_train=24, n_forecast=24), always
+    # already computed by run_pipeline_models() and sitting in session_state
+    # (or restored straight from a saved run's DB blob, itself never a
+    # recompute either) before this page can even render. Calling them again
+    # here only ever worked because @st.cache_data usually still had that
+    # exact call warm; on any process restart since (this cache is in-memory
+    # only, wiped every `streamlit run`) or the first visit after a Run
+    # History switch to a run this process hasn't fit before, it silently
+    # became a full ~300-estimator gradient-boosting refit just to redraw a
+    # table whose numbers already existed -- confirmed as a real cause of
+    # this page feeling slow independent of whatever horizon is selected
+    # below. Reading session_state instead makes this table's cost zero
+    # regardless of cache state. ml_importances empty means the pipeline's
+    # own ML fit fell back to linear (not enough monthly history) -- the
+    # same condition the old inline call's `except ValueError` was catching,
+    # so the ML row is skipped here exactly the same way in that case.
     comp_rows = []
-    with st.spinner('Comparing forecast methods…'):
-        try:
-            cmp_ml_df, cmp_ml_mape, _, _ = cached_ml_forecast(monthly, n_forecast=24)
-            comp_rows.append({
-                'Method': 'ML forecast (gradient boosting)',
-                '12-month total': cmp_ml_df.head(12)['predicted_income'].sum(),
-                '24-month total': cmp_ml_df['predicted_income'].sum(),
-                'Validation MAPE': cmp_ml_mape,
-            })
-        except ValueError:
-            pass
-
-        cmp_lin_df, cmp_lin_mape, _, _ = cached_linear_forecast(monthly, n_train=24, n_forecast=24)
+    if st.session_state.ml_importances:
         comp_rows.append({
-            'Method': 'Linear trend',
-            '12-month total': cmp_lin_df.head(12)['predicted_income'].sum(),
-            '24-month total': cmp_lin_df['predicted_income'].sum(),
-            'Validation MAPE': cmp_lin_mape,
+            'Method': 'ML forecast (gradient boosting)',
+            '12-month total': st.session_state.forecast_df.head(12)['predicted_income'].sum(),
+            '24-month total': st.session_state.forecast_df['predicted_income'].sum(),
+            'Validation MAPE': st.session_state.mape,
         })
+    comp_rows.append({
+        'Method': 'Linear trend',
+        '12-month total': st.session_state.forecast_df_linear.head(12)['predicted_income'].sum(),
+        '24-month total': st.session_state.forecast_df_linear['predicted_income'].sum(),
+        'Validation MAPE': st.session_state.mape_linear,
+    })
 
     if sf_zone12_state is not None:
         sf_24m = sf_zone12_state['predicted_income'].sum()
