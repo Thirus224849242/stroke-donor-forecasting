@@ -86,9 +86,9 @@ from db import (
 import ui
 from ui import (
     CACHED_RUN_BANNER_PAGES, card, chart, clear_nav_overlay, empty_state, inject_global_css,
-    kpi, new_execution_log, overall_progress, page_header, pill, render_cached_run_banner,
-    render_nav_transition_overlay, render_sidebar, render_startup_progress,
-    render_upload_progress_tracker, stage_row, upload_slot,
+    kpi, new_execution_log, overall_progress, page_header, pill, render_action_button_css,
+    render_cached_run_banner, render_nav_transition_overlay, render_sidebar, render_startup_progress,
+    render_topbar, render_upload_progress_tracker, stage_row, upload_slot,
 )
 
 
@@ -1019,6 +1019,13 @@ st.session_state['_nav_overlay_active'] = _nav_just_happened
 # one rerun where those constants would actually be changing.
 inject_global_css()
 render_sidebar()
+# The fixed white topbar -- rendered once, for every authenticated page,
+# right after the sidebar. Holds the sidebar-collapse hamburger, the logo
+# + current page name, the notification bell, and the account popover
+# (My profile / dark mode / Log out), which used to live per-page in
+# page_header()'s right column. `page` is already resolved above, so the
+# popover's per-page key suffix works from here.
+render_topbar()
 
 # CACHED_RUN_BANNER_PAGES, not every page -- reported live, this used to
 # show (and could auto-reveal, via the nav_loading flag "My profile" now
@@ -2696,6 +2703,7 @@ elif page == 'Run History':
 # Google user simply vanished from every admin view with no way back
 # except the affected person re-requesting themselves).
 elif page == 'Users':
+    render_action_button_css()
     page_header('Administration', 'Users',
                 'Create and manage every sign-in account -- Google and email+password alike. '
                 'Approve or deny new Google requests, change anyone\'s role, and revoke or '
@@ -3014,7 +3022,13 @@ elif page == 'Users':
 
     # ── Create local account ──
     with card('Create local account', 'A new email + password sign-in'):
-        with st.form('create_local_account_form', border=False):
+        # The form key carries a nonce that's bumped on a SUCCESSFUL
+        # create -- a new key makes Streamlit treat it as a fresh form, so
+        # every field resets to its default. Only on success, so a
+        # validation error (bad email, short password) keeps what was
+        # typed instead of wiping it.
+        _cf_nonce = st.session_state.get('_create_acct_nonce', 0)
+        with st.form(f'create_local_account_form_{_cf_nonce}', border=False):
             cc1, cc2 = st.columns(2)
             with cc1:
                 new_email = st.text_input('Email', placeholder='name@strokefoundation.org.au')
@@ -3038,6 +3052,7 @@ elif page == 'Users':
                 st.error('Password must be at least 8 characters.', icon=':material/error:')
             elif create_local_account(clean_email, clean_name, new_role, new_password):
                 st.success(f'Account created for {clean_email}.', icon=':material/check_circle:')
+                st.session_state['_create_acct_nonce'] = _cf_nonce + 1
                 st.rerun()
             else:
                 st.error('Could not create that account -- that email may already have one.',
@@ -3091,6 +3106,7 @@ elif page == 'Profile':
     # a popover (the 2FA QR-code setup screen especially), and because the
     # profile-details editing below (Super Admin only) never fit there at
     # all. See ui.py's page_header() docstring/comments for that history.
+    render_action_button_css()
     _user = st.session_state.user or {}
     _auth_method = st.session_state.get('auth_method')
     _is_local = _auth_method == 'password'

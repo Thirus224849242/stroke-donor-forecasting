@@ -5,17 +5,20 @@ import pandas as pd
 import streamlit as st
 
 from auth import initials, sign_out
-from branding import logo_data_uri, logo_white_data_uri
+from branding import logo_data_uri
 from db import count_new_runs, count_pending_requests
 
 # ── BRAND PALETTE ────────────────────────────────────────────────────────────
-# Swiss financial / data-dense analytics: pure white surfaces, hairline gray
-# separators, restrained color in light mode; slate-900 surfaces with the
-# same brand hues (brightened for contrast) in dark mode. BG/SURFACE are the
-# same in light mode (page and login share white) -- the login page keeps
-# its own separate gradient+dot-grid regardless of mode, defined in auth.py.
+# Swiss financial / data-dense analytics: white card surfaces on a light grey
+# page canvas, hairline gray separators, restrained color in light mode;
+# slate-900 surfaces with the same brand hues (brightened for contrast) in
+# dark mode. BG is the page canvas (the grey behind the cards, matching the
+# Celestial reference layout); SURFACE is the card/panel colour (white in
+# light mode) -- the two are deliberately different now so cards lift off the
+# page. The login page keeps its own separate gradient+dot-grid regardless of
+# mode, defined in auth.py, so this grey never reaches it.
 _LIGHT = dict(
-    BG='#FFFFFF', SURFACE='#FFFFFF', SURFACE2='#F1F5F9', LINE='#E2E8F0', GRIDLINE='#F1F5F9',
+    BG='#E8ECF1', SURFACE='#FFFFFF', SURFACE2='#F1F5F9', LINE='#E2E8F0', GRIDLINE='#F1F5F9',
     TEXT='#1E1E5F', MIST='#94A3B8', SLATE='#64748B', NAVY='#1E1E5F',
     TEAL='#00897B', TEAL2='#00B5A3', TEALLT='#E0F5F3',
     PURPLE='#6B2D8B', PURPLT='#F5EEF8',
@@ -148,6 +151,10 @@ def fmt_size(num_bytes: float) -> str:
 # ── GLOBAL CSS ────────────────────────────────────────────────────────────────
 def inject_global_css():
     _apply_palette()
+    # The topbar is a solid pale mint (#EBF7F5, hardcoded in the topbar
+    # CSS below) and the page canvas is flat white in light mode / the
+    # solid dark BG token in dark mode.
+    _app_bg = BG if st.session_state.get('dark_mode') else '#FFFFFF'
     st.html(f"""
     <style>
     footer, [data-testid="stDecoration"], [data-testid="stAppDeployButton"],
@@ -199,7 +206,7 @@ def inject_global_css():
     own explicit-coloured elements (pills, badges, kpi values) are
     unaffected -- a more specific declared color always wins over an
     inherited one regardless of this. */
-    .stApp {{ background: {BG}; color: {TEXT}; }}
+    .stApp {{ background: {_app_bg}; color: {TEXT}; }}
     /* Streamlit's own nested wrappers between .stApp and the actual page
     content can carry their own opaque background from config.toml's
     fixed (non-dynamic) backgroundColor -- transparent here so .stApp's
@@ -217,7 +224,10 @@ def inject_global_css():
     Widened well past normal desktop widths so it only kicks in on very
     large/ultrawide displays, instead of on every ordinary wide window. */
     .block-container {{
-        padding-top: 0.75rem !important; padding-bottom: 2.5rem !important;
+        /* 56px clears the fixed white topbar (render_topbar()); the 0.75rem
+        on top of that is the same small breathing gap this had before the
+        topbar existed. */
+        padding-top: calc(56px + 0.75rem) !important; padding-bottom: 2.5rem !important;
         padding-left: 2rem !important; padding-right: 2rem !important;
         max-width: 1920px !important; margin: 0 auto !important;
     }}
@@ -339,122 +349,166 @@ def inject_global_css():
     cause as everything else in this block. */
     [data-testid="stTextInputRootElement"] button {{ color: {SLATE} !important; }}
 
-    /* ── Sidebar ── */
-    /* Streamlit's native sidebar header -- the collapse-arrow row above
-    the real content -- used to be hidden entirely (display:none) on the
-    assumption it always reserved/overlapped space awkwardly. Re-enabled
-    per request ("make the sidebar collapsible"). Its native computed
-    style differs across Streamlit installs -- this environment's own
-    test render showed height:52.5px + margin-bottom:14px, the user's
-    real browser showed margin-bottom:-2rem + height:3.75rem (confirmed
-    via their own DevTools computed-style paste). margin-bottom:-2rem is
-    the correct, wanted value (per explicit confirmation, not a bug), so
-    it's pinned here rather than left to whichever default a given
-    install happens to ship. height is deliberately left undeclared, not
-    set to auto -- no height rule for this selector here at all, per
-    explicit request, rather than an explicit auto override.
-    display:flex/justify-content/align-items are left alone too, neither
-    one was ever the issue. */
-    [data-testid="stSidebarHeader"] {{ margin-bottom: -2rem !important; }}
-    /* Streamlit's own default here is padding-bottom: 6rem (96px) --
-    confirmed via its actual computed style -- which was never actually
-    zeroed before (only padding-top was), leaving a large reserved gap
-    below the sidebar's real content. */
+    /* ── Sidebar: fixed narrow icon rail ──────────────────────────────
+    A fixed 64px dark navy icon-only rail -- no user card, no labels. Nav
+    labels are shown on hover as a slide-in tooltip beside the icon
+    (::after, injected per-button in render_sidebar()). The Stroke
+    Foundation logo lives in the topbar. The native collapse/resize
+    controls are hidden and there is no collapse toggle.
+
+    Force the 64px width on EVERY sidebar wrapper (Streamlit sets its own
+    via inline style + a --sidebar-width prop) with absolute px, not
+    100% -- a percentage on stSidebarUserContent resolves against a
+    shrink-wrapped ~23px box. Un-clip every ancestor of a nav button
+    (overflow: visible) so its hover tooltip can render outside the rail;
+    overflow:visible (not auto) also stops the rail becoming a scroll
+    container when a tooltip extends past its right edge. */
+    [data-testid="stSidebarHeader"] {{ display: none !important; }}
+    [data-testid="stSidebar"] {{
+        background: #1E1E5F !important;
+        border-right: 1px solid rgba(255,255,255,0.08) !important;
+        width: 64px !important; min-width: 64px !important; max-width: 64px !important;
+        overflow: visible !important;
+    }}
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="stSidebarResizeHandle"] {{ display: none !important; }}
+    [data-testid="stSidebarContent"] {{
+        width: 64px !important; padding: 0 !important; overflow: visible !important;
+    }}
+    /* padding-top still clears the fixed 56px topbar. */
     [data-testid="stSidebarUserContent"] {{
-        display: flex; flex-direction: column; min-height: 100vh;
-        padding-top: 0 !important; padding-bottom: 0 !important;
+        display: flex; flex-direction: column;
+        width: 64px !important; min-width: 64px !important;
+        padding: 56px 0 12px !important; overflow: visible !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stElementContainer"],
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"],
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div,
+    [data-testid="stSidebar"] .stButton {{
+        overflow: visible !important; width: 64px !important; min-width: 64px !important;
     }}
     .sf-side-spacer {{ flex: 1 1 auto; }}
-    /* Fixed Stroke Foundation navy, not the dynamic {{SURFACE}} palette
-    variable -- the sidebar is a constant brand element, deliberately
-    independent of the light/dark-mode toggle (which only ever affects
-    the main content area). Every text colour below is a fixed white/
-    rgba-white for the same reason: {{TEXT}}/{{SLATE}}/{{MIST}}/{{LINE}}
-    track that toggle, and in light mode {{TEXT}} is literally this same
-    navy -- using it here would be invisible-on-navy. This matches the
-    original design (see the initial commit) before an earlier request
-    ("undo the sidebar changes") reworked it to a white sidebar. */
-    [data-testid="stSidebar"] {{ background: #1E1E5F !important; border-right: 1px solid rgba(255,255,255,0.08) !important; }}
-    .sf-side-logo {{ padding: 20px 18px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); margin-bottom: 4px; }}
-    /* Real Stroke Foundation logo image -- the white-wordmark variant
-    (logo_white_data_uri() in render_sidebar()), since the navy-text
-    logo.png used elsewhere in the app would disappear against this
-    background. Falls back to the small teal mark below only if the
-    asset is ever missing. */
-    .sf-side-mark {{ display: block; height: 34px; width: auto; margin-bottom: 8px; }}
-    .sf-side-mark-fallback {{ width: 30px; height: 30px; border-radius: 7px; background: {TEAL};
-        display: flex; align-items: center; justify-content: center; margin-bottom: 10px; }}
-    .sf-side-name {{ font-size: 13.5px; font-weight: 700; color: white; }}
-    .sf-side-sub  {{ font-size: 11px; color: rgba(255,255,255,0.45); margin-top: 1px; }}
-    .sf-side-section {{ font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
-        color: rgba(255,255,255,0.32); padding: 6px 18px 6px; }}
 
+    /* Section labels don't fit a 64px rail -- hidden (the NAV_SECTIONS
+    grouping is still iterated for role filtering + ordering). */
+    .sf-side-section {{ display: none !important; }}
+
+    /* Icon-only nav buttons: label hidden, icon centred, left-border
+    accent for the active page. */
     [data-testid="stSidebar"] .stButton > button {{
         width: 100% !important; background: transparent !important; color: rgba(255,255,255,0.68) !important;
         border: none !important; border-left: 3px solid transparent !important; border-radius: 0 !important;
-        padding: 9px 16px !important; text-align: left !important; font-size: 13px !important;
-        font-weight: 500 !important; justify-content: flex-start !important; box-shadow: none !important;
+        padding: 11px 0 !important; font-size: 13px !important;
+        font-weight: 500 !important; justify-content: center !important; box-shadow: none !important;
+        position: relative; overflow: visible;
     }}
-    /* justify-content:flex-start on the button itself only positions its
-    inner wrapper div within the button -- that wrapper (nearly as wide
-    as the button, ~224px of 259px, confirmed by inspecting the actual
-    button DOM) has its OWN justify-content:center centering the icon+
-    label as a unit inside itself, which flex-start on the outer button
-    never reaches. This is what was actually still centered. */
-    [data-testid="stSidebar"] .stButton > button > div {{ justify-content: flex-start !important; }}
+    [data-testid="stSidebar"] .stButton > button > div {{ justify-content: center !important; gap: 0 !important; }}
+    [data-testid="stSidebar"] .stButton > button p {{ display: none !important; }}
     [data-testid="stSidebar"] .stButton > button:hover {{
         background: rgba(255,255,255,0.07) !important; color: white !important;
         border-left-color: rgba(255,255,255,0.22) !important;
     }}
-    [data-testid="stSidebar"] .stButton > button p {{ font-size: 13px !important; font-weight: inherit !important; }}
 
-    .sf-side-user {{ display: flex; align-items: center; gap: 10px; padding: 12px 18px 10px; }}
+    /* .sf-avatar is still used by the Profile page (app.py) -- the
+    sidebar no longer has a user card of its own. */
     .sf-avatar {{ width: 32px; height: 32px; border-radius: 50%; background: {TEAL};
         color: white; font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center;
         flex-shrink: 0; }}
-    .sf-user-name {{ font-size: 12.5px; font-weight: 600; color: white; line-height: 1.3; }}
-    .sf-user-role {{ font-size: 10.5px; color: rgba(255,255,255,0.45); }}
 
-    /* ── Account cluster (avatar+name popover, Export CSV) ── */
-    /* Lives inside page_header() now, right-aligned at the same vertical
-    level as the page title -- there is no separate topbar any more
-    (removed per request). The whole profile trigger (round picture +
-    name) is ONE st.popover() button -- previously the picture and the
-    name were two separate elements (only the picture was clickable),
-    which is exactly the "picture or name should both open sign out" gap
-    that fixed. The button's real label text (the name) is left visible
-    this time -- unlike the picture-only version, there's no cramped-
-    width squeeze here since the button sizes naturally to fit an actual
-    name, so Streamlit's own trailing chevron icon can stay too (a
-    chevron next to an account name is normal, expected UI, not a bug
-    to hide). The round avatar itself is a ::before pseudo-element
-    (carrying the initials, injected per-render in page_header() since
-    this block doesn't know the current user) sitting in front of the
-    real label text, not a separate element -- so clicking anywhere
-    across picture+name+chevron is all the same one button. */
-    /* The button's own wrapper div (Streamlit adds one per widget, its
-    class named after the widget's own key, testid stLayoutWrapper) is
-    itself shrink-to-fit -- confirmed live its own width matches the
-    button's exactly, NOT the column's -- so it sat flush left against
-    the column's actual full-width ancestor (a sibling stVerticalBlock,
-    confirmed by walking the live DOM) by default, out of alignment with
-    the right-aligned "RUN ..."/meta text directly above it in that same
-    column. margin-left:auto pushes this shrink-to-fit wrapper itself to
-    the right edge of its parent to match -- justify-content on the
-    wrapper's own box (tried first) did nothing, since a box with no
-    slack of its own has nothing for justify-content to redistribute. */
-    /* [class*="st-key-topbar_user_menu_"] (CONTAINS, not an exact class
-    match) -- the popover's own key is now suffixed per-page (see its
-    st.popover() call site below) so its open/closed state doesn't
-    survive a page navigation; the exact class name it renders under
-    therefore varies by page too, and a plain .st-key-topbar_user_menu
-    selector would only ever match the literal (now-unused) unsuffixed
-    name. */
-    [class*="st-key-topbar_user_menu_"] {{ margin-left: auto; }}
+    /* ── Fixed topbar (render_topbar()) ───────────────────────────────
+    Full-width (left:0), a solid pale mint (#EBF7F5), a hairline bottom
+    border + soft shadow, z-index above the navy sidebar so it visually
+    overlays the rail's top edge. Left: the Stroke Foundation navy logo,
+    hard left (there is no hamburger / collapse toggle). Right: the
+    notification bell then the account popover, tight together.
+
+    The bar is a CONSTANT light element, deliberately independent of the
+    light/dark-mode toggle (exactly like the navy sidebar is constant) --
+    so every colour on it below is a HARDCODED dark value, never a
+    {{TEXT}}/{{SLATE}}/{{NAVY}} palette var: those flip to light colours
+    in dark mode and would vanish on this always-light bar. The floating
+    popover PANELS it opens are the one exception -- those ride
+    stPopoverBody, which does get dark-mode theming, so their contents
+    keep the palette vars.
+
+    !important on background/border because an st.container(key=...)
+    renders as stVerticalBlock[overflow=visible], which otherwise picks
+    up the global bordered-card rule above. */
+    [data-testid="stVerticalBlock"][overflow="visible"].st-key-sf_topbar,
+    .st-key-sf_topbar {{
+        position: fixed; top: 0; left: 0; right: 0; height: 56px; z-index: 1000000;
+        background: #EBF7F5 !important; color: #1E1E5F !important;
+        border: none !important; border-bottom: 1px solid #E2E8F0 !important;
+        box-shadow: 0 1px 6px rgba(15,23,42,0.06) !important; border-radius: 0 !important;
+        /* column flex (Streamlit's own) -- justify-content is the VERTICAL
+        axis here, so this is what actually centres the single inner row
+        in the 56px bar (align-items would only centre it horizontally). */
+        display: flex !important; flex-direction: column !important; justify-content: center !important;
+        padding: 0 22px 0 18px;
+    }}
+    /* Take the topbar's own element wrappers out of normal flow so the
+    fixed bar contributes no ghost gap to the block it's nested in (same
+    fix the cached-run banner's :has() rule uses). */
+    [data-testid="stElementContainer"]:has(> [data-testid="stVerticalBlockBorderWrapper"] .st-key-sf_topbar),
+    .stElementContainer:has(.st-key-sf_topbar) {{ position: absolute; }}
+    /* Keep the single inner row and its columns centred on the bar's
+    optical centre-line -- the container above handles the vertical
+    centring; these just make sure nothing inside re-tops-aligns. */
+    .st-key-sf_topbar [data-testid="stHorizontalBlock"] {{ width: 100%; align-items: center !important; }}
+    .st-key-sf_topbar [data-testid="stColumn"] {{ align-self: center !important; }}
+    /* The last column holds the bell + account popovers -- lay its inner
+    block out row-wise and right-aligned so the two sit snug together at
+    the far right (a column is a column-direction flex by default, which
+    would stack them). */
+    .st-key-sf_topbar [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:last-child [data-testid="stVerticalBlock"] {{
+        flex-direction: row !important; flex-wrap: nowrap !important;
+        align-items: center !important; justify-content: flex-end !important; gap: 4px !important;
+    }}
+    .sf-topbar-brand {{ display: flex; align-items: center; }}
+    /* The logo is taller than the line-box Streamlit gives this markdown
+    cell, so it would hang ~7px below the bar's centre-line; a visual-only
+    translate nudges it back onto centre without fighting the layout. */
+    .sf-topbar-logo {{ height: 30px; width: auto; display: block; flex-shrink: 0; transform: translateY(-7px); }}
+    .sf-topbar-logo-fallback {{ font-size: 15px; font-weight: 700; color: #1E1E5F; white-space: nowrap; flex-shrink: 0; }}
+    /* Notification bell -- a square icon button, no chrome. */
+    .st-key-sf_notif_pop {{ flex: 0 0 auto; }}
+    .st-key-sf_notif_pop [data-testid="stPopoverButton"] {{
+        display: flex !important; align-items: center !important; justify-content: center !important;
+        width: 36px !important; height: 36px !important; min-height: 36px !important;
+        padding: 0 !important; margin: 0 !important;
+        background: transparent !important; border: none !important; box-shadow: none !important;
+        color: #64748B !important; border-radius: 8px !important;
+        position: relative; overflow: visible;
+    }}
+    .st-key-sf_notif_pop [data-testid="stPopoverButton"] p {{ display: none !important; }}
+    .st-key-sf_notif_pop [data-testid="stPopoverButton"] [data-testid="stIconMaterial"] {{
+        font-size: 21px !important; width: 21px !important; height: 21px !important; color: #64748B !important;
+    }}
+    .st-key-sf_notif_pop [data-testid="stPopoverButton"]:hover {{ background: rgba(30,30,95,0.08) !important; color: #1E1E5F !important; }}
+    /* Drop the popover's dropdown chevron for the bell -- it's just an
+    icon trigger, not a labelled menu like the account control. The
+    chevron is Streamlit's aria-hidden wrapper nested inside the button's
+    content div (not a direct child). */
+    .st-key-sf_notif_pop [data-testid="stPopoverButton"] div[aria-hidden="true"] {{ display: none !important; }}
+    /* Popover PANEL contents ride stPopoverBody (dark-mode themed), so
+    these keep the palette vars, unlike the always-white bar above. */
+    .sf-notif-head {{ font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+        color: {SLATE}; padding: 2px 2px 8px; border-bottom: 1px solid {LINE}; margin-bottom: 6px; }}
+    .sf-notif-empty {{ padding: 16px 2px; text-align: center; font-size: 12px; color: {MIST}; }}
+
+    /* ── Account cluster (avatar+name popover) -- far right of the topbar.
+    The whole profile trigger (round avatar + name + chevron) is ONE
+    st.popover() button. The avatar is a ::before pseudo-element carrying
+    the initials (injected per-render in render_topbar() since this static
+    block doesn't know the current user). Key is suffixed per-page (see
+    the st.popover() call in render_topbar()) so the popover's open state
+    doesn't survive a navigation -- hence the [class*=] contains-match. */
+    [class*="st-key-topbar_user_menu_"] {{ flex: 0 0 auto; }}
     [class*="st-key-topbar_user_menu_"] button {{
         display: flex !important; align-items: center !important; gap: 8px !important;
         background: transparent !important; border: none !important;
-        padding: 4px 10px 4px 4px !important; border-radius: 20px !important;
+        padding: 4px 8px 4px 4px !important; border-radius: 20px !important;
         box-shadow: none !important;
     }}
 
@@ -480,7 +534,7 @@ def inject_global_css():
     able to intercept a click meant for whatever's underneath it during
     its brief appearance. ── */
     .sf-cached-run-banner {{
-        position: fixed; top: 0; left: var(--sf-sidebar-w, 300px); right: 0; z-index: 999999;
+        position: fixed; top: 56px; left: var(--sf-sidebar-w, 64px); right: 0; z-index: 999999;
         background: {BLUELT}; color: {TEXT};
         box-shadow: 0 4px 20px rgba(0,0,0,0.10);
         padding: 10px 20px; font-size: 13.5px; line-height: 1.5;
@@ -543,16 +597,19 @@ def inject_global_css():
     # half at a safe rule boundary rather than chase the precise cutoff.
     st.html(f"""
     <style>
-    [class*="st-key-topbar_user_menu_"] button:hover {{ background: {SURFACE2} !important; }}
+    /* Account trigger sits on the always-white topbar -- hardcoded dark
+    colours (see the topbar block's note), not palette vars. */
+    [class*="st-key-topbar_user_menu_"] button:hover {{ background: rgba(30,30,95,0.08) !important; }}
     [class*="st-key-topbar_user_menu_"] button::before {{
         display: flex !important; align-items: center !important; justify-content: center !important;
         width: 30px !important; height: 30px !important; min-width: 30px !important;
-        border-radius: 50% !important; background: {NAVY} !important; color: white !important;
+        border-radius: 50% !important; background: #1E1E5F !important; color: white !important;
         font-size: 11px !important; font-weight: 700 !important; flex-shrink: 0 !important;
     }}
     [class*="st-key-topbar_user_menu_"] button p {{
-        font-size: 12px !important; font-weight: 600 !important; color: {TEXT} !important; margin: 0 !important;
+        font-size: 12px !important; font-weight: 600 !important; color: #1E1E5F !important; margin: 0 !important;
     }}
+    [class*="st-key-topbar_user_menu_"] button [data-testid="stIconMaterial"] {{ color: #64748B !important; }}
     /* Sits directly under the avatar+name button in the same narrow
     column -- deliberately understated (outline, not solid) so it doesn't
     compete with Log out for attention as the primary action in this
@@ -839,10 +896,6 @@ def inject_global_css():
     [data-testid="stSidebar"] .stButton > button:disabled {{
         opacity: 0.35 !important; cursor: not-allowed !important;
     }}
-    /* Fixed rgba-white, not {{MIST}} -- same reasoning as the rest of the
-    navy sidebar block above. */
-    .sf-side-running-note {{ font-size: 10.5px; color: rgba(255,255,255,0.45); padding: 2px 18px 8px;
-        display: flex; align-items: center; gap: 6px; }}
 
     /* ── Empty state ── */
     .sf-empty-icon {{ width: 52px; height: 52px; border-radius: 0; background: {TEALLT};
@@ -1020,22 +1073,28 @@ def inject_global_css():
     # window.__sfHideInstantOverlay() (called by clear_nav_overlay()
     # below) well before 15s in every case that's ever been observed.
     st.html(f"""
-    <style>@keyframes sf-instant-nav-spin {{ to {{ transform: rotate(360deg); }} }}</style>
+    <style>@keyframes sf-heartbeat {{
+        0%, 100% {{ transform: scale(1); }}
+        12% {{ transform: scale(1.22); }} 24% {{ transform: scale(0.97); }}
+        36% {{ transform: scale(1.14); }} 55% {{ transform: scale(1); }}
+    }}</style>
     <script>
     (function() {{
         var el = document.getElementById('sf-instant-nav-overlay');
         if (!el) {{
             el = document.createElement('div');
             el.id = 'sf-instant-nav-overlay';
-            el.style.cssText = 'position:fixed;top:0;bottom:0;'
-                + 'left:var(--sf-sidebar-w, 300px);'
-                + 'width:calc(100% - var(--sf-sidebar-w, 300px));'
+            el.style.cssText = 'position:fixed;top:56px;bottom:0;'
+                + 'left:var(--sf-sidebar-w, 64px);'
+                + 'width:calc(100% - var(--sf-sidebar-w, 64px));'
                 + 'z-index:999999999;display:none;align-items:center;justify-content:center;';
-            var spinner = document.createElement('div');
-            spinner.id = 'sf-instant-nav-overlay-spinner';
-            spinner.style.cssText = 'width:34px;height:34px;border-radius:50%;'
-                + 'animation:sf-instant-nav-spin 0.8s linear infinite;';
-            el.appendChild(spinner);
+            var heart = document.createElement('img');
+            heart.id = 'sf-instant-nav-overlay-heart';
+            heart.src = 'app/static/heart-loader.webp?v=4';
+            heart.alt = 'Loading';
+            heart.style.cssText = 'width:76px;height:76px;object-fit:contain;'
+                + 'animation:sf-heartbeat 1.1s ease-in-out infinite;';
+            el.appendChild(heart);
             document.body.appendChild(el);
 
             var hideTimer = null;
@@ -1059,8 +1118,6 @@ def inject_global_css():
             window.__sfInstantOverlayInit = true;
         }}
         el.style.background = '{BG}';
-        var sp = document.getElementById('sf-instant-nav-overlay-spinner');
-        if (sp) {{ sp.style.border = '3px solid {LINE}'; sp.style.borderTopColor = '{TEAL}'; }}
     }})();
     </script>
     """, unsafe_allow_javascript=True)
@@ -1386,22 +1443,8 @@ def render_sidebar():
     is_super_admin = user['role'] == 'Super Admin'
     running = bool(st.session_state.get('pipeline_running'))
     with st.sidebar:
-        _logo_uri = logo_white_data_uri()
-        _mark_html = (f'<img class="sf-side-mark" src="{_logo_uri}" alt="Stroke Foundation">' if _logo_uri
-                      else '''<div class="sf-side-mark-fallback">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="white"
-                     stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-                </svg>
-            </div>
-            <div class="sf-side-name">Stroke Foundation</div>''')
-        st.markdown(f"""
-        <div class="sf-side-logo">
-            {_mark_html}
-            <div class="sf-side-sub">Donor Forecasting Tool</div>
-        </div>
-        """, unsafe_allow_html=True)
-
+        # Icon-only rail -- no user card, no logo (logo is in the topbar,
+        # identity is in the topbar account popover). Straight into the nav.
         for section, items in NAV_SECTIONS:
             if not is_admin:
                 items = [item for item in items if item[0] not in ADMIN_ONLY_NAV_ITEMS]
@@ -1413,40 +1456,38 @@ def render_sidebar():
             for label, icon in items:
                 active = st.session_state.page == label
                 key = f'nav_{_slug(label)}'
-                if active:
-                    st.html(f"""<style>
-                    .st-key-{key} button {{
+                # One <style> per button: the active-state accent (shares
+                # the block) plus the hover tooltip -- a ::after carrying
+                # the label, revealed on :hover. left is anchored off the
+                # button's CENTRE (calc(50% + 20px)), not its right edge --
+                # the icon sits at the centre of the 64px rail, so a
+                # 100%-based offset left a big dead gap between the icon
+                # and the label; this sits it right next to the icon (its
+                # first ~12px overlaps the rail, seamless since the pill
+                # and the rail are the same navy). The [data-testid=
+                # "stSidebar"] prefix beats the base sidebar-button rules'
+                # specificity in inject_global_css(). */
+                _active_css = (f"""
+                    [data-testid="stSidebar"] .st-key-{key} button {{
                         background: rgba(0,137,123,0.20) !important; color: {TEAL2} !important;
-                        border-left-color: {TEAL} !important; font-weight: 700 !important;
-                    }}
-                    .st-key-{key} button p {{ color: {TEAL2} !important; font-weight: 700 !important; }}
-                    </style>""")
-                # Notification badges -- Run History: dashboard_runs saved
-                # since this user last opened that page (count_new_runs,
-                # cleared by mark_runs_seen() when app.py actually renders
-                # it). Users: the live pending-Google-request count, no
-                # "seen" state at all -- it's an open item needing a
-                # decision, not a feed to catch up on, so the badge just
-                # tracks decide_access_request() directly. Both queries
-                # are cached (short ttl, see db.py) since this loop runs
-                # on every page's sidebar, not just these two pages.
-                badge = 0
-                if label == 'Run History':
-                    badge = count_new_runs(user.get('email', ''))
-                elif label == 'Users':
-                    badge = count_pending_requests()
-                if badge:
-                    st.html(f"""<style>
-                    .st-key-{key} button {{ position: relative; }}
-                    .st-key-{key} button::after {{
-                        content: "{badge if badge <= 99 else '99+'}";
-                        position: absolute; top: 6px; right: 10px;
-                        min-width: 16px; height: 16px; padding: 0 4px;
-                        border-radius: 999px; background: {RED}; color: white;
-                        font-size: 10px; font-weight: 700; line-height: 16px;
-                        text-align: center; pointer-events: none;
-                    }}
-                    </style>""")
+                        border-left-color: {TEAL} !important;
+                    }}""" if active else "")
+                st.html(f"""<style>
+                {_active_css}
+                [data-testid="stSidebar"] .st-key-{key} button::after {{
+                    content: "{label}";
+                    position: absolute; left: calc(50% + 20px); top: 50%;
+                    transform: translate(-6px, -50%);
+                    white-space: nowrap; background: #1E1E5F; color: #fff;
+                    padding: 6px 10px; font-size: 12px; font-weight: 500;
+                    border-radius: 4px; box-shadow: 0 6px 18px rgba(0,0,0,0.28);
+                    opacity: 0; pointer-events: none; z-index: 100000;
+                    transition: opacity 0.16s ease, transform 0.16s ease;
+                }}
+                [data-testid="stSidebar"] .st-key-{key} button:hover::after {{
+                    opacity: 1; transform: translate(0, -50%);
+                }}
+                </style>""")
                 if st.button(label, key=key, icon=icon, width='stretch', disabled=running):
                     st.session_state.page = label
                     # One-shot signal read (and immediately cleared) by
@@ -1458,98 +1499,154 @@ def render_sidebar():
                     st.session_state.nav_loading = True
                     st.rerun()
 
-        if running:
-            st.markdown("""
-            <div class="sf-side-running-note">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                     stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"/>
-                <path d="M12 7v5l3 3"/></svg>
-                Navigation locked, pipeline running
-            </div>
-            """, unsafe_allow_html=True)
 
-        if st.session_state.pipeline_run:
-            # Original read st.session_state.master (the raw dataframe)
-            # directly here -- that key is no longer always populated (a
-            # run loaded from Run History cache only sets master_rows/
-            # donor_count, not the full dataframe), so this would throw
-            # on that path. Same two numbers, just read from the fields
-            # that are actually always present now -- no visual change.
-            st.markdown(f"""
-            <div style="height:1px;background:rgba(255,255,255,0.08);margin:10px 18px;"></div>
-            <div style="padding:0 18px;font-size:11px;line-height:1.9;color:rgba(255,255,255,0.55);">
-                <span style="color:white;font-weight:600;">Data loaded</span><br>
-                {st.session_state.master_rows:,} rows &middot; {st.session_state.donor_count:,} signups<br>
-                Forecast MAPE {st.session_state.mape:.1f}%
-            </div>
-            """, unsafe_allow_html=True)
+def render_topbar():
+    """The fixed pale-mint bar across the full width of the app --
+    rendered ONCE by app.py, right after render_sidebar(), on every
+    authenticated page.
 
-        st.markdown('<div class="sf-side-spacer"></div>', unsafe_allow_html=True)
-        # Sign out no longer lives here -- moved to a popover behind the
-        # avatar circle in the topbar (top-right of the main content).
-        st.markdown(f"""
-        <div style="height:1px;background:rgba(255,255,255,0.08);margin:4px 18px 10px;"></div>
-        <div class="sf-side-user">
-            <div class="sf-avatar">{initials(user['name'])}</div>
-            <div>
-                <div class="sf-user-name">{user['name']}</div>
-                <div class="sf-user-role">{user['role']}</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+    Left: the Stroke Foundation navy logo, hard left (no hamburger, no
+    page name -- the 64px sidebar's highlighted icon is the source of
+    truth for "where am I", and there is no collapse toggle). Right: the
+    notification bell (a popover over the two existing "new runs" /
+    "pending requests" signals) tight against the account popover
+    (dark-mode toggle, My profile, Log out).
+
+    position:fixed at left:0 with a z-index above the navy sidebar, so it
+    visually overlays the top of the rail; the sidebar's own content and
+    .block-container both carry a matching 56px top offset (see
+    inject_global_css()). Because this renders the account menu for the
+    WHOLE app before page routing, page bodies no longer strictly need to
+    call page_header() before their early-exit guards for log out / dark
+    mode to stay reachable -- they still do, for the title/meta/export,
+    and that's harmless.
+    """
+    user = st.session_state.get('user') or {'name': 'User', 'role': 'Analyst'}
+    running = bool(st.session_state.get('pipeline_running'))
+    page = st.session_state.get('page') or 'Overview'
+    email = user.get('email') or ''
+    is_admin = user['role'] in ('Administrator', 'Super Admin')
+
+    # Same two signals the sidebar nav badges used to show, now behind one
+    # bell. count_new_runs() is 0 for a user with no `users` row (local
+    # accounts); pending requests only matter to an admin (the Users page
+    # is admin-only anyway).
+    new_runs = count_new_runs(email) if email else 0
+    pending = count_pending_requests() if is_admin else 0
+    notif_total = new_runs + pending
+
+    _logo = logo_data_uri()
+    _logo_html = (f'<img class="sf-topbar-logo" src="{_logo}" alt="Stroke Foundation">'
+                  if _logo else '<span class="sf-topbar-logo-fallback">Stroke Foundation</span>')
+
+    with st.container(key='sf_topbar'):
+        # Logo hard left; a wide spacer column pushes the bell + account
+        # cluster to the far right, both in ONE column laid out row-wise
+        # (see inject_global_css()).
+        col_brand, _sp, col_right = st.columns(
+            [4, 6, 2.6], vertical_alignment='center', gap='small')
+
+        with col_brand:
+            st.markdown(f'<div class="sf-topbar-brand">{_logo_html}</div>', unsafe_allow_html=True)
+
+        with col_right:
+            # Unread pill -- base bell styling is in inject_global_css(),
+            # only the count varies, so it's injected here per-render (same
+            # pattern the old sidebar nav badges used).
+            if notif_total:
+                st.html(f"""<style>
+                .st-key-sf_notif_pop [data-testid="stPopoverButton"]::after {{
+                    content: "{notif_total if notif_total <= 99 else '99+'}";
+                    position: absolute; top: 1px; right: 1px;
+                    min-width: 15px; height: 15px; padding: 0 3px;
+                    border-radius: 999px; background: {RED}; color: white;
+                    font-size: 9px; font-weight: 700; line-height: 15px; text-align: center;
+                    pointer-events: none;
+                }}
+                </style>""")
+            with st.popover('Notifications', icon=':material/notifications:', key='sf_notif_pop'):
+                st.markdown('<div class="sf-notif-head">Notifications</div>', unsafe_allow_html=True)
+                if new_runs:
+                    _lbl = f"{new_runs} new pipeline run" + ('s' if new_runs != 1 else '')
+                    if st.button(_lbl, key='sf_notif_runs', icon=':material/history:', width='stretch'):
+                        st.session_state.page = 'Run History'
+                        st.session_state.nav_loading = True
+                        st.rerun()
+                if pending:
+                    _lbl = f"{pending} pending access request" + ('s' if pending != 1 else '')
+                    if st.button(_lbl, key='sf_notif_req', icon=':material/person_add:', width='stretch'):
+                        st.session_state.page = 'Users'
+                        st.session_state.nav_loading = True
+                        st.rerun()
+                if not notif_total:
+                    st.markdown('<div class="sf-notif-empty">Nothing new</div>', unsafe_allow_html=True)
+
+            # The round avatar is a ::before pseudo-element carrying the
+            # initials -- injected here because inject_global_css()'s static
+            # sheet doesn't know the current user. Key suffixed per-page so
+            # the popover's open state doesn't survive a navigation (proven
+            # fix -- see the long note this replaced in git history).
+            st.html(f"""<style>
+            [class*="st-key-topbar_user_menu_"] button::before {{ content: "{initials(user['name'])}"; }}
+            </style>""")
+            with st.popover(user['name'], key=f'topbar_user_menu_{_slug(page)}'):
+                st.markdown(f"""
+                <div class="sf-topbar-menu-name">{user['name']}</div>
+                <div class="sf-topbar-menu-role">{user['role']}</div>
+                """, unsafe_allow_html=True)
+                # dark_mode kept in a plain (non-widget) session_state key so
+                # nothing garbage-collects it across a rerun; the toggle
+                # widget gets its OWN key and an explicit value= every run
+                # (see git history for the full failure mode this avoids).
+                if 'dark_mode' not in st.session_state:
+                    st.session_state.dark_mode = False
+                wants_dark = st.toggle('Dark mode', value=st.session_state.dark_mode, key='dark_mode_toggle')
+                if wants_dark != st.session_state.dark_mode:
+                    st.session_state.dark_mode = wants_dark
+                    st.rerun()
+                if st.button('My profile', key='topbar_profile_btn', icon=':material/account_circle:',
+                             width='stretch'):
+                    st.session_state.page = 'Profile'
+                    st.session_state.nav_loading = True
+                    st.rerun()
+                if st.button('Log out', key='topbar_signout_btn', icon=':material/logout:',
+                             type='primary', width='stretch', disabled=running):
+                    sign_out()
 
 
 def page_header(eyebrow, title, sub='', meta='', info=None):
-    """Renders the page's own title block on the left, and -- since there
-    is no separate topbar any more (removed per request: the account
-    cluster used to sit in its own bar above every page, now it's fixed
-    at the same vertical level as the page title instead) -- the account
-    cluster on the right: the optional meta label, then the avatar+name
-    popover (dark-mode toggle and Log out live inside it), then the
-    current page's Export CSV button underneath that.
+    """Renders the page's own title block on the left, and a slim actions
+    column on the right (the page's Export CSV button, then the optional
+    `meta` label). The account cluster (avatar + name popover, dark mode,
+    My profile, Log out) lives in the fixed white topbar now
+    (render_topbar()), not here.
 
-    User/running/export state is pulled straight from session_state
-    rather than taken as params, the same way the old render_topbar()
-    read `page`/`user` -- so all eight call sites across app.py stay
-    exactly as they were (just eyebrow/title/sub/meta), no threading a
-    new argument through every one of them. export_csv/export_filename
-    specifically come from build_page_export_csv() in app.py, stashed
-    into session_state right before page routing starts.
+    `eyebrow` is still accepted so the ~8 call sites in app.py don't all
+    need editing, but it is no longer rendered -- the current page's name
+    is shown in the topbar, which made a second small section label above
+    the page title redundant.
 
-    IMPORTANT for callers: because this now renders the ONLY way to open
-    the account menu (dark mode / log out) on any given page, every page
-    must call this BEFORE its own `if not st.session_state.pipeline_run:
-    empty_state()` guard, not after -- empty_state() ends the script with
-    st.stop(), so calling page_header() afterward would mean it never
-    renders at all pre-pipeline-run, silently taking log out and dark
-    mode with it. Keep any dynamic bits of `sub` (session_state fields
-    that are still None pre-run) guarded accordingly, as Overview's does.
+    export_csv/export_filename come from build_page_export_csv() in
+    app.py, stashed into session_state right before page routing starts.
 
     meta: optional right-aligned uppercase label (e.g. a session date or
-    'FY26 FORECAST · AUG 2026') -- matches the Base44 prototype's page-header
-    metadata slot. Omit for pages with nothing meaningful to show there.
+    'FY26 FORECAST · AUG 2026'). Omit for pages with nothing to show there.
 
     info: optional longer explanation ("what is this dashboard, how do I
     read it") shown as a native hover tooltip next to the title -- NOT the
     same job as `sub`, which is always-visible and stays a short one-liner.
     Rendered via st.subheader(..., help=info) rather than custom HTML
-    specifically to get Streamlit's own tooltip bubble (already the same
-    mechanism kpi() uses for its `help` param) instead of building a
-    second, differently-behaved tooltip system from scratch. anchor=False
-    drops the auto-generated deep-link icon st.subheader adds by default --
-    not useful here, just visual noise next to a title that's already the
-    whole page's identity, not one section among several.
+    specifically to get Streamlit's own tooltip bubble. anchor=False drops
+    the auto-generated deep-link icon st.subheader adds by default.
     """
-    user = st.session_state.get('user') or {'name': 'User', 'role': 'Analyst'}
     running = bool(st.session_state.get('pipeline_running'))
     export_csv      = st.session_state.get('page_export_csv')
     export_filename = st.session_state.get('page_export_filename')
 
     with st.container(key='page_header_row'):
-        col_main, col_account = st.columns([8, 2], vertical_alignment='top', gap='small')
+        col_main, col_actions = st.columns([8, 2], vertical_alignment='top', gap='small')
         with col_main:
             with st.container(key='page_header_block'):
-                st.markdown(f'<div class="sf-eyebrow">{eyebrow}</div>', unsafe_allow_html=True)
                 if info:
                     with st.container(key='page_header_title'):
                         st.subheader(title, anchor=False, help=info)
@@ -1558,125 +1655,93 @@ def page_header(eyebrow, title, sub='', meta='', info=None):
                 if sub:
                     st.markdown(f'<div class="sf-page-sub">{sub}</div>', unsafe_allow_html=True)
 
-        with col_account:
-            # The avatar circle is a real st.popover() trigger (Sign out lives
-            # inside it, not the sidebar). A raw HTML <div> can't contain an
-            # actual Streamlit widget as a child -- opening a div in one
-            # st.markdown() call and closing it in a later one, with real
-            # widgets rendered in between, is NOT a reliable way to fake that
-            # nesting (verified: it silently produced a 0x0 empty div with
-            # zero children, most likely because unsafe_allow_html markdown
-            # sanitizes/rebalances each call's HTML independently rather than
-            # leaving a tag open across calls). A real st.popover() inside a
-            # real st.columns() cell is what actually works.
-            st.html(f"""<style>
-            [class*="st-key-topbar_user_menu_"] button::before {{ content: "{initials(user['name'])}"; }}
-            </style>""")
-            # Keyed per page (not a fixed 'topbar_user_menu') -- a popover's
-            # open/closed state is tracked by Streamlit's frontend against
-            # its widget id, which includes this key, and PERSISTS across a
-            # rerun as long as the same key is reproduced. Clicking "My
-            # profile" below navigates to a different page by setting
-            # st.session_state.page + st.rerun() -- but that new page calls
-            # this same function again with the SAME fixed key, so the
-            # popover would still count as "the same widget" and stay open,
-            # floating over the new page's content underneath it (confirmed
-            # live: reproducible on every navigation via this menu, not
-            # just "My profile" -- Log out is a separate full-screen
-            # transition so it isn't affected the same way). Suffixing the
-            # key with the current page's title means navigating to a
-            # different page is a genuinely different widget as far as the
-            # frontend is concerned, closed by default; staying on the SAME
-            # page (e.g. toggling dark mode, which also reruns) keeps the
-            # same key and correctly preserves the open state.
-            with st.popover(user['name'], key=f'topbar_user_menu_{_slug(title)}'):
-                # Name + status stacked (not "Signed in as X · Role" on one
-                # line), a dark-mode toggle, then Log out -- all plain
-                # top-to-bottom Streamlit elements, no st.columns anywhere in
-                # here, so the popup stays a vertical list.
-                st.markdown(f"""
-                <div class="sf-topbar-menu-name">{user['name']}</div>
-                <div class="sf-topbar-menu-role">{user['role']}</div>
-                """, unsafe_allow_html=True)
-                # NOT key='dark_mode' directly -- that was the actual bug
-                # reported (dark mode silently reverting after navigating to
-                # a different page while the toggle still LOOKED on). Root
-                # cause, confirmed by tracing session_state through every
-                # step of an actual toggle-then-navigate sequence: our nav
-                # buttons call st.rerun() the moment they're clicked, from
-                # inside render_sidebar() -- which aborts the script before
-                # it ever reaches this widget, later in page_header().
-                # Streamlit clears a keyed widget's session_state entry
-                # whenever that widget wasn't instantiated in the last
-                # completed pass, and an early-aborted pass counts as
-                # "wasn't instantiated" for everything after the rerun call.
-                # So st.session_state dark_mode was being wiped on literally
-                # every single navigation, then silently re-created at False
-                # the next time this widget did run -- meanwhile the
-                # toggle's own rendered switch was showing a stale "on"
-                # straight from the DOM the browser hadn't repainted yet,
-                # which is why it visually looked on while nothing was
-                # actually dark. Fix: keep the actual setting in a plain,
-                # non-widget session_state key (dark_mode) that nothing ever
-                # garbage-collects, and give the toggle itself a DIFFERENT
-                # key -- feeding it value=... explicitly on every run means
-                # it never depends on its own key surviving between reruns
-                # at all.
-                if 'dark_mode' not in st.session_state:
-                    st.session_state.dark_mode = False
-                wants_dark = st.toggle('Dark mode', value=st.session_state.dark_mode, key='dark_mode_toggle')
-                if wants_dark != st.session_state.dark_mode:
-                    st.session_state.dark_mode = wants_dark
-                    st.rerun()
-
-                # Change password / Two-factor authentication used to live
-                # here as expanders -- moved out to a full Profile page
-                # (app.py) since they'd grown too large for a popover menu,
-                # and a dedicated page also has room for the profile-details
-                # (name/email) editing a Super Admin gets that never fit here
-                # at all. This is now just a one-line link to that page,
-                # same nav pattern render_sidebar()'s own buttons use.
-                if st.button('My profile', key='topbar_profile_btn', icon=':material/account_circle:',
-                              width='stretch'):
-                    st.session_state.page = 'Profile'
-                    # Same nav_loading = True render_sidebar()'s own nav
-                    # buttons set -- reported live as inconsistent for this
-                    # navigation specifically not to show the same loading
-                    # transition every other page gets. This WAS worth
-                    # skipping in an earlier version, because the overlay
-                    # used to be a live [data-testid="stStatusWidget"] match
-                    # that stayed permanently armed on any page containing an
-                    # st.fragment (the Profile page's own 2FA card) -- see
-                    # inject_global_css()'s nav-overlay comment in ui.py for
-                    # the full failure mode. Now that it's a fixed-duration
-                    # animation instead (same file), it can't leak into later
-                    # fragment reruns regardless of which page sets this flag,
-                    # so there's no longer a reason for this navigation to
-                    # skip it.
-                    st.session_state.nav_loading = True
-                    st.rerun()
-
-                if st.button('Log out', key='topbar_signout_btn', icon=':material/logout:',
-                             type='primary', width='stretch', disabled=running):
-                    sign_out()
-
-            # Fixed under the username row, right-aligned in the same narrow
-            # column -- exports every backing table for whichever page is
-            # currently open (see build_page_export_csv() in app.py). Sits
-            # outside the popover (a plain click, not a menu item) since it's
-            # a one-off download, not an account action.
+        with col_actions:
             if export_csv:
                 st.download_button(
                     'Export CSV', data=export_csv, file_name=export_filename or 'export.csv',
                     mime='text/csv', icon=':material/download:', key='topbar_export_btn',
                     width='stretch', disabled=running,
                 )
-
-            # Moved below the popover (was above it) per request -- profile
-            # at the top of this column, meta at the bottom, not the other
-            # way around.
             if meta:
                 st.markdown(f'<div class="sf-page-meta sf-page-meta-account">{meta}</div>', unsafe_allow_html=True)
+
+
+def render_action_button_css():
+    """Colour-codes the action buttons on the Users / Profile pages and
+    gives them a real hover state (Streamlit's default secondary button is
+    a flat surface with no visible hover, and inject_global_css()'s
+    dark-mode fix for it doesn't add one either). Call once, at the top of
+    each of those page bodies -- it's scoped to [data-testid="stMain"]
+    buttons, so injecting it only while on that page keeps it off every
+    other page, the sidebar rail and the topbar.
+
+    Every button is an OUTLINE by default (coloured border + text, no
+    fill) and FILLS with its colour on hover. Green is the positive/
+    neutral default; RED for the destructive actions, matched by their
+    widget-key prefix (delete_btn_ / confirm_delete_btn_ / revoke_btn_ /
+    confirm_revoke_btn_ / deny_). *_cancel keys fill only to a faint tint
+    on hover, not a solid colour, so a dismiss doesn't read as loud as a
+    real action."""
+    st.html("""
+    <style>
+    /* Positive / default -- GREEN outline, fills green on hover. */
+    [data-testid="stMain"] [data-testid^="stBaseButton-secondary"],
+    [data-testid="stMain"] [data-testid^="stBaseButton-primary"] {
+        background: transparent !important; border: 1px solid #0B8457 !important;
+        box-shadow: none !important;
+        transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease !important;
+    }
+    [data-testid="stMain"] [data-testid^="stBaseButton-secondary"],
+    [data-testid="stMain"] [data-testid^="stBaseButton-secondary"] *,
+    [data-testid="stMain"] [data-testid^="stBaseButton-primary"],
+    [data-testid="stMain"] [data-testid^="stBaseButton-primary"] * { color: #0B8457 !important; }
+    [data-testid="stMain"] [data-testid^="stBaseButton-secondary"]:hover,
+    [data-testid="stMain"] [data-testid^="stBaseButton-primary"]:hover {
+        background: #0B8457 !important; border-color: #0B8457 !important;
+        box-shadow: 0 2px 10px rgba(11,132,87,0.28) !important;
+    }
+    [data-testid="stMain"] [data-testid^="stBaseButton-secondary"]:hover *,
+    [data-testid="stMain"] [data-testid^="stBaseButton-primary"]:hover * { color: #FFFFFF !important; }
+    [data-testid="stMain"] [data-testid^="stBaseButton-secondary"]:disabled,
+    [data-testid="stMain"] [data-testid^="stBaseButton-primary"]:disabled {
+        opacity: 0.4 !important; box-shadow: none !important;
+    }
+
+    /* Destructive -- RED outline, fills red on hover. */
+    [data-testid="stMain"] [class*="st-key-delete_btn_"] button,
+    [data-testid="stMain"] [class*="st-key-confirm_delete_btn_"] button,
+    [data-testid="stMain"] [class*="st-key-revoke_btn_"] button,
+    [data-testid="stMain"] [class*="st-key-confirm_revoke_btn_"] button,
+    [data-testid="stMain"] [class*="st-key-deny_"] button {
+        background: transparent !important; border-color: #C0392B !important;
+    }
+    [data-testid="stMain"] [class*="st-key-delete_btn_"] button *,
+    [data-testid="stMain"] [class*="st-key-confirm_delete_btn_"] button *,
+    [data-testid="stMain"] [class*="st-key-revoke_btn_"] button *,
+    [data-testid="stMain"] [class*="st-key-confirm_revoke_btn_"] button *,
+    [data-testid="stMain"] [class*="st-key-deny_"] button * { color: #C0392B !important; }
+    [data-testid="stMain"] [class*="st-key-delete_btn_"] button:hover,
+    [data-testid="stMain"] [class*="st-key-confirm_delete_btn_"] button:hover,
+    [data-testid="stMain"] [class*="st-key-revoke_btn_"] button:hover,
+    [data-testid="stMain"] [class*="st-key-confirm_revoke_btn_"] button:hover,
+    [data-testid="stMain"] [class*="st-key-deny_"] button:hover {
+        background: #C0392B !important; border-color: #C0392B !important;
+        box-shadow: 0 2px 10px rgba(192,57,43,0.28) !important;
+    }
+    [data-testid="stMain"] [class*="st-key-delete_btn_"] button:hover *,
+    [data-testid="stMain"] [class*="st-key-confirm_delete_btn_"] button:hover *,
+    [data-testid="stMain"] [class*="st-key-revoke_btn_"] button:hover *,
+    [data-testid="stMain"] [class*="st-key-confirm_revoke_btn_"] button:hover *,
+    [data-testid="stMain"] [class*="st-key-deny_"] button:hover * { color: #FFFFFF !important; }
+
+    /* Cancel -- green outline, hover fills only to a faint tint (stays
+    green text, doesn't go solid). */
+    [data-testid="stMain"] [class*="st-key-"][class*="_cancel"] button:hover {
+        background: rgba(11,132,87,0.10) !important; box-shadow: none !important;
+    }
+    [data-testid="stMain"] [class*="st-key-"][class*="_cancel"] button:hover * { color: #0B8457 !important; }
+    </style>
+    """)
 
 
 def render_cached_run_banner(loaded_str: str, nav_triggered: bool = False):
@@ -2013,10 +2078,18 @@ def render_nav_transition_overlay():
     ever reach -- visible at once alongside the new page's content,
     until the run finished).
 
+    The loading indicator is the anatomical-heart image
+    (static/heart-loader.webp, ~7KB transparent still -- served via
+    enableStaticServing so it's fetched/cached once, not re-sent inline
+    every rerun) given a CSS lub-dub heartbeat pulse (@keyframes
+    sf-heartbeat), centred on an opaque {BG} cover. The instant
+    client-side overlay in inject_global_css() shows the same image +
+    pulse the moment a nav button is clicked.
+
     A single self-contained st.html() block, not st.container(key=...)
     plus a separate CSS rule targeting its generated class (an earlier
-    version) -- now that this only ever draws a plain spinner (the
-    content-shaped skeleton this used to also be able to show for
+    version) -- now that this only ever draws that single centred image
+    (the content-shaped skeleton this used to also be able to show for
     Overview specifically was tried and reverted), there's no longer
     any reason to route it through a real Streamlit container at all,
     so it can just match render_transition_spinner()'s own proven
@@ -2057,14 +2130,18 @@ def render_nav_transition_overlay():
     which the spec does honour.
     """
     st.markdown(f"""
-    <div style="position:fixed;top:0;bottom:0;left:var(--sf-sidebar-w, 300px);
-        width:calc(100% - var(--sf-sidebar-w, 300px));z-index:999999999;background:{BG};
+    <style>@keyframes sf-heartbeat {{
+        0%, 100% {{ transform: scale(1); }}
+        12% {{ transform: scale(1.22); }} 24% {{ transform: scale(0.97); }}
+        36% {{ transform: scale(1.14); }} 55% {{ transform: scale(1); }}
+    }}</style>
+    <div style="position:fixed;top:56px;bottom:0;left:var(--sf-sidebar-w, 64px);
+        width:calc(100% - var(--sf-sidebar-w, 64px));z-index:999999999;background:{BG};
         display:flex;align-items:center;justify-content:center;">
-        <div style="width:34px;height:34px;border-radius:50%;
-            border:3px solid {LINE};border-top-color:{TEAL};
-            animation:sf-nav-transition-spin 0.8s linear infinite;"></div>
+        <img src="app/static/heart-loader.webp?v=4" alt="Loading"
+             style="width:76px;height:76px;object-fit:contain;
+                    animation:sf-heartbeat 1.1s ease-in-out infinite;">
     </div>
-    <style>@keyframes sf-nav-transition-spin {{ to {{ transform: rotate(360deg); }} }}</style>
     """, unsafe_allow_html=True)
 
 

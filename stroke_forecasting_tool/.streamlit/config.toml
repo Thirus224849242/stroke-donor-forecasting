@@ -1,5 +1,10 @@
 [server]
 maxUploadSize = 1024
+# Serves ./static/ at app/static/<file> -- used for the heart-shaped
+# navigation loader (static/heart-loader.webp), referenced by URL rather
+# than base64 so it's fetched and cached once, not re-sent inline on
+# every rerun.
+enableStaticServing = true
 
 [theme]
 base = "light"
