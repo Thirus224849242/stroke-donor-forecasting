@@ -2458,6 +2458,367 @@ elif page == 'Campaign ROI':
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# FORECAST VERIFICATION
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == 'Forecast Verification':
+    page_header('Forecasting', 'Forecast verification',
+                'Put the currently loaded forecast next to a previous run, and check both '
+                'against the actual fund income now on record.',
+                meta=page_meta, info=(
+                    'The "current run" is whichever run is loaded right now -- the latest by '
+                    'default, or an older one picked on Run History. Choose any other saved run '
+                    'to compare against it. An older run forecast months that have since '
+                    'happened, so its line overlaps the real actuals -- that overlap is the '
+                    'verification: how close that forecast actually turned out to be. "Actual '
+                    'fund income on record" is the union of the compared runs\' actuals -- so a '
+                    'month one run only forecast, but another run has since recorded as real '
+                    'data, gets verified.'
+                ))
+
+    if not st.session_state.pipeline_run:
+        empty_state()
+
+    def _fv_notice(head, body):
+        with card():
+            st.markdown(
+                f'<div style="text-align:center;padding:28px;">'
+                f'<div style="font-size:14px;font-weight:700;color:{ui.TEXT};margin-bottom:6px;">{head}</div>'
+                f'<div style="font-size:12.5px;color:{ui.MIST};max-width:520px;margin:0 auto;">{body}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        clear_nav_overlay()
+        st.stop()
+
+    if not db_configured():
+        _fv_notice('Verification needs run history',
+                   'No database connection is configured, so past runs are not saved and there '
+                   'is nothing to compare the current forecast against.')
+
+    fv_runs = list_dashboard_runs()
+    fv_cur_id = st.session_state.viewing_run_id
+    fv_others = fv_runs[fv_runs['run_id'] != fv_cur_id] if not fv_runs.empty else fv_runs
+    if fv_others.empty:
+        _fv_notice('Only one run so far',
+                   'There needs to be at least one other saved run to compare against. Run the '
+                   'pipeline again from the Data Pipeline page, then come back here.')
+
+    fv_others = fv_others.copy()
+    fv_others['run_at'] = pd.to_datetime(fv_others['run_at'])
+    fv_labels = {
+        r['run_id']: f"{r['run_id']}   ·   {r['run_at']:%d %b %Y, %H:%M}   ·   {r['run_by'] or 'unknown'}"
+        for _, r in fv_others.iterrows()
+    }
+
+    fp1, fp2 = st.columns([1.7, 1], vertical_alignment='bottom')
+    with fp1:
+        fv_cmp_id = st.selectbox('Comparison run', list(fv_labels),
+                                 format_func=lambda x: fv_labels[x], key='fv_cmp')
+    with fp2:
+        fv_model = st.segmented_control(
+            'Forecast model',
+            ['ML forecast', 'Linear trend', 'Stock-flow model', 'Blended'],
+            default='ML forecast', key='fv_model') or 'ML forecast'
+
+    _FV_MODEL_KEYS = {
+        'ML forecast':      ('ml',        'mape'),
+        'Linear trend':     ('linear',    'mape_linear'),
+        'Stock-flow model': ('stockflow', 'mape_stockflow'),
+        'Blended':          (None,        None),
+    }
+    fv_fc_key, fv_mape_key = _FV_MODEL_KEYS[fv_model]
+    fv_is_sf = fv_model == 'Stock-flow model'
+    fv_is_blend = fv_model == 'Blended'
+
+    if fv_is_sf:
+        st.caption('Stock-flow is validated on 3 rolling walk-forward windows, the other two on '
+                   'one fixed 12-month holdout — its MAPE is only directionally comparable. Months '
+                   '19–24 use the Base scenario\'s central assumptions.')
+    elif fv_is_blend:
+        st.caption('Blended is the month-by-month mean of every available method (ML forecast, '
+                   'Linear trend, Stock-flow) — the same combined forecast the Overview page '
+                   'shows. Its MAPE is the average of those methods\' own validation scores.')
+
+    with st.spinner('Loading the comparison run…'):
+        fv_cmp_state, fv_cmp_at = load_dashboard_run(fv_cmp_id)
+    if not fv_cmp_state:
+        st.error('Could not load that run — it may have been deleted.', icon=':material/error:')
+        clear_nav_overlay()
+        st.stop()
+
+    # "Actual fund income on record" -- the UNION of the relevant runs'
+    # actuals, not just one run's. Different runs are built from different
+    # data vintages, so a month one run only forecast may already be a
+    # recorded actual in another run (a later one, or one whose upload
+    # simply reached further). Merging them is what lets those "difference
+    # months" be verified. For any month several runs carry, the value
+    # from the most recently executed run wins.
+    fv_newest_id = fv_runs.iloc[0]['run_id']
+    _run_at = dict(zip(fv_runs['run_id'], pd.to_datetime(fv_runs['run_at'])))
+    _actual_srcs = [
+        (_run_at.get(fv_cur_id, pd.Timestamp.now()), st.session_state.monthly),
+        (pd.to_datetime(fv_cmp_at) if fv_cmp_at else pd.Timestamp.min,
+         pd.DataFrame(fv_cmp_state.get('monthly', []))),
+    ]
+    if fv_newest_id not in (fv_cur_id, fv_cmp_id):
+        fv_newest_state, _ = load_dashboard_run(fv_newest_id)
+        _actual_srcs.append((_run_at.get(fv_newest_id, pd.Timestamp.min),
+                             pd.DataFrame((fv_newest_state or {}).get('monthly', []))))
+
+    _act_frames = [df.assign(_pri=at) for at, df in _actual_srcs
+                   if df is not None and not df.empty and 'donor_month' in df.columns]
+    if _act_frames:
+        actuals_now = (pd.concat(_act_frames, ignore_index=True)
+                         .sort_values(['donor_month', '_pri'], ascending=[True, False])
+                         .drop_duplicates('donor_month', keep='first')
+                         .drop(columns='_pri')
+                         .sort_values('donor_month')
+                         .reset_index(drop=True))
+    else:
+        actuals_now = st.session_state.monthly.copy()
+
+    def _sf_combined(zone12, zone3, n=24):
+        """Stock-flow's saved forecast is the statistical window (months
+        1–18) only; months 19–n come from the 'Base' scenario, exactly the
+        way the Income Forecast page stitches them. Returns a
+        calendar_month / predicted_income frame (up to n rows), or None if
+        stock-flow wasn't produced for that run."""
+        if zone12 is None or getattr(zone12, 'empty', True):
+            return None
+        df = zone12[['calendar_month', 'predicted_income']].copy()
+        if n > len(df) and zone3 and 'Base' in zone3 and not zone3['Base'].empty:
+            extra = zone3['Base'][['calendar_month', 'predicted_income']].head(n - len(df)).copy()
+            df = pd.concat([df, extra], ignore_index=True)
+        df = df.head(n).reset_index(drop=True)
+        df['calendar_month'] = range(1, len(df) + 1)
+        return df
+
+    def _blend_fc(parts, n=24):
+        """Month-by-month mean of every available total-income method
+        (ML, Linear, Stock-flow) — the same blend the Overview page shows.
+        `parts` is a list of predicted_income-bearing frames; returns a
+        calendar_month / predicted_income frame, or None if none are usable."""
+        series = [p['predicted_income'].head(n).reset_index(drop=True)
+                  for p in parts
+                  if p is not None and not getattr(p, 'empty', True)
+                  and 'predicted_income' in getattr(p, 'columns', [])]
+        if not series:
+            return None
+        m = min(len(s) for s in series)
+        avg = pd.concat([s.head(m) for s in series], axis=1).mean(axis=1)
+        return pd.DataFrame({'calendar_month': range(1, m + 1), 'predicted_income': avg.values})
+
+    def _mape_mean(vals):
+        got = [v for v in vals if v is not None]
+        return sum(got) / len(got) if got else None
+
+    cur_actuals = st.session_state.monthly
+    cur_label = fv_cur_id or 'Live session'
+    if fv_is_blend:
+        cur_fc = _blend_fc([
+            st.session_state.forecast_df,
+            st.session_state.forecast_df_linear,
+            _sf_combined(st.session_state.sf_zone12, st.session_state.sf_zone3),
+        ])
+        cur_mape = _mape_mean([st.session_state.mape, st.session_state.mape_linear,
+                               st.session_state.mape_stockflow])
+    elif fv_is_sf:
+        cur_fc   = _sf_combined(st.session_state.sf_zone12, st.session_state.sf_zone3)
+        cur_mape = st.session_state.mape_stockflow
+    elif fv_fc_key == 'ml':
+        cur_fc, cur_mape = st.session_state.forecast_df, st.session_state.mape
+    else:
+        cur_fc, cur_mape = st.session_state.forecast_df_linear, st.session_state.mape_linear
+
+    cmp_actuals = pd.DataFrame(fv_cmp_state.get('monthly', []))
+    cmp_sc      = fv_cmp_state.get('scalars', {})
+    cmp_mape    = cmp_sc.get(fv_mape_key)
+    _cmp_fcs    = fv_cmp_state.get('forecasts') or {}
+    if fv_is_blend:
+        _cz12 = pd.DataFrame(_cmp_fcs.get('stockflow') or [])
+        _cz3  = {k: pd.DataFrame(v) for k, v in (fv_cmp_state.get('sf_zone3') or {}).items()}
+        cmp_fc = _blend_fc([
+            pd.DataFrame(_cmp_fcs.get('ml') or []),
+            pd.DataFrame(_cmp_fcs.get('linear') or []),
+            _sf_combined(_cz12 if not _cz12.empty else None, _cz3),
+        ])
+        cmp_mape = _mape_mean([cmp_sc.get('mape'), cmp_sc.get('mape_linear'),
+                               cmp_sc.get('mape_stockflow')])
+    elif fv_is_sf:
+        _cz12 = pd.DataFrame(_cmp_fcs.get('stockflow') or [])
+        _cz3  = {k: pd.DataFrame(v) for k, v in (fv_cmp_state.get('sf_zone3') or {}).items()}
+        cmp_fc = _sf_combined(_cz12 if not _cz12.empty else None, _cz3)
+    else:
+        cmp_fc = pd.DataFrame(_cmp_fcs.get(fv_fc_key) or [])
+
+    if (cur_fc is None or getattr(cur_fc, 'empty', True)
+            or cmp_fc is None or getattr(cmp_fc, 'empty', True)
+            or 'donor_month' not in getattr(cur_actuals, 'columns', [])
+            or 'donor_month' not in cmp_actuals.columns):
+        _fv_notice(f'{fv_model} not available for both runs',
+                   f'One of the two runs does not have a saved {fv_model.lower()} to line up. '
+                   'Try the other forecast model, or a different comparison run.')
+
+    def _fc_months(actuals_df, fc_df):
+        """Real calendar month for each row of a forecast_df (whose own
+        'calendar_month' column is only a 1..N offset) -- the month right
+        after that run's last actual month, then monthly from there."""
+        last = pd.Period(str(actuals_df['donor_month'].iloc[-1]), 'M')
+        return [(last + i).to_timestamp() for i in range(1, len(fc_df) + 1)]
+
+    cur_fc_x = _fc_months(cur_actuals, cur_fc)
+    cmp_fc_x = _fc_months(cmp_actuals, cmp_fc)
+
+    def _tot(fc_df, n):
+        return float(fc_df.head(n)['predicted_income'].sum())
+
+    cur_12, cur_24 = _tot(cur_fc, 12), _tot(cur_fc, 24)
+    cmp_12, cmp_24 = _tot(cmp_fc, 12), _tot(cmp_fc, 24)
+
+    def _money_delta(value, base):
+        d = value - base
+        return f'{"+" if d >= 0 else "-"}${abs(d):,.0f} vs current'
+
+    def _mape_delta(value, base):
+        if value is None or base is None:
+            return None
+        d = value - base
+        return f'{d:+.1f} pts vs current'
+
+    # ── Side-by-side metrics ──────────────────────────────────────────────
+    mc1, mc2 = st.columns(2)
+    with mc1:
+        _sub = f'{cur_label} · loaded {st.session_state.data_loaded_at:%d %b %Y}' \
+            if st.session_state.data_loaded_at else cur_label
+        with card('Current run', _sub, tag='LOADED', tag_color='blue'):
+            with st.container(horizontal=True):
+                kpi('12-month forecast', f'${cur_12:,.0f}', delta='Projected income',
+                    delta_color='off', k='cur')
+                kpi('24-month forecast', f'${cur_24:,.0f}', delta='Projected income',
+                    delta_color='off', k='cur')
+            with st.container(horizontal=True):
+                kpi('Validation MAPE', f'{cur_mape:.1f}%' if cur_mape is not None else 'N/A',
+                    delta='Measured at run time', delta_color='off', k='cur')
+                kpi('Fund income on record',
+                    f'${st.session_state.total_income:,.0f}' if st.session_state.total_income else 'N/A',
+                    delta=f'{int(st.session_state.donor_count):,} donors'
+                          if st.session_state.donor_count else '',
+                    delta_color='off', k='cur')
+    with mc2:
+        _sub = f'{fv_cmp_id} · {fv_cmp_at:%d %b %Y}' if fv_cmp_at else fv_cmp_id
+        with card('Comparison run', _sub, tag='SELECTED', tag_color='violet'):
+            with st.container(horizontal=True):
+                kpi('12-month forecast', f'${cmp_12:,.0f}', delta=_money_delta(cmp_12, cur_12),
+                    delta_color='off', k='cmp')
+                kpi('24-month forecast', f'${cmp_24:,.0f}', delta=_money_delta(cmp_24, cur_24),
+                    delta_color='off', k='cmp')
+            with st.container(horizontal=True):
+                kpi('Validation MAPE', f'{cmp_mape:.1f}%' if cmp_mape is not None else 'N/A',
+                    delta=_mape_delta(cmp_mape, cur_mape), delta_color='off', k='cmp')
+                kpi('Fund income on record',
+                    f'${cmp_sc.get("total_income"):,.0f}' if cmp_sc.get('total_income') else 'N/A',
+                    delta=(f'{int(cmp_sc["donor_count"]):,} donors'
+                           if cmp_sc.get('donor_count') else ''),
+                    delta_color='off', k='cmp')
+
+    # ── One timeline: both forecasts against the real actuals ─────────────
+    act = actuals_now.copy()
+    act['ts'] = act['donor_month'].apply(lambda m: pd.Period(str(m), 'M').to_timestamp())
+    act = act[act['ts'] >= (min(cur_fc_x + cmp_fc_x) - pd.DateOffset(months=18))]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=act['ts'], y=act['total_income'], mode='lines+markers', name='Actual fund income',
+        line=dict(color=ui.TEXT, width=2.5), marker=dict(size=4),
+    ))
+    fig.add_trace(go.Scatter(
+        x=cmp_fc_x, y=cmp_fc['predicted_income'], mode='lines+markers', name='Comparison run forecast',
+        line=dict(color=ui.PURPLE, width=2.5, dash='dot'), marker=dict(size=5, symbol='diamond'),
+    ))
+    fig.add_trace(go.Scatter(
+        x=cur_fc_x, y=cur_fc['predicted_income'], mode='lines+markers', name='Current run forecast',
+        line=dict(color=ui.TEAL, width=2.5, dash='dash'), marker=dict(size=5, symbol='square'),
+    ))
+    if len(act):
+        fig.add_vline(x=act['ts'].iloc[-1], line_dash='dot', line_color=ui.MIST, opacity=0.8,
+                      annotation_text='Actuals end', annotation_font_size=10,
+                      annotation_font_color=ui.MIST)
+    fig.update_layout(yaxis=dict(tickformat='$,.0f', title='Monthly income ($)'), xaxis_title='Month')
+    with card('Forecast vs actual fund income',
+              'Both runs\' forecasts on one timeline. Where the dotted comparison line sits left '
+              'of "Actuals end" it is overlapping real data — the gap between it and the solid '
+              'line is that forecast\'s error.',
+              tag=fv_model, tag_color='blue'):
+        chart(fig, 360)
+
+    # ── Realized accuracy: forecast months that now have actuals ──────────
+    def _verify(fc_df, fc_x, actuals_df):
+        ai = (actuals_df.assign(_k=actuals_df['donor_month'].astype(str))
+                        .set_index('_k')['total_income'])
+        rows = []
+        for ts, pred in zip(fc_x, fc_df['predicted_income']):
+            k = pd.Timestamp(ts).strftime('%Y-%m')
+            if k in ai.index:
+                actual = float(ai.loc[k])
+                if actual:
+                    rows.append({'Month': k, 'Forecast': float(pred), 'Actual': actual,
+                                 'Error %': (pred - actual) / actual * 100})
+        return pd.DataFrame(rows)
+
+    v_cur = _verify(cur_fc, cur_fc_x, actuals_now)
+    v_cmp = _verify(cmp_fc, cmp_fc_x, actuals_now)
+
+    # Difference months -- forecast by one run, since recorded as an actual
+    # by the other. These are the months the verification actually bites on.
+    _vm = set()
+    for _vdf in (v_cur, v_cmp):
+        if not _vdf.empty:
+            _vm.update(_vdf['Month'])
+    _verif_months = sorted(_vm)
+    if _verif_months:
+        _mlabels = ', '.join(pd.Timestamp(f'{m}-01').strftime('%b %Y') for m in _verif_months)
+        st.markdown(
+            f'<div style="border:1px solid {ui.LINE};border-left:3px solid {ui.TEAL};'
+            f'background:rgba(0,137,123,0.05);padding:10px 14px;margin:2px 0 6px;'
+            f'font-size:12.5px;color:{ui.TEXT};">'
+            f'<b>{len(_verif_months)} forecast month{"s" if len(_verif_months) != 1 else ""} '
+            f'now verifiable against later actuals:</b> {_mlabels}. '
+            f'Forecast by one run, since recorded as actual fund data by the other &mdash; '
+            f'the realized-accuracy tables below give the error for each.'
+            f'</div>', unsafe_allow_html=True)
+
+    _vcol_cfg = {
+        'Forecast': st.column_config.NumberColumn(format='dollar'),
+        'Actual': st.column_config.NumberColumn(format='dollar'),
+        'Error %': st.column_config.NumberColumn(format='%.1f%%'),
+    }
+
+    vc1, vc2 = st.columns(2)
+    for _dfv, _stated, _col, _who in (
+        (v_cur, cur_mape, vc1, 'Current run'),
+        (v_cmp, cmp_mape, vc2, 'Comparison run'),
+    ):
+        with _col:
+            if _dfv.empty:
+                with card(f'{_who} — realized accuracy'):
+                    st.caption('This forecast is still entirely in the future relative to the '
+                               'actuals on record — nothing to verify yet.')
+            else:
+                realized = float(_dfv['Error %'].abs().mean())
+                _tag = f'realized MAPE {realized:.1f}%'
+                with card(f'{_who} — realized accuracy',
+                          f'{len(_dfv)} forecast month(s) now have actual fund data.',
+                          tag=_tag, tag_color='green' if (_stated is None or realized <= _stated + 2) else 'orange',
+                          info=('"Realized MAPE" is the mean absolute error of this run\'s forecast '
+                                'over the months that have actually happened since — the real-world '
+                                'check on the "Validation MAPE" that was estimated at run time.')):
+                    if _stated is not None:
+                        st.caption(f'Stated validation MAPE at run time: {_stated:.1f}%  ·  '
+                                   f'realized: {realized:.1f}%')
+                    st.dataframe(_dfv, hide_index=True, width='stretch', column_config=_vcol_cfg)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # RUN HISTORY
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == 'Run History':

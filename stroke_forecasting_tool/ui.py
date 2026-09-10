@@ -88,12 +88,13 @@ NAV_SECTIONS = [
         ('Data Pipeline', ':material/database:'),
     ]),
     ('Dashboards', [
-        ('Overview',             ':material/dashboard:'),
-        ('Income Forecast',      ':material/trending_up:'),
-        ('Retention Analysis',   ':material/groups:'),
-        ('Donor Lifetime Value', ':material/savings:'),
-        ('Supplier Insights',    ':material/handshake:'),
-        ('Campaign ROI',         ':material/campaign:'),
+        ('Overview',               ':material/dashboard:'),
+        ('Income Forecast',        ':material/trending_up:'),
+        ('Forecast Verification',  ':material/fact_check:'),
+        ('Retention Analysis',     ':material/groups:'),
+        ('Donor Lifetime Value',   ':material/savings:'),
+        ('Supplier Insights',      ':material/handshake:'),
+        ('Campaign ROI',           ':material/campaign:'),
     ]),
     ('Operations', [
         ('Run History',      ':material/history:'),
@@ -1964,14 +1965,19 @@ def new_execution_log(placeholder):
     return log
 
 
-def kpi(label, value, delta=None, icon=None, accent=TEAL, delta_color='normal', help=None):
+def kpi(label, value, delta=None, icon=None, accent=TEAL, delta_color='normal', help=None, k=''):
     """Flat KPI tile per spec: label (eyebrow) -> value (uniform navy,
     handled globally) -> delta (colour-coded green/red by st.metric's own
     delta_color logic) -> optional subtext. `accent`/`icon` are accepted
     for call-site compatibility but no longer render distinctly -- every
     KPI value is uniform navy and icon-less per the real spec/reference,
-    not colour-coded per tile (see inject_global_css)."""
-    key = f'kpi_{_slug(label)}'
+    not colour-coded per tile (see inject_global_css).
+
+    k: optional extra key suffix -- for the rare page (Forecast
+    Verification) that shows the SAME metric label twice in one render
+    (once per run being compared), where a label-only key would collide.
+    Still prefixed 'kpi_' so the [class*="st-key-kpi_"] CSS keeps matching."""
+    key = f'kpi_{_slug(label)}' + (f'_{_slug(k)}' if k else '')
     with st.container(key=key):
         st.metric(label, value, delta=delta, icon=icon, border=True,
                   delta_color=delta_color, help=help)
