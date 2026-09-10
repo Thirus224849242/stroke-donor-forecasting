@@ -86,9 +86,9 @@ from db import (
 import ui
 from ui import (
     CACHED_RUN_BANNER_PAGES, card, chart, clear_nav_overlay, empty_state, inject_global_css,
-    kpi, new_execution_log, overall_progress, page_header, pill, render_cached_run_banner,
-    render_nav_transition_overlay, render_sidebar, render_startup_progress, stage_row,
-    upload_slot,
+    kpi, new_execution_log, overall_progress, page_header, pill, render_action_button_css,
+    render_cached_run_banner, render_nav_transition_overlay, render_sidebar, render_startup_progress,
+    render_topbar, render_upload_progress_tracker, stage_row, upload_slot,
 )
 
 
@@ -1019,6 +1019,13 @@ st.session_state['_nav_overlay_active'] = _nav_just_happened
 # one rerun where those constants would actually be changing.
 inject_global_css()
 render_sidebar()
+# The fixed white topbar -- rendered once, for every authenticated page,
+# right after the sidebar. Holds the sidebar-collapse hamburger, the logo
+# + current page name, the notification bell, and the account popover
+# (My profile / dark mode / Log out), which used to live per-page in
+# page_header()'s right column. `page` is already resolved above, so the
+# popover's per-page key suffix works from here.
+render_topbar()
 
 # CACHED_RUN_BANNER_PAGES, not every page -- reported live, this used to
 # show (and could auto-reveal, via the nav_loading flag "My profile" now
@@ -1181,6 +1188,13 @@ if page == 'Data Pipeline':
             </div>
         </div>
         """, unsafe_allow_html=True)
+
+        # Called here, once, rather than from inject_global_css() (which
+        # runs on every page) -- this is the only page with any
+        # st.file_uploader() widgets, so this is the only page that needs
+        # it. See its own docstring in ui.py for why this used to run
+        # globally and what that cost every other page.
+        render_upload_progress_tracker()
 
         st.markdown('<div class="sf-eyebrow">Source files</div>', unsafe_allow_html=True)
         col1, col2 = st.columns(2)
@@ -1653,26 +1667,39 @@ elif page == 'Income Forecast':
     model_choice = model_choice or 'ML forecast'
     horizon = horizon or 24
 
+    # Both rows below read straight out of session_state instead of calling
+    # cached_ml_forecast/cached_linear_forecast again -- forecast_df/mape
+    # and forecast_df_linear/mape_linear are the EXACT result of those same
+    # two calls (monthly, n_forecast=24 / n_train=24, n_forecast=24), always
+    # already computed by run_pipeline_models() and sitting in session_state
+    # (or restored straight from a saved run's DB blob, itself never a
+    # recompute either) before this page can even render. Calling them again
+    # here only ever worked because @st.cache_data usually still had that
+    # exact call warm; on any process restart since (this cache is in-memory
+    # only, wiped every `streamlit run`) or the first visit after a Run
+    # History switch to a run this process hasn't fit before, it silently
+    # became a full ~300-estimator gradient-boosting refit just to redraw a
+    # table whose numbers already existed -- confirmed as a real cause of
+    # this page feeling slow independent of whatever horizon is selected
+    # below. Reading session_state instead makes this table's cost zero
+    # regardless of cache state. ml_importances empty means the pipeline's
+    # own ML fit fell back to linear (not enough monthly history) -- the
+    # same condition the old inline call's `except ValueError` was catching,
+    # so the ML row is skipped here exactly the same way in that case.
     comp_rows = []
-    with st.spinner('Comparing forecast methods…'):
-        try:
-            cmp_ml_df, cmp_ml_mape, _, _ = cached_ml_forecast(monthly, n_forecast=24)
-            comp_rows.append({
-                'Method': 'ML forecast (gradient boosting)',
-                '12-month total': cmp_ml_df.head(12)['predicted_income'].sum(),
-                '24-month total': cmp_ml_df['predicted_income'].sum(),
-                'Validation MAPE': cmp_ml_mape,
-            })
-        except ValueError:
-            pass
-
-        cmp_lin_df, cmp_lin_mape, _, _ = cached_linear_forecast(monthly, n_train=24, n_forecast=24)
+    if st.session_state.ml_importances:
         comp_rows.append({
-            'Method': 'Linear trend',
-            '12-month total': cmp_lin_df.head(12)['predicted_income'].sum(),
-            '24-month total': cmp_lin_df['predicted_income'].sum(),
-            'Validation MAPE': cmp_lin_mape,
+            'Method': 'ML forecast (gradient boosting)',
+            '12-month total': st.session_state.forecast_df.head(12)['predicted_income'].sum(),
+            '24-month total': st.session_state.forecast_df['predicted_income'].sum(),
+            'Validation MAPE': st.session_state.mape,
         })
+    comp_rows.append({
+        'Method': 'Linear trend',
+        '12-month total': st.session_state.forecast_df_linear.head(12)['predicted_income'].sum(),
+        '24-month total': st.session_state.forecast_df_linear['predicted_income'].sum(),
+        'Validation MAPE': st.session_state.mape_linear,
+    })
 
     if sf_zone12_state is not None:
         sf_24m = sf_zone12_state['predicted_income'].sum()
@@ -2676,6 +2703,7 @@ elif page == 'Run History':
 # Google user simply vanished from every admin view with no way back
 # except the affected person re-requesting themselves).
 elif page == 'Users':
+    render_action_button_css()
     page_header('Administration', 'Users',
                 'Create and manage every sign-in account -- Google and email+password alike. '
                 'Approve or deny new Google requests, change anyone\'s role, and revoke or '
@@ -2994,7 +3022,13 @@ elif page == 'Users':
 
     # ── Create local account ──
     with card('Create local account', 'A new email + password sign-in'):
-        with st.form('create_local_account_form', border=False):
+        # The form key carries a nonce that's bumped on a SUCCESSFUL
+        # create -- a new key makes Streamlit treat it as a fresh form, so
+        # every field resets to its default. Only on success, so a
+        # validation error (bad email, short password) keeps what was
+        # typed instead of wiping it.
+        _cf_nonce = st.session_state.get('_create_acct_nonce', 0)
+        with st.form(f'create_local_account_form_{_cf_nonce}', border=False):
             cc1, cc2 = st.columns(2)
             with cc1:
                 new_email = st.text_input('Email', placeholder='name@strokefoundation.org.au')
@@ -3018,6 +3052,7 @@ elif page == 'Users':
                 st.error('Password must be at least 8 characters.', icon=':material/error:')
             elif create_local_account(clean_email, clean_name, new_role, new_password):
                 st.success(f'Account created for {clean_email}.', icon=':material/check_circle:')
+                st.session_state['_create_acct_nonce'] = _cf_nonce + 1
                 st.rerun()
             else:
                 st.error('Could not create that account -- that email may already have one.',
@@ -3071,6 +3106,7 @@ elif page == 'Profile':
     # a popover (the 2FA QR-code setup screen especially), and because the
     # profile-details editing below (Super Admin only) never fit there at
     # all. See ui.py's page_header() docstring/comments for that history.
+    render_action_button_css()
     _user = st.session_state.user or {}
     _auth_method = st.session_state.get('auth_method')
     _is_local = _auth_method == 'password'
