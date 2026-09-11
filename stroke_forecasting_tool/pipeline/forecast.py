@@ -15,7 +15,7 @@ def get_monthly_actuals(master):
               .reset_index()
     )
     monthly['donor_month'] = monthly['donor_month'].astype(str)
-    # Exclude last month  likely partial
+    # Exclude last month likely partial
     monthly = monthly.iloc[:-1].copy()
     return monthly
 
@@ -23,7 +23,7 @@ def get_monthly_actuals(master):
 def fit_linear_forecast(monthly, n_train=24, n_forecast=24, holdback=12, min_period='2019-01'):
     """
     Fit a linear trend on the last n_train months of income (restricted to
-    min_period onward  older history is treated as unreliable).
+    min_period onward older history is treated as unreliable).
     Validate on the last `holdback` months held back.
     Return forecast DataFrame, MAPE, slope and intercept.
     """
@@ -39,7 +39,7 @@ def fit_linear_forecast(monthly, n_train=24, n_forecast=24, holdback=12, min_per
     popt, _ = curve_fit(linear, t, income)
     a, b    = popt
 
-    # Validate  hold back last `holdback` months
+    # Validate hold back last `holdback` months
     train_i   = income[:-holdback]
     actual_v  = income[-holdback:]
     t_train   = t[:-holdback]

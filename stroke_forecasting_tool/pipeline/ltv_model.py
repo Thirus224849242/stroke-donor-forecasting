@@ -14,16 +14,16 @@ PNBD_RESTARTS = 5
 
 
 def _donor_transactions(master, min_period=MIN_PERIOD):
-    """One row per donor per month with a successful payment  the event
+    """One row per donor per month with a successful payment the event
     stream Pareto/NBD and Gamma-Gamma are fit on. Only transactions from
     min_period onward are kept (older history is treated as unreliable),
     so donor recency/frequency/T are all computed relative to that window.
 
     The most recent calendar month in `master` is always dropped as likely
-    partial/still-accumulating  the same convention get_monthly_actuals()
+    partial/still-accumulating the same convention get_monthly_actuals()
     uses for the linear/ML models. Without this, the LTV model's "now" (and
     therefore its month-1 forecast) silently lands one calendar month ahead
-    of what the other two models  and the shared chart x-axis  treat as
+    of what the other two models and the shared chart x-axis treat as
     the last known actual month, which shows up as an unexplained jump at
     the forecast boundary."""
     paid = master[master['paid_flag'] == True].copy()
@@ -34,7 +34,7 @@ def _donor_transactions(master, min_period=MIN_PERIOD):
         ['recurring_payment_id', 'contact_id', 'transaction_date', 'donation_amount']
     ]
     # Pareto/NBD and Gamma-Gamma both require strictly positive, non-null
-    # monetary values and dates  defensively drop anything that would
+    # monetary values and dates defensively drop anything that would
     # otherwise silently break the fit or the RFM summary.
     txn = txn.dropna(subset=['recurring_payment_id', 'transaction_date', 'donation_amount'])
     txn = txn[txn['donation_amount'] > 0]
@@ -47,10 +47,10 @@ def _clean_rfm(df, freq_col='frequency', recency_col='recency', t_col='T'):
     validation rejects outright:
       1. A single-transaction donor (frequency == 0) whose recency comes out
          as a tiny non-zero value due to floating-point rounding in the
-         library's date-bucketing  mathematically it must be exactly 0
+         library's date-bucketing mathematically it must be exactly 0
          (there's no gap between a first transaction and itself).
       2. A donor observed at exactly their last possible moment, where
-         recency == T  nudged down by an epsilon so the model can
+         recency == T nudged down by an epsilon so the model can
          distinguish "still active" from "T itself".
     """
     df = df.copy()
@@ -104,12 +104,12 @@ def fit_ltv_model(master, holdout_months=12, horizons=(12, 24), penalizer_grid=P
     multiplied together for a predicted $ LTV per donor.
 
     Also rolls the per-donor predictions up into a monthly aggregate series
-    (calendar_month, predicted_income)  the same shape as the linear/ML
-    forecasts  and validates it on the same holdback window with an
+    (calendar_month, predicted_income) the same shape as the linear/ML
+    forecasts and validates it on the same holdback window with an
     income-based MAPE, so all three forecasting methods are comparable.
 
     Pareto/NBD only ever knows about donors who already exist, so this
-    rollup structurally assumes zero future recruitment  it answers "what
+    rollup structurally assumes zero future recruitment it answers "what
     will today's donor base alone contribute," not "what will total org
     income be." For total income including future recruitment, use the
     Linear trend or ML forecast, which model the aggregate monthly series
@@ -121,7 +121,7 @@ def fit_ltv_model(master, holdout_months=12, horizons=(12, 24), penalizer_grid=P
 
     Only transactions from min_period onward are used (older history is
     treated as unreliable), and validation holds back the most recent
-    holdout_months (default 12)  train on 2019 through a year ago, test
+    holdout_months (default 12) train on 2019 through a year ago, test
     on the last 12 months, same regime as the ML forecast.
 
     Fits with the L-BFGS-B optimizer rather than lifetimes' Nelder-Mead
@@ -133,7 +133,7 @@ def fit_ltv_model(master, holdout_months=12, horizons=(12, 24), penalizer_grid=P
     keeping the best: Pareto/NBD's likelihood surface can be poorly
     conditioned for some donor populations, and a single restart from the
     library's fixed default starting point can land on meaningfully
-    different parameters run to run on identical data (observed directly 
+    different parameters run to run on identical data (observed directly
     alpha landing anywhere from ~8 to ~350 across three otherwise-identical
     runs). Restarts make the fit both reproducible and closer to the true
     optimum, at a still-small cost (a few seconds per restart).
@@ -145,7 +145,7 @@ def fit_ltv_model(master, holdout_months=12, horizons=(12, 24), penalizer_grid=P
             progress_callback(msg)
 
     # Pareto/NBD's likelihood surface can be poorly conditioned for some donor
-    # populations  without a fixed seed and multiple restarts, two runs on
+    # populations without a fixed seed and multiple restarts, two runs on
     # identical data can converge to meaningfully different parameters (seen
     # in practice: alpha landing anywhere from ~8 to ~350 run to run). A fixed
     # seed plus a few restarts (keeping the best) makes the fit reproducible.
@@ -224,7 +224,7 @@ def fit_ltv_model(master, holdout_months=12, horizons=(12, 24), penalizer_grid=P
     holdout_mae = float(tuning_df.iloc[0]['mae'])
 
     # ── 2. Income-based validation: actual vs predicted $ per holdout month ──
-    # Reuse the winning penalizer's already-fitted calibration model  no need to re-fit it.
+    # Reuse the winning penalizer's already-fitted calibration model no need to re-fit it.
     note('Validating income holdout…')
     cal_pnbd = fitted[best_penalizer]
     cal_expected_value, _ = _expected_value_series(cal_holdout['frequency_cal'], cal_holdout['monetary_value_cal'])
@@ -279,7 +279,7 @@ def fit_ltv_model(master, holdout_months=12, horizons=(12, 24), penalizer_grid=P
     lookup = txn.drop_duplicates('recurring_payment_id').set_index('recurring_payment_id')['contact_id']
     donor_results = donor_summary.join(lookup).reset_index().rename(columns={'index': 'recurring_payment_id'})
 
-    # ── 4. Monthly aggregate rollup  existing donors only ──
+    # ── 4. Monthly aggregate rollup existing donors only ──
     #
     # Pareto/NBD structurally only knows about donors who already exist, so
     # this rollup assumes zero future recruitment and is scoped to "what will
@@ -297,7 +297,7 @@ def fit_ltv_model(master, holdout_months=12, horizons=(12, 24), penalizer_grid=P
     # which made the accumulation jump sharply in its first two months.
     # Total org income *including* future recruitment is what the Linear
     # trend and ML forecast models already estimate, from the aggregate
-    # monthly series  that is the right tool for that question.
+    # monthly series that is the right tool for that question.
     note('Rolling up existing-donor forecast by month…')
     existing_donor_rollup = _monthly_rollup(cum_by_month, donor_summary['expected_donation_value'], monthly_horizon)
     monthly_forecast_df = existing_donor_rollup

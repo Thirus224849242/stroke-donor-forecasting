@@ -94,7 +94,7 @@ from ui import (
 
 # ── Cached forecast fits ────────────────────────────────────────────────────
 # fit_ml_forecast in particular refits a 300-estimator, direct-multi-step
-# gradient-boosting model  several pages call it just to populate a
+# gradient-boosting model several pages call it just to populate a
 # comparison table, and Streamlit reruns the *entire* script on every widget
 # interaction, so without caching that refit happened on every click, even
 # ones unrelated to the forecast (this was the actual cause of the page
@@ -125,7 +125,7 @@ def cached_linear_forecast(monthly, n_train=24, n_forecast=24):
 
 
 # Donor LTV (Pareto/NBD + Gamma-Gamma) is by far the slowest fit in the app
-# (~5 min) and nothing on the main pipeline path reads its output  only the
+# (~5 min) and nothing on the main pipeline path reads its output only the
 # separate Donor Lifetime Value page does. It's deliberately NOT part of
 # run_pipeline_models() any more; it's fit lazily, right here, the first
 # time that page is opened, keyed on `master` so revisiting the page or
@@ -2561,7 +2561,7 @@ elif page == 'Forecast Verification':
 
     def _blend_fc(parts, n=24):
         """Month-by-month mean of every available total-income method
-        (ML, Linear, Stock-flow)  the same blend the Overview page shows.
+        (ML, Linear, Stock-flow) the same blend the Overview page shows.
         `parts` is a list of predicted_income-bearing frames; returns a
         calendar_month / predicted_income frame, or None if none are usable."""
         series = [p['predicted_income'].head(n).reset_index(drop=True)

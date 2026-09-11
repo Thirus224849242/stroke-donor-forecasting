@@ -1,5 +1,5 @@
 """
-Donor Gift Waterfall  an MRR-waterfall-style monthly $ bridge:
+Donor Gift Waterfall an MRR-waterfall-style monthly $ bridge:
 
     Income(t) ~= Income(t-1) + New(t) + Expansion(t) - Contraction(t) - Churned(t)
 
@@ -17,7 +17,7 @@ land in the same month) means a raw month-over-month diff of success_amt
 would misfire on both false expansions and false contractions. Instead,
 each donor's PAID-month amounts are run-length encoded and short runs
 (< MIN_RUN consecutive paid months) are merged into the preceding
-confirmed level, treating them as noise rather than a real gift change 
+confirmed level, treating them as noise rather than a real gift change
 a donor's true level only "moves" once it holds for a few months running.
 """
 
@@ -75,7 +75,7 @@ def build_gift_waterfall(master, min_period='2019-01'):
     monthly_waterfall: one row per calendar month with new_volume,
     expansion_volume, contraction_volume, churned_volume, income (actual),
     bridged_income (income(t-1) + new + expansion - contraction - churned),
-    and residual (income - bridged_income)  the part of the month-to-month
+    and residual (income - bridged_income) the part of the month-to-month
     change NOT explained by a confirmed level change or churn. This is
     expected to be non-zero: a donor having one bad or one lucky payment
     month while still active (retry noise) moves income without being a
@@ -84,7 +84,7 @@ def build_gift_waterfall(master, min_period='2019-01'):
     first-pass waterfall actually explains.
 
     donor_events: per-donor confirmed-level event log (recurring_payment_id,
-    month, level, event_type) for auditability  every dollar in the
+    month, level, event_type) for auditability every dollar in the
     monthly waterfall traces back to a row here.
     """
     panel = master[master['donor_month'] >= pd.Period(min_period, freq='M')]
