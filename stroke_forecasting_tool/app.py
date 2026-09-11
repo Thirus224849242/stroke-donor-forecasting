@@ -723,12 +723,10 @@ def _render_profile_details_card(_email):
     with card(title='Profile details', sub='Only Super Admins can change their own name or email.'):
         if not _editing:
             st.markdown(f"""
-            <div style="display:flex;gap:28px;">
-                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
-                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
-                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
-                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
-            </div>
+            <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
+                <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
+            <div style="margin-top:10px;"><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
+                <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
             """, unsafe_allow_html=True)
             if st.button('Edit', key='profile_details_edit', icon=':material/edit:', width='stretch'):
                 st.session_state.profile_details_editing = True
@@ -3519,42 +3517,55 @@ elif page == 'Profile':
     # accounts are admin-provisioned the same way passwords are, per the
     # user's own explicit spec for this page -- only a Super Admin edits
     # their own name/email, everyone else just sees it.
-    if _is_local and _user.get('role') == 'Super Admin':
-        _render_profile_details_card(_email)
-    elif _is_local:
-        with card(title='Profile details'):
-            st.caption('Only a Super Admin can change your name or email. Contact one if these need updating.')
-            st.markdown(f"""
-            <div style="display:flex;gap:28px;">
-                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
-                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
-                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
-                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        with card(title='Profile details'):
-            st.caption('Your name and email come from Google and are managed in your Google account, '
-                       'not here.')
-            st.markdown(f"""
-            <div style="display:flex;gap:28px;">
-                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
-                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
-                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
-                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    # Password and two-factor auth are both local-sign-in-only -- a Google
-    # account has no password in this app at all, and its own 2FA (if any)
-    # is Google's, not ours (same reasoning as the docstring history above).
+    #
+    # Side by side, not stacked -- these three (Profile details, Change
+    # password, Two-factor authentication) used to be full-width cards
+    # top to bottom, which left every "start" button (Edit/Change password/
+    # Set up 2FA, all width='stretch') stretched the full page width for
+    # no reason -- reported live as looking wrong. st.columns() narrows
+    # each card to a third of the page, so the buttons inside stretch to
+    # something sane instead. Two columns, not three, on the Google branch
+    # below -- there's no separate password/2FA card to give a third
+    # column to there, just the one combined "Sign-in security" notice.
     if _is_local:
-        _render_change_password_card(_email)
-        _render_2fa_card(_email)
+        col_profile, col_pw, col_2fa = st.columns(3)
+        with col_profile:
+            if _user.get('role') == 'Super Admin':
+                _render_profile_details_card(_email)
+            else:
+                with card(title='Profile details'):
+                    st.caption('Only a Super Admin can change your name or email. Contact one if these '
+                               'need updating.')
+                    st.markdown(f"""
+                    <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
+                        <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
+                    <div style="margin-top:10px;"><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
+                        <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
+                    """, unsafe_allow_html=True)
+        # Password and two-factor auth are both local-sign-in-only -- a
+        # Google account has no password in this app at all, and its own
+        # 2FA (if any) is Google's, not ours (same reasoning as the
+        # docstring history above).
+        with col_pw:
+            _render_change_password_card(_email)
+        with col_2fa:
+            _render_2fa_card(_email)
     else:
-        with card(title='Sign-in security'):
-            st.caption('Password and two-factor authentication are managed in your Google account, '
-                       'not here; your access to this app is tied to your Google sign-in.')
+        col_profile, col_sec = st.columns(2)
+        with col_profile:
+            with card(title='Profile details'):
+                st.caption('Your name and email come from Google and are managed in your Google '
+                           'account, not here.')
+                st.markdown(f"""
+                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
+                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
+                <div style="margin-top:10px;"><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
+                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
+                """, unsafe_allow_html=True)
+        with col_sec:
+            with card(title='Sign-in security'):
+                st.caption('Password and two-factor authentication are managed in your Google account, '
+                           'not here; your access to this app is tied to your Google sign-in.')
 
 
 # Matches the placeholder opened above (search _signing_in_overlay_ph) --
