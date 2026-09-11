@@ -170,7 +170,7 @@ def fit_ltv_model(master, holdout_months=12, horizons=(12, 24), penalizer_grid=P
     if cal_holdout.empty:
         raise ValueError(
             f'The calibration/holdout split produced no donors (calibration ends '
-            f'{calibration_end.date()}, data runs to {full_end.date()}) — the '
+            f'{calibration_end.date()}, data runs to {full_end.date()}); the '
             f'donor history may be too short for a {holdout_months}-month holdback.'
         )
     cal_holdout = _clean_rfm(cal_holdout, 'frequency_cal', 'recency_cal', 'T_cal')

@@ -142,7 +142,7 @@ def run_walk_forward(components_df, forecast_recruits, forecast_lapse_rate, fore
         test = components_df.iloc[w['test_start'] - 1:w['test_end']]
         horizon = len(test)
         if horizon == 0:
-            raise ValueError(f'Window {w} has zero test months — check components_df has enough history.')
+            raise ValueError(f'Window {w} has zero test months; check components_df has enough history.')
 
         recruits_fc = np.asarray(forecast_recruits(train, horizon), dtype=float)
         lapse_rate_fc = np.asarray(forecast_lapse_rate(train, horizon), dtype=float)

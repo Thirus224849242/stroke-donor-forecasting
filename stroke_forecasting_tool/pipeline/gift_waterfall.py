@@ -224,7 +224,7 @@ def forecast_gift_waterfall(master, min_period='2019-01', horizon=24, holdout_mo
     hist = monthly.iloc[1:].reset_index(drop=True)  # drop the boundary-artifact first row
     if len(hist) < holdout_months + 24:
         raise ValueError(
-            f'Not enough history for the gift-waterfall forecast — {len(hist)} usable months, '
+            f'Not enough history for the gift-waterfall forecast: {len(hist)} usable months, '
             f'need at least {holdout_months + 24} (holdout + a real fitting window).'
         )
 

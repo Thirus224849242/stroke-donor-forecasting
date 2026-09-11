@@ -132,7 +132,7 @@ def build_production_forecast(master, min_period='2019-01', horizon=36,
     hazard = build_tenure_hazard(panel, cutoff, max_tenure=MAX_TENURE)
     pop = _tenure_population(panel, cutoff, max_tenure=MAX_TENURE)
 
-    note('Rolling Zone 1–2 forward (months 1–18)…')
+    note('Rolling Zone 1 and 2 forward (months 1 to 18)…')
     zone12_len = min(ZONE2_MONTHS, horizon)
     rows = []
     for m in range(zone12_len):
@@ -150,7 +150,7 @@ def build_production_forecast(master, min_period='2019-01', horizon=36,
     zone3_len = max(horizon - zone12_len, 0)
     zone3_scenarios, assumptions = {}, {}
     if zone3_len > 0:
-        note('Building Zone 3 scenarios (months 19–36)…')
+        note('Building Zone 3 scenarios (months 19 to 36)…')
         for name, params in SCENARIOS.items():
             pop3 = dict(pop)
             gift_level = float(gift_fc[zone12_len - 1]) if zone12_len > 0 else float(comp['avg_gift'].iloc[-1])
