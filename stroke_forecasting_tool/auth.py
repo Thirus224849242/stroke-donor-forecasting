@@ -716,7 +716,7 @@ def render_request_access(email: str, name: str):
     with st.container(key='login_card'):
         st.markdown("**Request access**")
         st.caption(f'{email} isn\'t set up yet. Submit a request below and an '
-                   f'administrator will review it -- you\'ll be able to sign in as '
+                   f'administrator will review it; you\'ll be able to sign in as '
                    f'soon as it\'s approved.')
         if st.button('Request access', type='primary', icon=':material/send:', width='stretch'):
             request_access(email, name)
