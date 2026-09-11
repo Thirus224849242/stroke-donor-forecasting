@@ -975,6 +975,30 @@ def inject_global_css():
     }}
     </style>
     """)
+    # Reported live as wasted vertical space between the topbar and the
+    # first page element. The utility elements Streamlit lays out as flex
+    # children at the very top of the main block -- this function's
+    # injected <script>/<style> (each its own stElementContainer) and the
+    # fixed topbar's own stLayoutWrapper -- are all zero-height but still
+    # each cost a full flex gap (~14px), which stacked into ~40px of dead
+    # space under the topbar. position:absolute takes them out of flex
+    # flow (killing the gap) without changing what they do: a
+    # <script>/<style> paints nothing, and the topbar is position:fixed
+    # so its wrapper was never needed in normal flow. Same technique the
+    # cached-run banner's own wrapper rule (above) already uses.
+    #
+    # Its OWN st.html() call, not appended to any block above -- doing
+    # that trips the silent-failure-above-a-size-threshold bug those
+    # blocks are deliberately split to avoid (see their comments).
+    st.html("""
+    <style>
+    [data-testid="stMain"] [data-testid="stElementContainer"]:has(> [data-testid="stHtml"] > script),
+    [data-testid="stMain"] [data-testid="stElementContainer"]:has(> [data-testid="stHtml"] > style),
+    [data-testid="stMain"] [data-testid="stLayoutWrapper"]:has(> [data-testid="stVerticalBlock"].st-key-sf_topbar) {
+        position: absolute !important;
+    }
+    </style>
+    """)
     # Keeps --sf-sidebar-w matched to the sidebar's REAL current width
     # (0 when collapsed; its actual rendered width otherwise, including a
     # user drag-resize) rather than a hardcoded 300px -- every position:
