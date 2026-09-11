@@ -1,4 +1,4 @@
-# Stroke Foundation — Donor Forecasting Tool
+# Stroke Foundation Donor Forecasting Tool
 
 SIT776 Industry Placement · Deakin University · 2026
 
@@ -61,5 +61,5 @@ MAPE of 2.9% on the Stroke Foundation dataset.
 ## Notes
 
 - The pipeline handles the 550 MB Payments.csv in 500K-row chunks
-- All data stays local — nothing is sent to any server
+- All data stays local nothing is sent to any server
 - The master file is rebuilt fresh on every pipeline run

@@ -103,8 +103,8 @@ def build_master(
     if 'birth_year' in panel.columns:
         panel['age_at_recruit'] = panel['recruit_year'] - panel['birth_year']
 
-    # Remove only genuine errors — negative tenure
-    # tenure_months = 0 means payment in recruitment month — valid
+    # Remove only genuine errors negative tenure
+    # tenure_months = 0 means payment in recruitment month valid
     panel = panel[panel['tenure_months'] >= 0].copy()
 
     # Final rename

@@ -2246,7 +2246,7 @@ def clear_nav_overlay():
 
 
 def _peek_columns(f):
-    """Read just the header row of an uploaded CSV without consuming it —
+    """Read just the header row of an uploaded CSV without consuming it
     UploadedFile.getbuffer()/getvalue() ignore the read cursor, so a cheap
     nrows=0 peek here doesn't affect the full read done later for the pipeline."""
     try:
