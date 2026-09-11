@@ -17,7 +17,7 @@ def _month_numbers(monthly):
 
 def _origin_features(residual, month_num, i, n_lags):
     """Features knowable at origin month i, built only from real observed
-    history up to and including i — never from a previous prediction."""
+    history up to and including i  never from a previous prediction."""
     feat = {}
     for lag in range(1, n_lags + 1):
         j = i - lag + 1
@@ -43,7 +43,7 @@ def _build_training_table(residual, month_num, n_lags, max_horizon, half_life=RE
     """One row per (origin, horizon) pair: features knowable at the origin
     month, the horizon distance, and the *real* residual that occurred at
     origin + horizon. Turns ~n months of history into ~n x max_horizon
-    training examples — the standard 'direct multi-step' trick for getting
+    training examples  the standard 'direct multi-step' trick for getting
     a tree model enough data to learn a horizon-dependent pattern without
     ever chaining predictions into each other.
 
@@ -52,7 +52,7 @@ def _build_training_table(residual, month_num, n_lags, max_horizon, half_life=RE
     default 30 months). With 6-7+ years of history, early low-volume years
     can behave quite differently from recent steady-state years (real
     example: this donor base showed +15-16% July->August jumps in
-    2019-2020 but a flat +/-1% in 2021-2025) — trained unweighted, those
+    2019-2020 but a flat +/-1% in 2021-2025)  trained unweighted, those
     early years get an equal vote and can distort a learned seasonal
     pattern that no longer reflects how the program actually behaves now.
     Recency weighting keeps every month of history in the training set
@@ -85,13 +85,13 @@ def fit_ml_forecast(monthly, n_forecast=24, holdback=12, n_lags=6, min_period=MI
     Direct multi-step gradient-boosted trend + residual forecast.
 
     The linear trend is fit on the full (filtered) series and handled
-    linearly — trees can't extrapolate a slope, so the slope is never their
+    linearly  trees can't extrapolate a slope, so the slope is never their
     job. A GradientBoostingRegressor then learns the residual (actual minus
     trend) as a function of lag/rolling/seasonal features AND how many
     months out it's forecasting ("horizon"), trained on every
     (origin-month, horizon) pair in history.
 
-    Critically, every prediction — validation or production — is made from
+    Critically, every prediction  validation or production  is made from
     the *same fixed, real* origin: nothing is ever fed a previous
     prediction as an input. A recursive one-step-at-a-time forecast (predict
     month 1, feed it in to predict month 2, ...) compounds small biases over
@@ -100,7 +100,7 @@ def fit_ml_forecast(monthly, n_forecast=24, holdback=12, n_lags=6, min_period=MI
 
     Trains only on data from `min_period` onward (older history is treated
     as unreliable) and validates on a walk-forward holdout of the most
-    recent `holdback` months — train on everything before it, forecast
+    recent `holdback` months  train on everything before it, forecast
     those months directly from the last training origin, compare to what
     actually happened.
 

@@ -1,6 +1,6 @@
 """
 sBG (shifted Beta-Geometric) donor-retention forecast, with a per-supplier
-BG/NBD fallback — a fifth forecasting method alongside Linear/ML/Donor
+BG/NBD fallback  a fifth forecasting method alongside Linear/ML/Donor
 rollup (Pareto-NBD)/Stock-flow.
 
 Both models are fit and directly compared as independent forecast methods
