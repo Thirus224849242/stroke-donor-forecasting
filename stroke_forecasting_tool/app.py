@@ -1488,7 +1488,7 @@ elif page == 'Overview':
 
     with st.container(horizontal=True):
         kpi('12-month forecast', f'${total_12_avg:,.0f}',
-            delta=f'range \\${total_12_min:,.0f}–\\${total_12_max:,.0f} across {len(methods)} methods',
+            delta=f'range \\${total_12_min:,.0f} to \\${total_12_max:,.0f} across {len(methods)} methods',
             icon=':material/trending_up:', accent=ui.TEAL, delta_color='off')
         kpi('Active donors', f'{current_active:,.0f}', delta=f'{active_delta:+,} vs prior month',
             icon=':material/group:', accent=ui.BLUE)
@@ -1770,7 +1770,7 @@ elif page == 'Income Forecast':
         with fc3:
             st.caption('Forecasts recruits (SARIMA), lapse rate (cohort survival), and gift size (trend) '
                        'separately, then derives income through the accounting identity, never forecasts '
-                       'income directly. Statistical range is months 1–18. Months 19–36 are shown as named '
+                       'income directly. Statistical range is months 1 to 18. Months 19 to 36 are shown as named '
                        'scenarios further down this page, not a point forecast.')
         n_train = min(36, len(monthly))
         holdback_label = '3-window walk-forward avg'
@@ -1786,7 +1786,7 @@ elif page == 'Income Forecast':
                 extra['band_low'] = extra['predicted_income'] * 0.80
                 extra['band_high'] = extra['predicted_income'] * 1.20
                 base_df = pd.concat([base_df, extra], ignore_index=True)
-                st.caption(f'Months 19–{horizon} above use the Base scenario\'s central assumptions to fill '
+                st.caption(f'Months 19 to {horizon} above use the Base scenario\'s central assumptions to fill '
                            f'this chart. See the scenario comparison below for the full Conservative/Optimistic range.')
             forecast_df = base_df.head(horizon)
             mape = st.session_state.mape_stockflow
@@ -1817,7 +1817,7 @@ elif page == 'Income Forecast':
                   line_width=0, layer='below')
     if 'band_low' in fore.columns:
         band_lo, band_hi = fore['band_low'].values, fore['band_high'].values
-        band_name = 'Confidence band (±5% months 1–6, ±12% months 7–18)'
+        band_name = 'Confidence band (±5% months 1 to 6, ±12% months 7 to 18)'
     else:
         band_lo, band_hi = fore['predicted_income'] * 0.95, fore['predicted_income'] * 1.05
         band_name = '±5% confidence band'
@@ -1941,7 +1941,7 @@ elif page == 'Income Forecast':
             yaxis=dict(tickformat='$,.0f', title='Monthly income ($)'),
             xaxis=dict(title='Month number'),
         )
-        with card('Zone 3: strategic scenarios (months 19–36)',
+        with card('Zone 3: strategic scenarios (months 19 to 36)',
                   'Not a statistical point forecast: confidence beyond 18 months is too low for that. '
                   'Three named scenarios, each built by scaling the same fitted recruitment, retention, '
                   'and gift models. The organisation should own which of these it plans around.',
@@ -2371,7 +2371,7 @@ elif page == 'Campaign ROI':
     best = roi.sort_values('total_income', ascending=False).iloc[0]
     has_cpa = 'avg_cpa' in roi.columns
     cpa_vals = roi[roi['avg_cpa'] > 0]['avg_cpa'] if has_cpa else pd.Series(dtype=float)
-    cpa_range = f'\\${cpa_vals.min():.0f} – \\${cpa_vals.max():.0f}' if len(cpa_vals) else 'No CPA data'
+    cpa_range = f'\\${cpa_vals.min():.0f} to \\${cpa_vals.max():.0f}' if len(cpa_vals) else 'No CPA data'
 
     with st.container(horizontal=True):
         kpi('Top income campaign', best['campaign_type'], delta=f'\\${best["total_income"]:,.0f} total',
@@ -2536,11 +2536,11 @@ elif page == 'Forecast Verification':
 
     if fv_is_sf:
         st.caption('Stock-flow is validated on 3 rolling walk-forward windows, the other two on '
-                   'one fixed 12-month holdout — its MAPE is only directionally comparable. Months '
-                   '19–24 use the Base scenario\'s central assumptions.')
+                   'one fixed 12-month holdout, so its MAPE is only directionally comparable. Months '
+                   '19 to 24 use the Base scenario\'s central assumptions.')
     elif fv_is_blend:
         st.caption('Blended is the month-by-month mean of every available method (ML forecast, '
-                   'Linear trend, Stock-flow) — the same combined forecast the Overview page '
+                   'Linear trend, Stock-flow), the same combined forecast the Overview page '
                    'shows. Its MAPE is the average of those methods\' own validation scores.')
 
     def _sf_combined(zone12, zone3, n=24):
@@ -2625,7 +2625,7 @@ elif page == 'Forecast Verification':
     with st.spinner('Loading the selected runs…'):
         _a, _b = _fv_side(fv_a_id), _fv_side(fv_b_id)
     if _a is None or _b is None:
-        st.error('Could not load one of the selected runs — it may have been deleted.',
+        st.error('Could not load one of the selected runs; it may have been deleted.',
                  icon=':material/error:')
         clear_nav_overlay()
         st.stop()
@@ -2754,7 +2754,7 @@ elif page == 'Forecast Verification':
     fig.update_layout(yaxis=dict(tickformat='$,.0f', title='Monthly income ($)'), xaxis_title='Month')
     with card('Forecast vs actual fund income',
               'Both runs\' forecasts on one timeline. Where a forecast line sits left of '
-              '"Actuals end" it is overlapping real data — the gap between it and the solid '
+              '"Actuals end" it is overlapping real data: the gap between it and the solid '
               'line is that forecast\'s error.',
               tag=fv_model, tag_color='blue'):
         chart(fig, 360)
@@ -2791,7 +2791,7 @@ elif page == 'Forecast Verification':
             f'font-size:12.5px;color:{ui.TEXT};">'
             f'<b>{len(_verif_months)} forecast month{"s" if len(_verif_months) != 1 else ""} '
             f'now verifiable against later actuals:</b> {_mlabels}. '
-            f'Forecast by one run, since recorded as actual fund data by the other &mdash; '
+            f'Forecast by one run, since recorded as actual fund data by the other; '
             f'the realized-accuracy tables below give the error for each.'
             f'</div>', unsafe_allow_html=True)
 
@@ -2808,17 +2808,17 @@ elif page == 'Forecast Verification':
     ):
         with _col:
             if _dfv.empty:
-                with card(f'{_who} — realized accuracy'):
+                with card(f'{_who}: realized accuracy'):
                     st.caption('This forecast is still entirely in the future relative to the '
-                               'actuals on record — nothing to verify yet.')
+                               'actuals on record, so there is nothing to verify yet.')
             else:
                 realized = float(_dfv['Error %'].abs().mean())
                 _tag = f'realized MAPE {realized:.1f}%'
-                with card(f'{_who} — realized accuracy',
+                with card(f'{_who}: realized accuracy',
                           f'{len(_dfv)} forecast month(s) now have actual fund data.',
                           tag=_tag, tag_color='green' if (_stated is None or realized <= _stated + 2) else 'orange',
                           info=('"Realized MAPE" is the mean absolute error of this run\'s forecast '
-                                'over the months that have actually happened since — the real-world '
+                                'over the months that have actually happened since: the real-world '
                                 'check on the "Validation MAPE" that was estimated at run time.')):
                     if _stated is not None:
                         st.caption(f'Stated validation MAPE at run time: {_stated:.1f}%  ·  '
