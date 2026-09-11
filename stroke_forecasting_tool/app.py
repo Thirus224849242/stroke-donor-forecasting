@@ -755,7 +755,7 @@ def _render_profile_details_card(_email):
                 elif not clean_new_email or '@' not in clean_new_email:
                     st.error('Enter a valid email address.', icon=':material/error:')
                 elif new_name.strip() == _user.get('name') and clean_new_email == _email:
-                    st.info('Nothing to save -- name and email are unchanged.', icon=':material/info:')
+                    st.info('Nothing to save; name and email are unchanged.', icon=':material/info:')
                 elif update_local_account_profile(_email, new_name.strip(), clean_new_email):
                     # A full st.rerun(), not scope='fragment' -- unlike Cancel/
                     # Edit above, this changes st.session_state.user, which the
@@ -771,7 +771,7 @@ def _render_profile_details_card(_email):
                     st.success('Profile updated.', icon=':material/check_circle:')
                     st.rerun()
                 else:
-                    st.error('Could not save those changes -- that email may already be in use.',
+                    st.error('Could not save those changes; that email may already be in use.',
                               icon=':material/error:')
 
 
@@ -1384,7 +1384,7 @@ if page == 'Data Pipeline':
             log(traceback.format_exc())
             st.session_state.pipeline_error_message = (
                 f'The pipeline run failed: {exc}. See the Execution Log above for '
-                f'details, or try again -- this usually means one of the uploaded '
+                f'details, or try again; this usually means one of the uploaded '
                 f'files has an unexpected format.'
             )
             st.rerun()
@@ -1425,11 +1425,11 @@ elif page == 'Overview':
     ) if st.session_state.pipeline_run else ''
     page_header('Dashboard', 'Overview', overview_sub, meta=page_meta, info=(
         'The 12-month forecast KPI and the chart below are both a BLEND of every available '
-        'total-income method (ML, linear trend, stock-flow) -- the dashed line is the average '
+        'total-income method (ML, linear trend, stock-flow); the dashed line is the average '
         'across methods, and the shaded band is how far those methods disagree, not a statistical '
         'confidence interval. Donor Lifetime Value answers a different question (what today\'s '
         'existing donors are worth, assuming no further recruitment) and is deliberately excluded '
-        'from this blend -- see that page for the LTV view.'
+        'from this blend; see that page for the LTV view.'
     ))
 
     if not st.session_state.pipeline_run:
@@ -1528,7 +1528,7 @@ elif page == 'Overview':
               tag=f'{len(methods)} methods blended', tag_color='green', info=(
                   'Solid line (months to the left of the dotted vertical line) is real historical '
                   'income. Dashed line (to the right) is the forecast: the average across every '
-                  'available method. The shaded teal band is NOT a confidence interval -- it is the '
+                  'available method. The shaded teal band is NOT a confidence interval; it is the '
                   'spread between the methods\' own predictions, so a wide band means the methods '
                   'disagree more about that month, not that any one of them is less certain.'
               )):
@@ -1582,7 +1582,7 @@ elif page == 'Overview':
             ],
         })
         with card('Dataset summary', info=(
-            'Snapshot of the currently loaded dataset -- raw payment rows, unique signups/donors, '
+            'Snapshot of the currently loaded dataset; raw payment rows, unique signups/donors, '
             'and the ML forecast\'s own validation MAPE. Not a forecast itself, just what this run '
             'was built from.'
         )):
@@ -1626,7 +1626,7 @@ elif page == 'Income Forecast':
                     '(see Overview for the blended view). Linear trend is a simple baseline. ML '
                     '(gradient boosting) predicts each month directly rather than chaining one-step '
                     'predictions that compound their own error. Stock-flow never forecasts income '
-                    'directly -- it forecasts recruits, lapse rate and average gift separately, then '
+                    'directly; it forecasts recruits, lapse rate and average gift separately, then '
                     'derives income from those via Income = Active donors x Average gift. The '
                     'stock-flow MAPE comes from 3 rolling walk-forward windows, the other two use one '
                     'fixed 12-month holdout, so it is not directly comparable in absolute terms.'
@@ -1717,7 +1717,7 @@ elif page == 'Income Forecast':
               'model is validated on 3 rolling 12-month walk-forward windows, while the others use one '
               'fixed 12-month holdout, so its MAPE is not directly comparable, just directionally so.',
               tag=f'{len(comp_rows)} methods', tag_color='blue', info=(
-                  'One row per method, each trained and validated independently -- not a leaderboard '
+                  'One row per method, each trained and validated independently; not a leaderboard '
                   'to just pick the lowest MAPE from. Compare the 12/24-month totals across rows to '
                   'see how much the methods actually agree on, and remember the stock-flow row\'s '
                   'MAPE is measured differently (3 rolling windows vs one fixed holdout for the '
@@ -1850,7 +1850,7 @@ elif page == 'Income Forecast':
               tag=f'MAPE {mape:.1f}%', tag_color='green', info=(
                   'Solid line is real historical income (the training window shown depends on the '
                   'model selected above). Dashed line, right of the "Forecast start" marker, is this '
-                  'ONE selected method\'s own prediction -- not blended with the other methods (see '
+                  'ONE selected method\'s own prediction; not blended with the other methods (see '
                   'Overview for that). The shaded band widens further out because near-term months '
                   'are always more certain than distant ones.'
               )):
@@ -1884,7 +1884,7 @@ elif page == 'Income Forecast':
                   'Relative importance of each engineered feature in the gradient-boosting model',
                   tag='Model transparency', tag_color='blue', info=(
                       'Longer bars mean the model relied on that input more when making its '
-                      'predictions -- e.g. "3-month rolling average" being longest means recent '
+                      'predictions; e.g. "3-month rolling average" being longest means recent '
                       'income trend drives most of the forecast, not seasonality or older history. '
                       'This shows relative weighting inside the model, not proof any one factor '
                       'causes income to move.'
@@ -1897,7 +1897,7 @@ elif page == 'Income Forecast':
             columns={'calendar_month': 'Month', 'predicted_income': 'Predicted income'})
         with card('Forecast table', info=(
             'The exact predicted income for every month in the chart above, month 1 being the '
-            'first month after "Forecast start" -- use this for the precise numbers behind the line.'
+            'first month after "Forecast start"; use this for the precise numbers behind the line.'
         )):
             st.dataframe(
                 table, hide_index=True, width='stretch', height=300,
@@ -1974,7 +1974,7 @@ elif page == 'Retention Analysis':
                 '% of donors still active at each month since recruitment · observed from historical data.',
                 meta=page_meta, info=(
                     'Each line is the % of donors from one segment still actively giving at each '
-                    'month since they were recruited -- observed directly from historical payment '
+                    'month since they were recruited; observed directly from historical payment '
                     'data, not modeled or forecast. A line that drops faster means that segment '
                     'loses donors sooner after recruitment. Use the controls above the chart to '
                     'segment by supplier, campaign type, or recruitment year, and to change how '
@@ -2021,7 +2021,7 @@ elif page == 'Retention Analysis':
         with card(f'Retention by {segment.replace("_", " ").title()}',
                   '% of donors still active at each tenure month',
                   tag='Observed', tag_color='blue', info=(
-                      'Each colored line is one group in the segment selected above -- e.g. one '
+                      'Each colored line is one group in the segment selected above; e.g. one '
                       'supplier, or one campaign type. The y-axis is % of that group\'s donors still '
                       'giving at each month since recruitment; a line that drops faster loses donors '
                       'sooner. The dotted horizontal line marks 50% retention as a reference point, '
@@ -2065,7 +2065,7 @@ elif page == 'Donor Lifetime Value':
                     'individual per-donor predictions summed across the whole donor base. The bar '
                     'chart ranks the highest-value individual donors; the histogram shows how '
                     'predicted value is distributed across everyone. Fit fresh each live session, not '
-                    'saved with historical runs -- reload a past run from Run History and this page '
+                    'saved with historical runs; reload a past run from Run History and this page '
                     'won\'t have a value to show.'
                 ))
 
@@ -2141,7 +2141,7 @@ elif page == 'Donor Lifetime Value':
             with card('Top 15 donors by predicted value',
                       'Highest predicted lifetime value over the next 24 months', tag='Ranked', info=(
                           'Each bar is one individual donor (by contact ID), ranked by their own '
-                          'predicted 24-month value -- not a segment or supplier average. Use this to '
+                          'predicted 24-month value; not a segment or supplier average. Use this to '
                           'identify specific high-value donors worth prioritising, e.g. for '
                           'stewardship outreach.'
                       )):
@@ -2174,7 +2174,7 @@ elif page == 'Donor Lifetime Value':
                           'A histogram, not a ranking: each bar is a $ range, and its height is how '
                           'many donors fall in that range. A tall bar near $0 with a long low tail to '
                           'the right means most donors are predicted to give modestly, with a small '
-                          'number of high-value outliers -- the same donors shown individually in '
+                          'number of high-value outliers; the same donors shown individually in '
                           '"Top 15 donors" to the left.'
                       )):
                 chart(fig2, 380)
@@ -2223,7 +2223,7 @@ elif page == 'Donor Lifetime Value':
                 'Each row tried a different penalizer (a regularization setting) for Pareto/NBD; the '
                 'one used elsewhere on this page is whichever row had the lowest holdout MAPE, shown '
                 'in the "Holdout MAPE" KPI above. The caption below the table compares the '
-                'Gamma-Gamma model\'s predicted average gift to what was actually observed -- the '
+                'Gamma-Gamma model\'s predicted average gift to what was actually observed; the '
                 'closer those two numbers, the better calibrated the gift-size prediction is.'
             )):
                 st.dataframe(
@@ -2281,7 +2281,7 @@ elif page == 'Supplier Insights':
         fig.update_layout(yaxis=dict(tickformat='$,.0f', title='Total income ($)'), showlegend=False)
         with card('Total income by supplier', info=(
             'Total historical income attributed to donors each supplier recruited, not a per-donor '
-            'average -- a supplier with more signups will tend to rank higher here even if its '
+            'average; a supplier with more signups will tend to rank higher here even if its '
             'individual donors give less. Compare against "Active donors by supplier" and the '
             'summary table\'s "Avg gift" column for the fuller picture.'
         )):
@@ -2298,7 +2298,7 @@ elif page == 'Supplier Insights':
         with card('Active donors by supplier', info=(
             'How many currently-active donors each supplier has recruited in total, not how many '
             'they recruited this month. A supplier can look strong here purely on volume even if a '
-            'large share of those donors give small amounts -- see Retention Analysis to check how '
+            'large share of those donors give small amounts; see Retention Analysis to check how '
             'well each supplier\'s donors are retained over time.'
         )):
             chart(fig2, 280)
@@ -2308,7 +2308,7 @@ elif page == 'Supplier Insights':
 
     with card('Monthly income trend by supplier',
               'Select suppliers to compare their monthly income trajectory', info=(
-                  'Real historical monthly income, not a forecast -- one line per supplier selected '
+                  'Real historical monthly income, not a forecast; one line per supplier selected '
                   'in the box below. Use this to spot which suppliers are trending up or down over '
                   'time, not just their all-time totals shown in the bar charts above.'
               )):
@@ -2335,7 +2335,7 @@ elif page == 'Supplier Insights':
     })
     with card('Supplier summary', info=(
         'One row per supplier with the exact numbers behind the charts above. "Avg gift" is per '
-        'payment, not per donor -- a useful check against "Total income" and "Active donors" for '
+        'payment, not per donor; a useful check against "Total income" and "Active donors" for '
         'whether a supplier\'s strength is volume, gift size, or both.'
     )):
         st.dataframe(
@@ -2357,7 +2357,7 @@ elif page == 'Campaign ROI':
                 meta=page_meta, info=(
                     'Compares campaign types by income AND cost per acquisition (CPA), not just which '
                     'recruited the most donors. A campaign with a higher CPA can still be worth it if '
-                    'it recruits donors who give more or stay longer -- check this page alongside '
+                    'it recruits donors who give more or stay longer; check this page alongside '
                     'Retention Analysis and Supplier Insights for that fuller picture. "Free Sales" '
                     'campaigns (CPA of $0) are shown separately since a $/donor cost comparison '
                     'doesn\'t apply to them.'
@@ -2394,7 +2394,7 @@ elif page == 'Campaign ROI':
         ))
         fig.update_layout(yaxis=dict(tickformat='$,.0f', title='Total income ($)'), showlegend=False)
         with card('Total income by campaign type', info=(
-            'Total historical income from donors each campaign type recruited -- driven by both how '
+            'Total historical income from donors each campaign type recruited; driven by both how '
             'many donors it recruited and how much they give, not cost-efficiency. Check against '
             '"Average cost per acquisition" to see whether a high-income campaign type was also '
             'expensive to run.'
@@ -2411,7 +2411,7 @@ elif page == 'Campaign ROI':
             ))
             fig2.update_layout(yaxis=dict(tickformat='$,.0f', title='Avg CPA ($)'), showlegend=False)
             with card('Average cost per acquisition', tag='CPA data', tag_color='orange', info=(
-                'Average $ spent to recruit one donor, by campaign type -- "Free" bars are $0-cost '
+                'Average $ spent to recruit one donor, by campaign type; "Free" bars are $0-cost '
                 'channels (e.g. organic Sales campaigns). A lower CPA is not automatically better: '
                 'weigh it against that same campaign type\'s income and retention, not on its own.'
             )):
@@ -2432,7 +2432,7 @@ elif page == 'Campaign ROI':
         ))
     fig3.update_layout(yaxis=dict(tickformat='$,.0f', title='Monthly income ($)'), xaxis_title='Month')
     with card('Monthly income by campaign type', info=(
-        'Real historical monthly income, not a forecast -- one line per campaign type. Use this to '
+        'Real historical monthly income, not a forecast; one line per campaign type. Use this to '
         'spot which campaign types are trending up or down, not just their all-time totals shown in '
         'the bar chart above.'
     )):
@@ -2450,7 +2450,7 @@ elif page == 'Campaign ROI':
     if has_cpa:
         col_cfg['Avg CPA'] = st.column_config.NumberColumn(format='dollar')
     with card('Campaign summary', info=(
-        'One row per campaign type with the exact numbers behind the charts above -- income, active '
+        'One row per campaign type with the exact numbers behind the charts above; income, active '
         'donors, average gift, and average CPA side by side, for comparing cost against return '
         'directly instead of switching between charts.'
     )):
@@ -2466,9 +2466,9 @@ elif page == 'Forecast Verification':
                 'actual fund income now on record.',
                 meta=page_meta, info=(
                     'Pick any two runs. Run A is the baseline (the loaded run by default), '
-                    'Run B is compared against it -- swap either freely to verify historical '
+                    'Run B is compared against it; swap either freely to verify historical '
                     'forecasts too. Each run forecast from its own last actual month, so an '
-                    'older run\'s forecast overlaps months that have since happened -- that '
+                    'older run\'s forecast overlaps months that have since happened; that '
                     'overlap is the verification. "Actual fund income on record" is the union '
                     'of the runs\' actuals, so a month one run only forecast, but another has '
                     'since recorded as real data, gets verified.'
@@ -3074,7 +3074,7 @@ elif page == 'Run History':
 elif page == 'Users':
     render_action_button_css()
     page_header('Administration', 'Users',
-                'Create and manage every sign-in account -- Google and email+password alike. '
+                'Create and manage every sign-in account; Google and email+password alike. '
                 'Approve or deny new Google requests, change anyone\'s role, and revoke or '
                 'restore access. A signed-in user manages their own password and two-factor '
                 'authentication from their Profile page (account menu in the page header).',
@@ -3139,7 +3139,7 @@ elif page == 'Users':
             """, unsafe_allow_html=True)
     else:
         pending['requested_at'] = pd.to_datetime(pending['requested_at'])
-        with card(f'{len(pending)} pending', 'Google sign-in requests -- oldest first'):
+        with card(f'{len(pending)} pending', 'Google sign-in requests; oldest first'):
             for i, row in pending.iterrows():
                 rc1, rc2, rc3 = st.columns([3, 2, 2], vertical_alignment='center')
                 with rc1:
@@ -3222,7 +3222,7 @@ elif page == 'Users':
             """, unsafe_allow_html=True)
     else:
         with card(f'{len(all_accounts)} accounts',
-                   'Google and local sign-ins -- change role, reset password, revoke, or delete'):
+                   'Google and local sign-ins; change role, reset password, revoke, or delete'):
             last_idx = len(all_accounts) - 1
             for i, row in all_accounts.iterrows():
                 is_google = row['_kind'] == 'Google'
@@ -3406,7 +3406,7 @@ elif page == 'Users':
                 new_role = st.selectbox('Role', ['Analyst', 'Administrator', 'Super Admin'])
                 new_password = st.text_input('Password', type='password',
                                               help='At least 8 characters. Share this with them directly, '
-                                                   'not over an insecure channel -- they can change it '
+                                                   'not over an insecure channel; they can change it '
                                                    'themselves afterward from the account menu.')
             create_submitted = st.form_submit_button('Create account', icon=':material/person_add:',
                                                        type='primary')
@@ -3424,7 +3424,7 @@ elif page == 'Users':
                 st.session_state['_create_acct_nonce'] = _cf_nonce + 1
                 st.rerun()
             else:
-                st.error('Could not create that account -- that email may already have one.',
+                st.error('Could not create that account; that email may already have one.',
                           icon=':material/error:')
 
     st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
@@ -3437,7 +3437,7 @@ elif page == 'Users':
     # access" isn't scanning past accounts that don't. ──
     denied = list_denied_users()
     if not denied.empty:
-        with card(f'{len(denied)} revoked', 'Google sign-ins with revoked access -- restore if needed'):
+        with card(f'{len(denied)} revoked', 'Google sign-ins with revoked access; restore if needed'):
             for i, row in denied.iterrows():
                 dc1, dc2, dc3 = st.columns([3, 2, 2], vertical_alignment='center')
                 with dc1:
@@ -3554,7 +3554,7 @@ elif page == 'Profile':
     else:
         with card(title='Sign-in security'):
             st.caption('Password and two-factor authentication are managed in your Google account, '
-                       'not here -- your access to this app is tied to your Google sign-in.')
+                       'not here; your access to this app is tied to your Google sign-in.')
 
 
 # Matches the placeholder opened above (search _signing_in_overlay_ph) --
