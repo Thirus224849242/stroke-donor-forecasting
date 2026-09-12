@@ -3580,12 +3580,41 @@ elif page == 'Profile':
         /* A keyed st.container -- even without border=True -- picks up the
         same overflow="visible" attribute a real bordered card() does, so
         without this it would wrap the whole row in an outer card box of
-        its own (same un-styling as .st-key-page_header_row elsewhere). */
-        .st-key-profile_settings_row { background: transparent !important; border: none !important;
-            box-shadow: none !important; }
+        its own (same un-styling as .st-key-page_header_row elsewhere).
+        Plain ".st-key-profile_settings_row" lost that fight, though --
+        confirmed live via getMatchedCSSRules that Streamlit's own global
+        "[data-testid='stVerticalBlock'][overflow='visible']" rule (two
+        attribute selectors) outranks a single class selector on
+        specificity, !important on both sides notwithstanding, so the
+        outer box was still showing. Repeating that same attribute
+        selector ON this class (three selectors together) outranks it
+        back and the row actually goes transparent now. */
+        [data-testid="stVerticalBlock"][overflow="visible"].st-key-profile_settings_row {
+            background: transparent !important; border: none !important; box-shadow: none !important;
+        }
         .st-key-profile_settings_row [data-testid="stHorizontalBlock"] { align-items: flex-start !important; }
         .st-key-profile_settings_row [data-testid="stVerticalBlock"][overflow="visible"] {
             min-height: 227px !important;
+        }
+        /* Pins each card's own trigger button (Edit / Change password /
+        Set up 2FA) to the bottom of its card rather than wherever the
+        content above it happens to end -- without this, Profile details'
+        extra Name/Email lines push ITS button noticeably lower than
+        Change password's and 2FA's shorter captions leave theirs sitting
+        near the top, so the three buttons visibly don't line up even
+        though the cards themselves are the same height. The inner
+        content column (not the outer bordered card -- see the nested
+        stVerticalBlock structure the other two rules above also rely on)
+        is itself a flex column, so margin-top:auto on the last element
+        soaks up all the leftover space above it, flush against the
+        bottom every time. Scoped to ":has(.stButton)" so it only grabs
+        cards whose last element actually IS a button -- the read-only
+        Profile details variant (Analyst/Administrator/Google) ends on a
+        plain text block instead, and that one is left in its natural
+        top-packed flow. */
+        .st-key-profile_settings_row [data-testid="stVerticalBlock"][overflow="visible"]
+            > [data-testid="stElementContainer"]:last-child:has(.stButton) {
+            margin-top: auto !important;
         }
         </style>
         """)
