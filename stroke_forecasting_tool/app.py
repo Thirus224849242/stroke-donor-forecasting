@@ -566,18 +566,30 @@ def _render_2fa_card(_email):
                 _setup_btn_ph = st.empty()
                 if _setup_btn_ph.button('Set up 2FA', key='totp_setup_start',
                                           icon=':material/qr_code_2:', width='stretch'):
-                    try:
-                        import pyotp
-                        st.session_state.totp_setup_secret = pyotp.random_base32()
-                        _setup_btn_ph.empty()
-                        # No st.rerun() -- falls straight through to the
-                        # generation block below in this SAME fragment pass
-                        # (fragments rerun automatically on their own widget
-                        # clicks regardless, same as the whole app normally
-                        # would, but scoped to just this card).
-                    except Exception:
-                        st.error('Two-factor setup is unavailable right now. Try again shortly, '
-                                  'or contact an administrator.', icon=':material/error:')
+                    # Wrapped in its own spinner too, not just the QR
+                    # generation step below -- reported live as a
+                    # multi-second blank card on the very first "Set up
+                    # 2FA" click of a freshly started server, with nothing
+                    # shown the whole time: `import pyotp` right here is
+                    # itself part of that one-time cold-import cost (see
+                    # the QR generation spinner's own comment below for the
+                    # detail), and it happens BEFORE that later spinner
+                    # even exists. Belt-and-suspenders: covers the actual
+                    # slow step regardless of exactly which import turns
+                    # out to be the slow one.
+                    with st.spinner('Setting up two-factor authentication…'):
+                        try:
+                            import pyotp
+                            st.session_state.totp_setup_secret = pyotp.random_base32()
+                            _setup_btn_ph.empty()
+                            # No st.rerun() -- falls straight through to the
+                            # generation block below in this SAME fragment pass
+                            # (fragments rerun automatically on their own widget
+                            # clicks regardless, same as the whole app normally
+                            # would, but scoped to just this card).
+                        except Exception:
+                            st.error('Two-factor setup is unavailable right now. Try again shortly, '
+                                      'or contact an administrator.', icon=':material/error:')
 
             if st.session_state.get('totp_setup_secret'):
                 # Everything from here on can fail (a missing/broken pyotp or
@@ -588,7 +600,6 @@ def _render_2fa_card(_email):
                 # here never leaves the user stuck without a way back.
                 _qr_error = False
                 _qr_ph = st.empty()
-                import pyotp
 
                 # The QR is generated ONCE per setup attempt and cached in
                 # session_state (raw PNG bytes), not regenerated on every
@@ -633,6 +644,21 @@ def _render_2fa_card(_email):
                             import io
                             import time
 
+                            # pyotp/qrcode are both imported HERE, inside the
+                            # spinner, not once unconditionally above it --
+                            # reported live as the card just sitting blank
+                            # (no spinner, no error, nothing) for several
+                            # seconds on a freshly started server. Root
+                            # cause: pyotp pulls in `cryptography`, and
+                            # importing that for the very first time in the
+                            # process is genuinely slow (a few real seconds,
+                            # confirmed live); that unconditional import used
+                            # to run BEFORE this spinner even started, so the
+                            # whole delay happened with nothing on screen at
+                            # all. Every later "Set up 2FA" click in this
+                            # same server process is instant, same as
+                            # always, once the module's actually warm.
+                            import pyotp
                             import qrcode
 
                             _secret = st.session_state.totp_setup_secret
@@ -648,6 +674,13 @@ def _render_2fa_card(_email):
                             with _qr_ph.container():
                                 st.error('Could not generate a setup code right now. Try again shortly, '
                                           'or contact an administrator.', icon=':material/error:')
+                else:
+                    # Cache hit -- generation (and therefore the pyotp
+                    # import above) already ran earlier in this process, so
+                    # this is an ordinary, instant sys.modules lookup, not a
+                    # repeat of the cold-import cost. Needed here too since
+                    # the verify step below also calls into pyotp.
+                    import pyotp
 
                 if not _qr_error and st.session_state.get('totp_qr_cache'):
                     # _qr_ph.container() again, not _qr_ph.empty() followed by
