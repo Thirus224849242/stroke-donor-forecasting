@@ -608,53 +608,27 @@ def _render_2fa_card(_email):
                 # always generates (and shows the loading state for) a
                 # genuinely fresh QR rather than a stale cached one.
                 if not st.session_state.get('totp_qr_cache'):
-                    if not st.session_state.get('totp_qr_generating'):
-                        # First pass: render the spinner, then rerun --
-                        # reported live as the spinner never actually
-                        # appearing at all. Root cause: rendering it and
-                        # then immediately doing the (blocking) generation
-                        # work below all happened within ONE script pass,
-                        # and Streamlit only ships a pass's accumulated
-                        # changes to the browser once that pass finishes --
-                        # so the browser only ever received the FINISHED
-                        # QR, never this intermediate state, no matter how
-                        # long the generation step paused for. Forcing a
-                        # real rerun here is what actually gets this state
-                        # over the wire and painted before generation ever
-                        # starts, on the pass that follows.
-                        #
-                        # A placeholder sized to roughly the QR block's own
-                        # final footprint (image + caption), not
-                        # st.spinner()'s single text-and-icon line -- shown
-                        # immediately so the card expands to its eventual
-                        # size right away instead of jumping when the QR
-                        # swaps in a moment later.
-                        with _qr_ph.container():
-                            st.html(f"""
-                            <div style="min-height:230px;display:flex;align-items:center;
-                                justify-content:center;">
-                                <div style="text-align:center;">
-                                    <div style="width:28px;height:28px;border-radius:50%;margin:0 auto 12px;
-                                        border:3px solid {ui.LINE};border-top-color:{ui.TEAL};
-                                        animation:sf-2fa-spin 0.8s linear infinite;"></div>
-                                    <div style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px;
-                                        font-weight:600;color:{ui.SLATE};letter-spacing:0.06em;
-                                        text-transform:uppercase;">Generating QR code&hellip;</div>
-                                </div>
-                            </div>
-                            <style>@keyframes sf-2fa-spin {{ to {{ transform: rotate(360deg); }} }}</style>
-                            """)
-                        st.session_state.totp_qr_generating = True
-                        st.rerun(scope='fragment')
-                    else:
-                        # Second pass -- the rerun above already proved the
-                        # spinner reached the browser, so this genuinely
-                        # runs behind it rather than in front of it. A
-                        # short, deliberate pause on top of that (real
-                        # generation is sub-second) so the loading state is
-                        # perceptible rather than a single-frame flicker,
-                        # same reasoning as complete_sign_out()'s
-                        # equivalent pause in auth.py.
+                    # Genuinely confirmed live (a two-pass render-then-
+                    # st.rerun() attempt was tried here first and STILL
+                    # never showed anything, even with a 2-second pause
+                    # inserted before the rerun to rule out timing): a
+                    # script pass that ends via st.rerun() never flushes
+                    # its own in-progress content to the browser at all --
+                    # the frontend only ever receives the result of the
+                    # pass that actually completes normally. A custom
+                    # placeholder rendered mid-pass, no matter how long a
+                    # sleep() follows it, can't work here for that reason.
+                    # st.spinner() is the one primitive Streamlit itself
+                    # guarantees renders DURING blocking code inside a
+                    # single pass (it's what every other long-running step
+                    # in this app already relies on, e.g.
+                    # run_pipeline_models()'s "Fitting the linear-trend
+                    # baseline…") -- so that's what actually shows here,
+                    # even though it costs the custom QR-sized placeholder
+                    # box (a smaller layout jump when the image swaps in,
+                    # accepted as the trade-off for a spinner that's
+                    # actually visible at all).
+                    with st.spinner('Generating your QR code…'):
                         try:
                             import io
                             import time
@@ -667,14 +641,13 @@ def _render_2fa_card(_email):
                             )
                             _buf = io.BytesIO()
                             qrcode.make(_uri).save(_buf, format='PNG')
-                            time.sleep(0.3)
+                            time.sleep(0.4)
                             st.session_state.totp_qr_cache = _buf.getvalue()
                         except Exception:
                             _qr_error = True
                             with _qr_ph.container():
                                 st.error('Could not generate a setup code right now. Try again shortly, '
                                           'or contact an administrator.', icon=':material/error:')
-                        st.session_state.totp_qr_generating = False
 
                 if not _qr_error and st.session_state.get('totp_qr_cache'):
                     # _qr_ph.container() again, not _qr_ph.empty() followed by
@@ -708,7 +681,6 @@ def _render_2fa_card(_email):
                 if st.button('Cancel', key='totp_setup_cancel'):
                     st.session_state.totp_setup_secret = None
                     st.session_state.totp_qr_cache = None
-                    st.session_state.totp_qr_generating = False
                     st.rerun(scope='fragment')
                 if verify_submitted:
                     _secret = st.session_state.totp_setup_secret
@@ -716,7 +688,6 @@ def _render_2fa_card(_email):
                         if set_totp_secret(_email, _secret):
                             st.session_state.totp_setup_secret = None
                             st.session_state.totp_qr_cache = None
-                            st.session_state.totp_qr_generating = False
                             st.success('Two-factor authentication enabled.', icon=':material/check_circle:')
                             st.rerun(scope='fragment')
                         else:
