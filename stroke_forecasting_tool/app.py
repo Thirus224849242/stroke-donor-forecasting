@@ -608,49 +608,73 @@ def _render_2fa_card(_email):
                 # always generates (and shows the loading state for) a
                 # genuinely fresh QR rather than a stale cached one.
                 if not st.session_state.get('totp_qr_cache'):
-                    # A placeholder sized to roughly the QR block's own final
-                    # footprint (image + caption), not st.spinner()'s single
-                    # text-and-icon line -- shown immediately so the card
-                    # expands to its eventual size right away instead of
-                    # jumping when the QR swaps in a moment later. Held for a
-                    # short, deliberate beat (real generation is sub-second)
-                    # so it's actually perceptible as a loading state,
-                    # matching the same reasoning as complete_sign_out()'s
-                    # equivalent pause in auth.py.
-                    with _qr_ph.container():
-                        st.html(f"""
-                        <div style="min-height:230px;display:flex;align-items:center;
-                            justify-content:center;">
-                            <div style="text-align:center;">
-                                <div style="width:28px;height:28px;border-radius:50%;margin:0 auto 12px;
-                                    border:3px solid {ui.LINE};border-top-color:{ui.TEAL};
-                                    animation:sf-2fa-spin 0.8s linear infinite;"></div>
-                                <div style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px;
-                                    font-weight:600;color:{ui.SLATE};letter-spacing:0.06em;
-                                    text-transform:uppercase;">Generating QR code&hellip;</div>
-                            </div>
-                        </div>
-                        <style>@keyframes sf-2fa-spin {{ to {{ transform: rotate(360deg); }} }}</style>
-                        """)
-                    try:
-                        import io
-                        import time
-
-                        import qrcode
-
-                        _secret = st.session_state.totp_setup_secret
-                        _uri = pyotp.TOTP(_secret).provisioning_uri(
-                            name=_email, issuer_name='Stroke Foundation Donor Forecasting',
-                        )
-                        _buf = io.BytesIO()
-                        qrcode.make(_uri).save(_buf, format='PNG')
-                        time.sleep(0.6)
-                        st.session_state.totp_qr_cache = _buf.getvalue()
-                    except Exception:
-                        _qr_error = True
+                    if not st.session_state.get('totp_qr_generating'):
+                        # First pass: render the spinner, then rerun --
+                        # reported live as the spinner never actually
+                        # appearing at all. Root cause: rendering it and
+                        # then immediately doing the (blocking) generation
+                        # work below all happened within ONE script pass,
+                        # and Streamlit only ships a pass's accumulated
+                        # changes to the browser once that pass finishes --
+                        # so the browser only ever received the FINISHED
+                        # QR, never this intermediate state, no matter how
+                        # long the generation step paused for. Forcing a
+                        # real rerun here is what actually gets this state
+                        # over the wire and painted before generation ever
+                        # starts, on the pass that follows.
+                        #
+                        # A placeholder sized to roughly the QR block's own
+                        # final footprint (image + caption), not
+                        # st.spinner()'s single text-and-icon line -- shown
+                        # immediately so the card expands to its eventual
+                        # size right away instead of jumping when the QR
+                        # swaps in a moment later.
                         with _qr_ph.container():
-                            st.error('Could not generate a setup code right now. Try again shortly, '
-                                      'or contact an administrator.', icon=':material/error:')
+                            st.html(f"""
+                            <div style="min-height:230px;display:flex;align-items:center;
+                                justify-content:center;">
+                                <div style="text-align:center;">
+                                    <div style="width:28px;height:28px;border-radius:50%;margin:0 auto 12px;
+                                        border:3px solid {ui.LINE};border-top-color:{ui.TEAL};
+                                        animation:sf-2fa-spin 0.8s linear infinite;"></div>
+                                    <div style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px;
+                                        font-weight:600;color:{ui.SLATE};letter-spacing:0.06em;
+                                        text-transform:uppercase;">Generating QR code&hellip;</div>
+                                </div>
+                            </div>
+                            <style>@keyframes sf-2fa-spin {{ to {{ transform: rotate(360deg); }} }}</style>
+                            """)
+                        st.session_state.totp_qr_generating = True
+                        st.rerun(scope='fragment')
+                    else:
+                        # Second pass -- the rerun above already proved the
+                        # spinner reached the browser, so this genuinely
+                        # runs behind it rather than in front of it. A
+                        # short, deliberate pause on top of that (real
+                        # generation is sub-second) so the loading state is
+                        # perceptible rather than a single-frame flicker,
+                        # same reasoning as complete_sign_out()'s
+                        # equivalent pause in auth.py.
+                        try:
+                            import io
+                            import time
+
+                            import qrcode
+
+                            _secret = st.session_state.totp_setup_secret
+                            _uri = pyotp.TOTP(_secret).provisioning_uri(
+                                name=_email, issuer_name='Stroke Foundation Donor Forecasting',
+                            )
+                            _buf = io.BytesIO()
+                            qrcode.make(_uri).save(_buf, format='PNG')
+                            time.sleep(0.3)
+                            st.session_state.totp_qr_cache = _buf.getvalue()
+                        except Exception:
+                            _qr_error = True
+                            with _qr_ph.container():
+                                st.error('Could not generate a setup code right now. Try again shortly, '
+                                          'or contact an administrator.', icon=':material/error:')
+                        st.session_state.totp_qr_generating = False
 
                 if not _qr_error and st.session_state.get('totp_qr_cache'):
                     # _qr_ph.container() again, not _qr_ph.empty() followed by
@@ -684,6 +708,7 @@ def _render_2fa_card(_email):
                 if st.button('Cancel', key='totp_setup_cancel'):
                     st.session_state.totp_setup_secret = None
                     st.session_state.totp_qr_cache = None
+                    st.session_state.totp_qr_generating = False
                     st.rerun(scope='fragment')
                 if verify_submitted:
                     _secret = st.session_state.totp_setup_secret
@@ -691,6 +716,7 @@ def _render_2fa_card(_email):
                         if set_totp_secret(_email, _secret):
                             st.session_state.totp_setup_secret = None
                             st.session_state.totp_qr_cache = None
+                            st.session_state.totp_qr_generating = False
                             st.success('Two-factor authentication enabled.', icon=':material/check_circle:')
                             st.rerun(scope='fragment')
                         else:
@@ -3528,24 +3554,22 @@ elif page == 'Profile':
     # below -- there's no separate password/2FA card to give a third
     # column to there, just the one combined "Sign-in security" notice.
     #
-    # Equal height, not just equal width -- reported live: with content of
-    # different lengths (Profile details has a Name/Email block the other
-    # two don't), the cards naturally came out different heights, each
-    # button landing at a different vertical position instead of lining
-    # up. Streamlit's own stColumn already stretches to the row's tallest
-    # column by default (flexbox align-items:stretch is the browser
-    # default, confirmed live -- no override needed for that part); what
-    # doesn't follow along on its own is everything BELOW it -- the
-    # wrapper divs down to the actual bordered card() container all still
-    # size to their own content, so the card sits at the top of its now-
-    # taller column with dead space beneath it, not filling it. A plain
-    # height:100% cascaded down that wrapper chain (no flex needed there,
-    # ordinary block-level percentage-height inheritance is enough once
-    # the column itself has a real stretched height to resolve against)
-    # is what actually pulls each card's bottom edge down to match. This
-    # container's key scopes that to just this row (column/card layouts
-    # elsewhere on other pages are deliberately left at their natural
-    # per-card height).
+    # Equal height AT REST, not tied together while expanding -- reported
+    # live, twice now: a first attempt stretched every card to match its
+    # tallest sibling (flexbox align-items:stretch, Streamlit's own
+    # default for a row of columns), which does line the three up at
+    # rest, but also means expanding just ONE of them (e.g. clicking "Set
+    # up 2FA", which grows that card to fit the QR code) drags the OTHER
+    # TWO taller right along with it, leaving dead space in cards nobody
+    # touched -- not what was wanted; only the card actually being
+    # interacted with should grow. align-items:flex-start turns that
+    # cross-column stretch off entirely, and a shared min-height (matched
+    # to Profile details' own at-rest height, the tallest of the three
+    # before any of them are expanded) is what lines them up instead --
+    # a floor each card can grow past on its own, never a ceiling tying
+    # it to its siblings. This container's key scopes both rules to just
+    # this row (column/card layouts elsewhere on other pages are
+    # deliberately left at their natural per-card height).
     with st.container(key='profile_settings_row'):
         st.html("""
         <style>
@@ -3555,9 +3579,9 @@ elif page == 'Profile':
         its own (same un-styling as .st-key-page_header_row elsewhere). */
         .st-key-profile_settings_row { background: transparent !important; border: none !important;
             box-shadow: none !important; }
-        .st-key-profile_settings_row [data-testid="stColumn"] [data-testid="stLayoutWrapper"],
-        .st-key-profile_settings_row [data-testid="stColumn"] [data-testid="stVerticalBlock"] {
-            height: 100% !important;
+        .st-key-profile_settings_row [data-testid="stHorizontalBlock"] { align-items: flex-start !important; }
+        .st-key-profile_settings_row [data-testid="stVerticalBlock"][overflow="visible"] {
+            min-height: 227px !important;
         }
         </style>
         """)
