@@ -429,6 +429,7 @@ def delete_dashboard_run(run_id: str) -> bool:
 
 # ── Access control (Google sign-in request/approve queue) ──────────────────
 
+@st.cache_data(show_spinner=False, ttl=15)
 def get_local_account(email: str) -> dict | None:
     """One local (email+password) account's row -- email/name/role/
     password_hash/totp_secret -- or None if that email has no local
@@ -440,7 +441,17 @@ def get_local_account(email: str) -> dict | None:
     totp_secret is None for every account that hasn't turned 2FA on --
     render_login() only prompts for a code when it's actually set.
     created_at is here for the Profile page's "member since" line --
-    every other caller of this function just ignores the extra key."""
+    every other caller of this function just ignores the extra key.
+
+    Cached (short ttl, cleared immediately by every mutator below) --
+    app.py's three Profile-page cards (_render_2fa_card,
+    _render_profile_details_card, _render_change_password_card) each call
+    this unconditionally at the top of their own @st.fragment, and a
+    single button click (flip a flag, st.rerun(scope='fragment')) reruns
+    that fragment twice in a row -- reported live as those clicks feeling
+    like the page froze for a moment: two full synchronous DB round trips
+    for one click, the first of them for a render that never even reads
+    the result. Caching turns the second of those into an in-memory hit."""
     engine = get_engine()
     if engine is None:
         return None
@@ -504,6 +515,7 @@ def create_local_account(email: str, name: str, role: str, password: str) -> boo
                 'password_hash': hash_password(password),
             })
         list_local_accounts.clear()  # so the new account shows up on the Users page immediately
+        get_local_account.clear()  # so this new email doesn't return a stale cached None
         return True
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -527,6 +539,7 @@ def update_local_account_password(email: str, new_password: str) -> bool:
             result = conn.execute(text("""
                 UPDATE local_accounts SET password_hash = :password_hash WHERE email = :email
             """), {'email': email, 'password_hash': hash_password(new_password)})
+        get_local_account.clear()  # so a fresh login/self-service action right after sees the new hash
         return result.rowcount > 0
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -553,6 +566,7 @@ def update_local_account_profile(email: str, new_name: str, new_email: str) -> b
                 UPDATE local_accounts SET email = :new_email, name = :new_name WHERE email = :email
             """), {'email': email, 'new_email': new_email, 'new_name': new_name})
         list_local_accounts.clear()  # so a changed name/email shows up on the Users page immediately
+        get_local_account.clear()  # so the Profile page's own card reflects the new name/email right away
         return result.rowcount > 0
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -575,6 +589,7 @@ def set_totp_secret(email: str, secret: str) -> bool:
                 UPDATE local_accounts SET totp_secret = :secret WHERE email = :email
             """), {'email': email, 'secret': secret})
         list_local_accounts.clear()
+        get_local_account.clear()  # so the 2FA card immediately shows "enabled", not the stale pre-setup row
         return result.rowcount > 0
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -597,6 +612,7 @@ def clear_totp_secret(email: str) -> bool:
                 UPDATE local_accounts SET totp_secret = NULL WHERE email = :email
             """), {'email': email})
         list_local_accounts.clear()
+        get_local_account.clear()  # so the 2FA card immediately shows "not enabled", not the stale row
         return result.rowcount > 0
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -617,6 +633,7 @@ def update_local_account_role(email: str, role: str) -> bool:
                 UPDATE local_accounts SET role = :role WHERE email = :email
             """), {'email': email, 'role': role})
         list_local_accounts.clear()  # so the new role shows up on the Users page immediately
+        get_local_account.clear()  # so that account's own Profile page reflects the new role right away
         return result.rowcount > 0
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
@@ -637,6 +654,7 @@ def delete_local_account(email: str) -> bool:
         with engine.begin() as conn:
             conn.execute(text('DELETE FROM local_accounts WHERE email = :email'), {'email': email})
         list_local_accounts.clear()  # so the deleted account disappears from the Users page immediately
+        get_local_account.clear()  # so a deleted account can't log in on a stale cached row
         return True
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
