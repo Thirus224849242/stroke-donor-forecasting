@@ -566,18 +566,30 @@ def _render_2fa_card(_email):
                 _setup_btn_ph = st.empty()
                 if _setup_btn_ph.button('Set up 2FA', key='totp_setup_start',
                                           icon=':material/qr_code_2:', width='stretch'):
-                    try:
-                        import pyotp
-                        st.session_state.totp_setup_secret = pyotp.random_base32()
-                        _setup_btn_ph.empty()
-                        # No st.rerun() -- falls straight through to the
-                        # generation block below in this SAME fragment pass
-                        # (fragments rerun automatically on their own widget
-                        # clicks regardless, same as the whole app normally
-                        # would, but scoped to just this card).
-                    except Exception:
-                        st.error('Two-factor setup is unavailable right now. Try again shortly, '
-                                  'or contact an administrator.', icon=':material/error:')
+                    # Wrapped in its own spinner too, not just the QR
+                    # generation step below -- reported live as a
+                    # multi-second blank card on the very first "Set up
+                    # 2FA" click of a freshly started server, with nothing
+                    # shown the whole time: `import pyotp` right here is
+                    # itself part of that one-time cold-import cost (see
+                    # the QR generation spinner's own comment below for the
+                    # detail), and it happens BEFORE that later spinner
+                    # even exists. Belt-and-suspenders: covers the actual
+                    # slow step regardless of exactly which import turns
+                    # out to be the slow one.
+                    with st.spinner('Setting up two-factor authentication…'):
+                        try:
+                            import pyotp
+                            st.session_state.totp_setup_secret = pyotp.random_base32()
+                            _setup_btn_ph.empty()
+                            # No st.rerun() -- falls straight through to the
+                            # generation block below in this SAME fragment pass
+                            # (fragments rerun automatically on their own widget
+                            # clicks regardless, same as the whole app normally
+                            # would, but scoped to just this card).
+                        except Exception:
+                            st.error('Two-factor setup is unavailable right now. Try again shortly, '
+                                      'or contact an administrator.', icon=':material/error:')
 
             if st.session_state.get('totp_setup_secret'):
                 # Everything from here on can fail (a missing/broken pyotp or
@@ -588,7 +600,6 @@ def _render_2fa_card(_email):
                 # here never leaves the user stuck without a way back.
                 _qr_error = False
                 _qr_ph = st.empty()
-                import pyotp
 
                 # The QR is generated ONCE per setup attempt and cached in
                 # session_state (raw PNG bytes), not regenerated on every
@@ -608,49 +619,68 @@ def _render_2fa_card(_email):
                 # always generates (and shows the loading state for) a
                 # genuinely fresh QR rather than a stale cached one.
                 if not st.session_state.get('totp_qr_cache'):
-                    # A placeholder sized to roughly the QR block's own final
-                    # footprint (image + caption), not st.spinner()'s single
-                    # text-and-icon line -- shown immediately so the card
-                    # expands to its eventual size right away instead of
-                    # jumping when the QR swaps in a moment later. Held for a
-                    # short, deliberate beat (real generation is sub-second)
-                    # so it's actually perceptible as a loading state,
-                    # matching the same reasoning as complete_sign_out()'s
-                    # equivalent pause in auth.py.
-                    with _qr_ph.container():
-                        st.html(f"""
-                        <div style="min-height:230px;display:flex;align-items:center;
-                            justify-content:center;">
-                            <div style="text-align:center;">
-                                <div style="width:28px;height:28px;border-radius:50%;margin:0 auto 12px;
-                                    border:3px solid {ui.LINE};border-top-color:{ui.TEAL};
-                                    animation:sf-2fa-spin 0.8s linear infinite;"></div>
-                                <div style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px;
-                                    font-weight:600;color:{ui.SLATE};letter-spacing:0.06em;
-                                    text-transform:uppercase;">Generating QR code&hellip;</div>
-                            </div>
-                        </div>
-                        <style>@keyframes sf-2fa-spin {{ to {{ transform: rotate(360deg); }} }}</style>
-                        """)
-                    try:
-                        import io
-                        import time
+                    # Genuinely confirmed live (a two-pass render-then-
+                    # st.rerun() attempt was tried here first and STILL
+                    # never showed anything, even with a 2-second pause
+                    # inserted before the rerun to rule out timing): a
+                    # script pass that ends via st.rerun() never flushes
+                    # its own in-progress content to the browser at all --
+                    # the frontend only ever receives the result of the
+                    # pass that actually completes normally. A custom
+                    # placeholder rendered mid-pass, no matter how long a
+                    # sleep() follows it, can't work here for that reason.
+                    # st.spinner() is the one primitive Streamlit itself
+                    # guarantees renders DURING blocking code inside a
+                    # single pass (it's what every other long-running step
+                    # in this app already relies on, e.g.
+                    # run_pipeline_models()'s "Fitting the linear-trend
+                    # baseline…") -- so that's what actually shows here,
+                    # even though it costs the custom QR-sized placeholder
+                    # box (a smaller layout jump when the image swaps in,
+                    # accepted as the trade-off for a spinner that's
+                    # actually visible at all).
+                    with st.spinner('Generating your QR code…'):
+                        try:
+                            import io
+                            import time
 
-                        import qrcode
+                            # pyotp/qrcode are both imported HERE, inside the
+                            # spinner, not once unconditionally above it --
+                            # reported live as the card just sitting blank
+                            # (no spinner, no error, nothing) for several
+                            # seconds on a freshly started server. Root
+                            # cause: pyotp pulls in `cryptography`, and
+                            # importing that for the very first time in the
+                            # process is genuinely slow (a few real seconds,
+                            # confirmed live); that unconditional import used
+                            # to run BEFORE this spinner even started, so the
+                            # whole delay happened with nothing on screen at
+                            # all. Every later "Set up 2FA" click in this
+                            # same server process is instant, same as
+                            # always, once the module's actually warm.
+                            import pyotp
+                            import qrcode
 
-                        _secret = st.session_state.totp_setup_secret
-                        _uri = pyotp.TOTP(_secret).provisioning_uri(
-                            name=_email, issuer_name='Stroke Foundation Donor Forecasting',
-                        )
-                        _buf = io.BytesIO()
-                        qrcode.make(_uri).save(_buf, format='PNG')
-                        time.sleep(0.6)
-                        st.session_state.totp_qr_cache = _buf.getvalue()
-                    except Exception:
-                        _qr_error = True
-                        with _qr_ph.container():
-                            st.error('Could not generate a setup code right now. Try again shortly, '
-                                      'or contact an administrator.', icon=':material/error:')
+                            _secret = st.session_state.totp_setup_secret
+                            _uri = pyotp.TOTP(_secret).provisioning_uri(
+                                name=_email, issuer_name='Stroke Foundation Donor Forecasting',
+                            )
+                            _buf = io.BytesIO()
+                            qrcode.make(_uri).save(_buf, format='PNG')
+                            time.sleep(0.4)
+                            st.session_state.totp_qr_cache = _buf.getvalue()
+                        except Exception:
+                            _qr_error = True
+                            with _qr_ph.container():
+                                st.error('Could not generate a setup code right now. Try again shortly, '
+                                          'or contact an administrator.', icon=':material/error:')
+                else:
+                    # Cache hit -- generation (and therefore the pyotp
+                    # import above) already ran earlier in this process, so
+                    # this is an ordinary, instant sys.modules lookup, not a
+                    # repeat of the cold-import cost. Needed here too since
+                    # the verify step below also calls into pyotp.
+                    import pyotp
 
                 if not _qr_error and st.session_state.get('totp_qr_cache'):
                     # _qr_ph.container() again, not _qr_ph.empty() followed by
@@ -723,12 +753,10 @@ def _render_profile_details_card(_email):
     with card(title='Profile details', sub='Only Super Admins can change their own name or email.'):
         if not _editing:
             st.markdown(f"""
-            <div style="display:flex;gap:28px;">
-                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
-                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
-                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
-                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
-            </div>
+            <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
+                <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
+            <div style="margin-top:10px;"><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
+                <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
             """, unsafe_allow_html=True)
             if st.button('Edit', key='profile_details_edit', icon=':material/edit:', width='stretch'):
                 st.session_state.profile_details_editing = True
@@ -3519,42 +3547,116 @@ elif page == 'Profile':
     # accounts are admin-provisioned the same way passwords are, per the
     # user's own explicit spec for this page -- only a Super Admin edits
     # their own name/email, everyone else just sees it.
-    if _is_local and _user.get('role') == 'Super Admin':
-        _render_profile_details_card(_email)
-    elif _is_local:
-        with card(title='Profile details'):
-            st.caption('Only a Super Admin can change your name or email. Contact one if these need updating.')
-            st.markdown(f"""
-            <div style="display:flex;gap:28px;">
-                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
-                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
-                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
-                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        with card(title='Profile details'):
-            st.caption('Your name and email come from Google and are managed in your Google account, '
-                       'not here.')
-            st.markdown(f"""
-            <div style="display:flex;gap:28px;">
-                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
-                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
-                <div><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
-                    <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    # Password and two-factor auth are both local-sign-in-only -- a Google
-    # account has no password in this app at all, and its own 2FA (if any)
-    # is Google's, not ours (same reasoning as the docstring history above).
-    if _is_local:
-        _render_change_password_card(_email)
-        _render_2fa_card(_email)
-    else:
-        with card(title='Sign-in security'):
-            st.caption('Password and two-factor authentication are managed in your Google account, '
-                       'not here; your access to this app is tied to your Google sign-in.')
+    #
+    # Side by side, not stacked -- these three (Profile details, Change
+    # password, Two-factor authentication) used to be full-width cards
+    # top to bottom, which left every "start" button (Edit/Change password/
+    # Set up 2FA, all width='stretch') stretched the full page width for
+    # no reason -- reported live as looking wrong. st.columns() narrows
+    # each card to a third of the page, so the buttons inside stretch to
+    # something sane instead. Two columns, not three, on the Google branch
+    # below -- there's no separate password/2FA card to give a third
+    # column to there, just the one combined "Sign-in security" notice.
+    #
+    # Equal height AT REST, not tied together while expanding -- reported
+    # live, twice now: a first attempt stretched every card to match its
+    # tallest sibling (flexbox align-items:stretch, Streamlit's own
+    # default for a row of columns), which does line the three up at
+    # rest, but also means expanding just ONE of them (e.g. clicking "Set
+    # up 2FA", which grows that card to fit the QR code) drags the OTHER
+    # TWO taller right along with it, leaving dead space in cards nobody
+    # touched -- not what was wanted; only the card actually being
+    # interacted with should grow. align-items:flex-start turns that
+    # cross-column stretch off entirely, and a shared min-height (matched
+    # to Profile details' own at-rest height, the tallest of the three
+    # before any of them are expanded) is what lines them up instead --
+    # a floor each card can grow past on its own, never a ceiling tying
+    # it to its siblings. This container's key scopes both rules to just
+    # this row (column/card layouts elsewhere on other pages are
+    # deliberately left at their natural per-card height).
+    with st.container(key='profile_settings_row'):
+        st.html("""
+        <style>
+        /* A keyed st.container -- even without border=True -- picks up the
+        same overflow="visible" attribute a real bordered card() does, so
+        without this it would wrap the whole row in an outer card box of
+        its own (same un-styling as .st-key-page_header_row elsewhere).
+        Plain ".st-key-profile_settings_row" lost that fight, though --
+        confirmed live via getMatchedCSSRules that Streamlit's own global
+        "[data-testid='stVerticalBlock'][overflow='visible']" rule (two
+        attribute selectors) outranks a single class selector on
+        specificity, !important on both sides notwithstanding, so the
+        outer box was still showing. Repeating that same attribute
+        selector ON this class (three selectors together) outranks it
+        back and the row actually goes transparent now. */
+        [data-testid="stVerticalBlock"][overflow="visible"].st-key-profile_settings_row {
+            background: transparent !important; border: none !important; box-shadow: none !important;
+        }
+        .st-key-profile_settings_row [data-testid="stHorizontalBlock"] { align-items: flex-start !important; }
+        .st-key-profile_settings_row [data-testid="stVerticalBlock"][overflow="visible"] {
+            min-height: 227px !important;
+        }
+        /* Pins each card's own trigger button (Edit / Change password /
+        Set up 2FA) to the bottom of its card rather than wherever the
+        content above it happens to end -- without this, Profile details'
+        extra Name/Email lines push ITS button noticeably lower than
+        Change password's and 2FA's shorter captions leave theirs sitting
+        near the top, so the three buttons visibly don't line up even
+        though the cards themselves are the same height. The inner
+        content column (not the outer bordered card -- see the nested
+        stVerticalBlock structure the other two rules above also rely on)
+        is itself a flex column, so margin-top:auto on the last element
+        soaks up all the leftover space above it, flush against the
+        bottom every time. Scoped to ":has(.stButton)" so it only grabs
+        cards whose last element actually IS a button -- the read-only
+        Profile details variant (Analyst/Administrator/Google) ends on a
+        plain text block instead, and that one is left in its natural
+        top-packed flow. */
+        .st-key-profile_settings_row [data-testid="stVerticalBlock"][overflow="visible"]
+            > [data-testid="stElementContainer"]:last-child:has(.stButton) {
+            margin-top: auto !important;
+        }
+        </style>
+        """)
+        if _is_local:
+            col_profile, col_pw, col_2fa = st.columns(3)
+            with col_profile:
+                if _user.get('role') == 'Super Admin':
+                    _render_profile_details_card(_email)
+                else:
+                    with card(title='Profile details'):
+                        st.caption('Only a Super Admin can change your name or email. Contact one if these '
+                                   'need updating.')
+                        st.markdown(f"""
+                        <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
+                            <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
+                        <div style="margin-top:10px;"><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
+                            <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
+                        """, unsafe_allow_html=True)
+            # Password and two-factor auth are both local-sign-in-only -- a
+            # Google account has no password in this app at all, and its own
+            # 2FA (if any) is Google's, not ours (same reasoning as the
+            # docstring history above).
+            with col_pw:
+                _render_change_password_card(_email)
+            with col_2fa:
+                _render_2fa_card(_email)
+        else:
+            col_profile, col_sec = st.columns(2)
+            with col_profile:
+                with card(title='Profile details'):
+                    st.caption('Your name and email come from Google and are managed in your Google '
+                               'account, not here.')
+                    st.markdown(f"""
+                    <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
+                        <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
+                    <div style="margin-top:10px;"><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
+                        <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
+                    """, unsafe_allow_html=True)
+            with col_sec:
+                with card(title='Sign-in security'):
+                    st.caption('Password and two-factor authentication are managed in your Google account, '
+                               'not here; your access to this app is tied to your Google sign-in.')
 
 
 # Matches the placeholder opened above (search _signing_in_overlay_ph) --
