@@ -420,9 +420,9 @@ def inject_global_css():
     /* ── Fixed topbar (render_topbar()) ───────────────────────────────
     Full-width (left:0), a solid pale mint (#EBF7F5), a hairline bottom
     border + soft shadow, z-index above the navy sidebar so it visually
-    overlays the rail's top edge. Left: the Stroke Foundation navy logo,
-    hard left (there is no hamburger / collapse toggle). Right: the
-    notification bell then the account popover, tight together.
+    overlays the rail's top edge. Left: the Stroke Foundation navy logo
+    + "Cadence", hard left (there is no hamburger / collapse toggle).
+    Right: the notification bell then the account popover, tight together.
 
     The bar is a CONSTANT light element, deliberately independent of the
     light/dark-mode toggle (exactly like the navy sidebar is constant) --
@@ -472,6 +472,24 @@ def inject_global_css():
     translate nudges it back onto centre without fighting the layout. */
     .sf-topbar-logo {{ height: 30px; width: auto; display: block; flex-shrink: 0; transform: translateY(-7px); }}
     .sf-topbar-logo-fallback {{ font-size: 15px; font-weight: 700; color: #1E1E5F; white-space: nowrap; flex-shrink: 0; }}
+    /* The platform's own name (Cadence) -- the Stroke Foundation logo is
+    the ORGANISATION's mark, this is the TOOL's, same "logo | product
+    name" pattern most platforms use in their header. A vertical divider,
+    not just spacing, is what visually reads as "two separate names" here
+    rather than one run-on wordmark; sits at the logo's own visual centre
+    (translateY(-7px) undoes the logo's own centring nudge, since this
+    span isn't oversized the way the logo is and doesn't need it). */
+    .sf-topbar-product {{ margin-left: 10px; padding-left: 10px; border-left: 1px solid #CBD5E1;
+        font-size: 13px; font-weight: 600; color: #1E1E5F; letter-spacing: 0.01em;
+        white-space: nowrap; flex-shrink: 0;
+        /* Same -7px nudge as .sf-topbar-logo, and for the same reason
+        (measured live via getBoundingClientRect: without it this sits
+        ~6px below the logo's own vertical centre, not because of any
+        margin/padding here but because the logo's own translateY(-7px)
+        pulls IT above the row's natural flex-centred line, leaving this
+        span at that natural centre while the logo sits noticeably
+        higher). */
+        transform: translateY(-7px); }}
     /* Notification bell -- a square icon button, no chrome. */
     .st-key-sf_notif_pop {{ flex: 0 0 auto; }}
     .st-key-sf_notif_pop [data-testid="stPopoverButton"] {{
@@ -1555,7 +1573,9 @@ def render_topbar():
     rendered ONCE by app.py, right after render_sidebar(), on every
     authenticated page.
 
-    Left: the Stroke Foundation navy logo, hard left (no hamburger, no
+    Left: the Stroke Foundation navy logo plus "Cadence" (the platform's
+    own name, separated by a thin divider -- the org's mark and the
+    tool's name are two different things), hard left (no hamburger, no
     page name -- the 64px sidebar's highlighted icon is the source of
     truth for "where am I", and there is no collapse toggle). Right: the
     notification bell (a popover over the two existing "new runs" /
@@ -1597,7 +1617,11 @@ def render_topbar():
             [4, 6, 2.6], vertical_alignment='center', gap='small')
 
         with col_brand:
-            st.markdown(f'<div class="sf-topbar-brand">{_logo_html}</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="sf-topbar-brand">{_logo_html}'
+                f'<span class="sf-topbar-product">Cadence</span></div>',
+                unsafe_allow_html=True,
+            )
 
         with col_right:
             # Unread pill -- base bell styling is in inject_global_css(),
