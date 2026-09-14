@@ -460,7 +460,7 @@ def _render_auth_shell():
         <div style="text-align:center;font-family:'Space Grotesk',sans-serif;font-weight:600;
             font-size:24px;color:#1E1E5F;margin-bottom:18px;">Stroke Foundation</div>
         """, unsafe_allow_html=True)
-    st.markdown('<div class="sf-login-sub">DONOR FORECASTING PLATFORM</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sf-login-sub">CADENCE</div>', unsafe_allow_html=True)
 
 
 def _render_auth_footer():
@@ -580,7 +580,7 @@ def render_login():
                 # is_signing_out comment in this same file).
                 st.session_state.is_signing_out = False
                 st.markdown("**Sign in to your account**")
-                st.caption('Enter your credentials to access the F2F forecasting dashboard.')
+                st.caption('Enter your credentials to access Cadence.')
 
                 if google_auth_configured():
                     with st.container(key='google_login_btn'):
