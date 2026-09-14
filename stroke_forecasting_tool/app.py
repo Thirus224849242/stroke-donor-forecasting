@@ -663,7 +663,7 @@ def _render_2fa_card(_email):
 
                             _secret = st.session_state.totp_setup_secret
                             _uri = pyotp.TOTP(_secret).provisioning_uri(
-                                name=_email, issuer_name='Stroke Foundation Donor Forecasting',
+                                name=_email, issuer_name='Cadence (Stroke Foundation)',
                             )
                             _buf = io.BytesIO()
                             qrcode.make(_uri).save(_buf, format='PNG')
@@ -865,7 +865,7 @@ init_session_state()
 # mode-switch entirely; the CSS-only narrowing still works exactly the
 # same regardless of which layout mode it's overriding.
 st.set_page_config(
-    page_title='Donor Forecasting | Stroke Foundation',
+    page_title='Cadence | Stroke Foundation',
     page_icon=str(TITLE_LOGO_PATH) if TITLE_LOGO_PATH.exists() else '🫀',
     layout='wide',
     initial_sidebar_state='expanded',
