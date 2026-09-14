@@ -478,9 +478,14 @@ def inject_global_css():
     not just spacing, is what visually reads as "two separate names" here
     rather than one run-on wordmark; sits at the logo's own visual centre
     (translateY(-7px) undoes the logo's own centring nudge, since this
-    span isn't oversized the way the logo is and doesn't need it). */
+    span isn't oversized the way the logo is and doesn't need it). Same
+    treatment as .sf-login-sub on the login page (auth.py) -- uppercase,
+    wide letter-spacing, Space Grotesk -- so the two spots read as the
+    same name-tag styling rather than two different typographic choices
+    for the same word. */
     .sf-topbar-product {{ margin-left: 10px; padding-left: 10px; border-left: 1px solid #CBD5E1;
-        font-size: 13px; font-weight: 600; color: #1E1E5F; letter-spacing: 0.01em;
+        font-family: 'Space Grotesk', system-ui, sans-serif; font-size: 11px; font-weight: 600;
+        color: #1E1E5F; letter-spacing: 0.14em; text-transform: uppercase;
         white-space: nowrap; flex-shrink: 0;
         /* Same -7px nudge as .sf-topbar-logo, and for the same reason
         (measured live via getBoundingClientRect: without it this sits
