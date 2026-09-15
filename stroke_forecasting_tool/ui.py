@@ -392,17 +392,34 @@ def inject_global_css():
     .sf-side-spacer {{ flex: 1 1 auto; }}
 
     /* Section labels don't fit a 64px rail -- hidden (the NAV_SECTIONS
-    grouping is still iterated for role filtering + ordering). */
-    .sf-side-section {{ display: none !important; }}
+    grouping is still iterated for role filtering + ordering). Hiding
+    just the label ITSELF (.sf-side-section) leaves its wrapping
+    stElementContainer behind as a zero-height flex item, which still
+    counts as a sibling for the sidebar's flex `gap` -- measured live
+    (getBoundingClientRect on every nav button): every real gap was
+    14px except the two spots straddling a hidden section label, which
+    came out to 28px (one gap on each side of a box with nothing
+    visibly in it). Hiding the whole container removes it from the flex
+    layout entirely instead of just emptying it, so it stops
+    contributing a gap of its own and every button-to-button spacing
+    comes out equal. */
+    [data-testid="stSidebar"] [data-testid="stElementContainer"]:has(.sf-side-section) {{
+        display: none !important;
+    }}
 
     /* Icon-only nav buttons: label hidden, icon centred, left-border
-    accent for the active page. */
+    accent for the active page. Icon at 24px (was the browser/Streamlit
+    default of 14px for an st.button icon) -- reported live as too
+    small for a rail this size. */
     [data-testid="stSidebar"] .stButton > button {{
         width: 100% !important; background: transparent !important; color: rgba(255,255,255,0.68) !important;
         border: none !important; border-left: 3px solid transparent !important; border-radius: 0 !important;
         padding: 11px 0 !important; font-size: 13px !important;
         font-weight: 500 !important; justify-content: center !important; box-shadow: none !important;
         position: relative; overflow: visible;
+    }}
+    [data-testid="stSidebar"] .stButton > button [data-testid="stIconMaterial"] {{
+        font-size: 24px !important;
     }}
     [data-testid="stSidebar"] .stButton > button > div {{ justify-content: center !important; gap: 0 !important; }}
     [data-testid="stSidebar"] .stButton > button p {{ display: none !important; }}
