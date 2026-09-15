@@ -420,6 +420,16 @@ def inject_global_css():
     }}
     [data-testid="stSidebar"] .stButton > button [data-testid="stIconMaterial"] {{
         font-size: 24px !important;
+        /* Material Symbols is a variable font -- Streamlit leaves
+        font-variation-settings at its default (confirmed live via
+        getComputedStyle: "normal", i.e. the 400 weight axis never gets
+        adjusted for size), so simply scaling font-size up to 24px blew
+        the stroke up right along with the glyph -- reported live as
+        looking thick/unprofessional. Dropping the weight axis to 300
+        (default is 400) is what actually thins the stroke back down at
+        this size; 'opsz' 24 matches the optical-size axis to the real
+        display size instead of leaving it to the font's own default. */
+        font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24 !important;
     }}
     [data-testid="stSidebar"] .stButton > button > div {{ justify-content: center !important; gap: 0 !important; }}
     [data-testid="stSidebar"] .stButton > button p {{ display: none !important; }}
