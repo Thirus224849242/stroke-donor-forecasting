@@ -540,6 +540,14 @@ def _render_2fa_card(_email):
         # element needed.
         st.html(f"""
         <style>
+        /* Streamlit's own stSpinner row (icon + label) is a left-aligned
+        flex row by default -- reported live as looking off, sitting
+        flush against the card's left edge instead of centred the way
+        every other loader in this app is. justify-content:center on
+        the row (not just the icon) centres the icon+label as one unit. */
+        .st-key-profile_2fa_card [data-testid="stSpinner"] > div {{
+            justify-content: center !important;
+        }}
         .st-key-profile_2fa_card [data-testid="stSpinnerIcon"] {{
             font-size: 0 !important; box-sizing: border-box !important;
             width: 20px !important; height: 20px !important; padding: 3px !important;
@@ -733,38 +741,45 @@ def _render_2fa_card(_email):
                     # the browser still has to receive, decode, and paint
                     # them, and st.image() gives no hook into that moment.
                     # Per the explicit ask that the loader "stay visible
-                    # until the QR is loaded in the DOM": the ring spinner
-                    # renders first, underneath the image (img starts at
-                    # opacity:0), and the image's own load event -- fired
-                    # once the browser has actually decoded it, not merely
-                    # inserted the tag -- fades it in and removes the
-                    # spinner. An inline onload="..." ATTRIBUTE was tried
-                    # first here and silently failed: confirmed live
-                    # (hasAttribute('onload') was false on the rendered
-                    # element) that st.html() strips inline on* attributes
-                    # during sanitization even with unsafe_allow_javascript
-                    # =True -- that flag only permits <script> tags to run,
-                    # not raw event-handler attributes. addEventListener
-                    # from an actual <script> block is the form that
-                    # survives, same as every other JS in this app (ui.py's
-                    # nav overlays). img.complete is checked too, not just
-                    # the load event, since a data URI can finish decoding
-                    # before this script even runs -- the load event never
-                    # fires for an image that was already complete by the
-                    # time a listener gets attached to it.
+                    # until the QR is loaded in the DOM": the ring sits
+                    # UNDERNEATH the image (z-index layering, not an
+                    # opacity crossfade) so it's genuinely still there,
+                    # in the DOM, for the entire time -- the opaque QR
+                    # image (no transparency in a qrcode PNG) simply
+                    # paints over it the instant the browser has decoded
+                    # it, no JS coordination required.
+                    #
+                    # A JS onload/addEventListener handshake was tried
+                    # first (fade the image in, hide the ring, only once
+                    # a 'load' event or img.complete confirmed the decode)
+                    # and reliably worked in isolation, but reported live
+                    # as occasionally getting stuck showing nothing at
+                    # all: this card is an @st.fragment, whose own
+                    # comment above already documents that a single click
+                    # can drive more than one render of this same body in
+                    # quick succession -- confirmed live via
+                    # getComputedStyle polling that the ring's wrapper had
+                    # gone to display:none while the image was STILL at
+                    # opacity:0, i.e. exactly the stuck-blank state, most
+                    # likely a stale reveal() callback from one render
+                    # firing against DOM nodes a later render replaced.
+                    # Removing the opacity/JS dependency entirely removes
+                    # that whole class of race -- there is no longer any
+                    # state that can desync between two overlapping
+                    # renders, since nothing but paint order (which the
+                    # browser itself guarantees) decides what's visible.
                     import base64
                     _qr_b64 = base64.b64encode(st.session_state.totp_qr_cache).decode('ascii')
                     with _qr_ph.container():
                         st.html(f"""
                         <div style="position:relative;width:176px;height:176px;margin:0 auto;">
-                            <div id="sf-qr-loader-wrap" style="position:absolute;inset:0;display:flex;
+                            <div style="position:absolute;inset:0;display:flex;
                                 align-items:center;justify-content:center;">
                                 <div class="sf-qr-reveal-loader"></div>
                             </div>
-                            <img id="sf-qr-img" src="data:image/png;base64,{_qr_b64}"
+                            <img src="data:image/png;base64,{_qr_b64}"
                                  alt="Two-factor authentication QR code"
-                                 style="position:absolute;top:0;left:0;width:176px;height:176px;
-                                        opacity:0;transition:opacity .2s ease-in-out;">
+                                 style="position:absolute;top:0;left:0;width:176px;height:176px;">
                         </div>
                         <style>
                         .sf-qr-reveal-loader {{
@@ -777,18 +792,7 @@ def _render_2fa_card(_email):
                         }}
                         @keyframes sf-qr-reveal-spin {{ to {{ transform: rotate(1turn); }} }}
                         </style>
-                        <script>
-                        (function() {{
-                            var img = document.getElementById('sf-qr-img');
-                            var reveal = function() {{
-                                img.style.opacity = '1';
-                                var wrap = document.getElementById('sf-qr-loader-wrap');
-                                if (wrap) wrap.style.display = 'none';
-                            }};
-                            if (img.complete) {{ reveal(); }} else {{ img.addEventListener('load', reveal); }}
-                        }})();
-                        </script>
-                        """, unsafe_allow_javascript=True)
+                        """)
                         st.caption('Scan this with your authenticator app, or enter the key '
                                    f'manually: `{st.session_state.totp_setup_secret}`')
 
