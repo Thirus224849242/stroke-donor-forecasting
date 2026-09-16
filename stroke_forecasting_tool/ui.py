@@ -1158,7 +1158,7 @@ def inject_global_css():
     needed JS since "next frame" was state living in an array index) --
     this is what let the JS below drop all the frame/interval logic. */
     .sf-nav-loader {{
-        width: 56px; padding: 8px; aspect-ratio: 1; border-radius: 50%;
+        width: 34px; padding: 5px; aspect-ratio: 1; border-radius: 50%;
         background: {TEAL};
         --_m: conic-gradient(#0000 10%,#000), linear-gradient(#000 0 0) content-box;
         -webkit-mask: var(--_m); mask: var(--_m);
@@ -2232,7 +2232,7 @@ def render_nav_transition_overlay():
     st.html(f"""
     <style>
     .sf-nav-loader {{
-        width: 56px; padding: 8px; aspect-ratio: 1; border-radius: 50%;
+        width: 34px; padding: 5px; aspect-ratio: 1; border-radius: 50%;
         background: {TEAL};
         --_m: conic-gradient(#0000 10%,#000), linear-gradient(#000 0 0) content-box;
         -webkit-mask: var(--_m); mask: var(--_m);
