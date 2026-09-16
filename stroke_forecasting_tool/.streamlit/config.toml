@@ -1,10 +1,12 @@
 [server]
 maxUploadSize = 1024
-# Serves ./static/ at app/static/<file> -- used for the heart-shaped
-# navigation loader (static/heart-loader.webp), referenced by URL rather
-# than base64 so it's fetched and cached once, not re-sent inline on
-# every rerun.
-enableStaticServing = true
+# Used to serve ./static/ at app/static/<file> for the nav loader's own
+# image (first the heart WebP, then a cycling set of stroke-symptom
+# WebPs) -- both since replaced by a pure-CSS conic-gradient ring, so
+# there's nothing left in static/ and nothing left that reads from it.
+# Left off rather than left on with an empty folder: turning this back
+# on is a one-line revert if a future asset needs it again.
+# enableStaticServing = true
 
 [theme]
 base = "light"

@@ -519,7 +519,75 @@ def _render_2fa_card(_email):
     file) is what keeps those follow-up reruns local too.
     """
     _account = get_local_account(_email)
-    with card(title='Two-factor authentication'):
+    # Keyed (not just for CSS scoping generally -- specifically so the
+    # st.spinner() re-skin CSS a few lines below can target ONLY this
+    # card's spinners via .st-key-profile_2fa_card, not every st.spinner
+    # anywhere else in the app that happens to render while this is up).
+    with card(title='Two-factor authentication', key='profile_2fa_card'):
+        # Re-skins st.spinner()'s own icon into the same conic-gradient
+        # ring used everywhere else (sign-in/out, page navigation) --
+        # st.spinner() itself has to stay (not a custom placeholder):
+        # this is the one Streamlit primitive proven to actually render
+        # DURING the blocking pyotp/qrcode work below rather than only
+        # after it finishes (see that block's own comment history), so
+        # getting the new look here means re-styling ITS icon in place
+        # rather than swapping the element out. Streamlit's spinner icon
+        # is a plain <span data-testid="stSpinnerIcon"> sized via the
+        # icon-font system (confirmed by reading Streamlit 1.61's own
+        # Spinner.*.js source) -- font-size:0 hides its glyph, and the
+        # same background+mask+animation trio from the ring elsewhere
+        # turns that same span into the ring shape directly, no extra
+        # element needed.
+        st.html(f"""
+        <style>
+        /* Streamlit's own stSpinner row (icon + label) is a left-aligned
+        flex row by default -- reported live as looking off, sitting
+        flush against the card's left edge instead of centred the way
+        every other loader in this app is. justify-content:center on
+        the row (not just the icon) centres the icon+label as one unit. */
+        .st-key-profile_2fa_card [data-testid="stSpinner"] > div {{
+            justify-content: center !important;
+        }}
+        .st-key-profile_2fa_card [data-testid="stSpinnerIcon"] {{
+            font-size: 0 !important; box-sizing: border-box !important;
+            width: 20px !important; height: 20px !important; padding: 3px !important;
+            border-radius: 50% !important; background: {ui.TEAL} !important;
+            --_m: conic-gradient(#0000 10%,#000), linear-gradient(#000 0 0) content-box;
+            -webkit-mask: var(--_m); mask: var(--_m);
+            -webkit-mask-composite: source-out; mask-composite: subtract;
+            animation: sf-qr-spin 1s infinite linear !important;
+        }}
+        @keyframes sf-qr-spin {{ to {{ transform: rotate(1turn); }} }}
+        /* The QR-reveal ring's CSS lives HERE, in this style-only
+        st.html() call, rather than alongside its own markup further
+        down -- root-caused live via getBoundingClientRect(): a global
+        rule elsewhere in this app
+        ([data-testid="stElementContainer"]:has(> [data-testid="stHtml"]
+        > style), added for the zero-content utility blocks near the
+        topbar) matches ANY st.html() output containing a <style> tag,
+        not just the style-only ones it was written for, and yanks that
+        element's whole container out of normal flow with position:
+        absolute. That's harmless for a call like this one that has no
+        visible content of its own to lose -- but the QR box's own call
+        DOES have visible content (the image), and having a <style> tag
+        as its sibling made IT match the same rule too, tearing the
+        whole thing out of flow and off to some unrelated viewport-
+        relative position (reported live as "QR not loading" -- it was
+        actually rendering perfectly, just far off-screen). Defining
+        .sf-qr-reveal-loader here instead, and leaving the QR box's own
+        st.html() call with no <style> tag in it at all, is what keeps
+        that call from matching the selector in the first place. */
+        .sf-qr-reveal-loader {{
+            width: 32px; padding: 5px; aspect-ratio: 1; border-radius: 50%;
+            background: {ui.TEAL};
+            --_m: conic-gradient(#0000 10%,#000), linear-gradient(#000 0 0) content-box;
+            -webkit-mask: var(--_m); mask: var(--_m);
+            -webkit-mask-composite: source-out; mask-composite: subtract;
+            animation: sf-qr-reveal-spin 1s infinite linear;
+        }}
+        @keyframes sf-qr-reveal-spin {{ to {{ transform: rotate(1turn); }} }}
+        </style>
+        """)
         _totp_enabled = bool(_account and _account.get('totp_secret'))
         if _totp_enabled:
             st.success('Two-factor authentication is enabled.', icon=':material/check_circle:')
@@ -694,8 +762,54 @@ def _render_2fa_card(_email):
                     # straight into the same placeholder replaces its content
                     # in one step, so the box never passes through an
                     # empty/collapsed state at all.
+                    #
+                    # A raw <img> plus a small <script>, not a bare
+                    # st.image() -- by the time this line runs, the PNG
+                    # bytes are already sitting in memory server-side, but
+                    # the browser still has to receive, decode, and paint
+                    # them, and st.image() gives no hook into that moment.
+                    # Per the explicit ask that the loader "stay visible
+                    # until the QR is loaded in the DOM": the ring sits
+                    # UNDERNEATH the image (z-index layering, not an
+                    # opacity crossfade) so it's genuinely still there,
+                    # in the DOM, for the entire time -- the opaque QR
+                    # image (no transparency in a qrcode PNG) simply
+                    # paints over it the instant the browser has decoded
+                    # it, no JS coordination required.
+                    #
+                    # A JS onload/addEventListener handshake was tried
+                    # first (fade the image in, hide the ring, only once
+                    # a 'load' event or img.complete confirmed the decode)
+                    # and reliably worked in isolation, but reported live
+                    # as occasionally getting stuck showing nothing at
+                    # all: this card is an @st.fragment, whose own
+                    # comment above already documents that a single click
+                    # can drive more than one render of this same body in
+                    # quick succession -- confirmed live via
+                    # getComputedStyle polling that the ring's wrapper had
+                    # gone to display:none while the image was STILL at
+                    # opacity:0, i.e. exactly the stuck-blank state, most
+                    # likely a stale reveal() callback from one render
+                    # firing against DOM nodes a later render replaced.
+                    # Removing the opacity/JS dependency entirely removes
+                    # that whole class of race -- there is no longer any
+                    # state that can desync between two overlapping
+                    # renders, since nothing but paint order (which the
+                    # browser itself guarantees) decides what's visible.
+                    import base64
+                    _qr_b64 = base64.b64encode(st.session_state.totp_qr_cache).decode('ascii')
                     with _qr_ph.container():
-                        st.image(st.session_state.totp_qr_cache, width=176)
+                        st.html(f"""
+                        <div style="position:relative;width:176px;height:176px;margin:0 auto;">
+                            <div style="position:absolute;inset:0;display:flex;
+                                align-items:center;justify-content:center;">
+                                <div class="sf-qr-reveal-loader"></div>
+                            </div>
+                            <img src="data:image/png;base64,{_qr_b64}"
+                                 alt="Two-factor authentication QR code"
+                                 style="position:absolute;top:0;left:0;width:176px;height:176px;">
+                        </div>
+                        """)
                         st.caption('Scan this with your authenticator app, or enter the key '
                                    f'manually: `{st.session_state.totp_setup_secret}`')
 

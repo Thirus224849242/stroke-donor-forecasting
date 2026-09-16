@@ -287,16 +287,32 @@ def render_transition_spinner(label: str):
     <div style="position:fixed;inset:0;z-index:999999999;background:#FFFFFF;
         display:flex;align-items:center;justify-content:center;">
         <div style="text-align:center;">
-            <div style="width:34px;height:34px;border-radius:50%;margin:0 auto 16px;
-                border:3px solid #E2E8F0;border-top-color:#00897B;
-                animation:sf-transition-spin 0.8s linear infinite;"></div>
+            <div class="sf-transition-loader" style="margin:0 auto 16px;"></div>
             <div style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:12.5px;
                 font-weight:600;color:#64748B;letter-spacing:0.06em;text-transform:uppercase;">
                 {label}
             </div>
         </div>
     </div>
-    <style>@keyframes sf-transition-spin {{ to {{ transform: rotate(360deg); }} }}</style>
+    <style>
+    /* A solid teal disc masked down to a ring with one small gap (the
+    conic-gradient's 10% transparent wedge, subtracted against the
+    content-box so the centre stays hollow) -- replaced the old plain
+    border-with-a-coloured-top-arc ring per feedback that this reads
+    cleaner/more polished. #00897B is this file's own hardcoded light
+    teal (this whole screen is deliberately theme-independent, same as
+    the old spinner's border-top-color was), not the {{TEAL}} palette
+    var ui.py's theme-aware pages use. */
+    .sf-transition-loader {{
+        width: 34px; padding: 5px; aspect-ratio: 1; border-radius: 50%;
+        background: #00897B;
+        --_m: conic-gradient(#0000 10%,#000), linear-gradient(#000 0 0) content-box;
+        -webkit-mask: var(--_m); mask: var(--_m);
+        -webkit-mask-composite: source-out; mask-composite: subtract;
+        animation: sf-transition-spin 1s infinite linear;
+    }}
+    @keyframes sf-transition-spin {{ to {{ transform: rotate(1turn); }} }}
+    </style>
     """)
 
 
