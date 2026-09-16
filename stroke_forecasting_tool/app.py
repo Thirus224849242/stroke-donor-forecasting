@@ -558,6 +558,34 @@ def _render_2fa_card(_email):
             animation: sf-qr-spin 1s infinite linear !important;
         }}
         @keyframes sf-qr-spin {{ to {{ transform: rotate(1turn); }} }}
+        /* The QR-reveal ring's CSS lives HERE, in this style-only
+        st.html() call, rather than alongside its own markup further
+        down -- root-caused live via getBoundingClientRect(): a global
+        rule elsewhere in this app
+        ([data-testid="stElementContainer"]:has(> [data-testid="stHtml"]
+        > style), added for the zero-content utility blocks near the
+        topbar) matches ANY st.html() output containing a <style> tag,
+        not just the style-only ones it was written for, and yanks that
+        element's whole container out of normal flow with position:
+        absolute. That's harmless for a call like this one that has no
+        visible content of its own to lose -- but the QR box's own call
+        DOES have visible content (the image), and having a <style> tag
+        as its sibling made IT match the same rule too, tearing the
+        whole thing out of flow and off to some unrelated viewport-
+        relative position (reported live as "QR not loading" -- it was
+        actually rendering perfectly, just far off-screen). Defining
+        .sf-qr-reveal-loader here instead, and leaving the QR box's own
+        st.html() call with no <style> tag in it at all, is what keeps
+        that call from matching the selector in the first place. */
+        .sf-qr-reveal-loader {{
+            width: 32px; padding: 5px; aspect-ratio: 1; border-radius: 50%;
+            background: {ui.TEAL};
+            --_m: conic-gradient(#0000 10%,#000), linear-gradient(#000 0 0) content-box;
+            -webkit-mask: var(--_m); mask: var(--_m);
+            -webkit-mask-composite: source-out; mask-composite: subtract;
+            animation: sf-qr-reveal-spin 1s infinite linear;
+        }}
+        @keyframes sf-qr-reveal-spin {{ to {{ transform: rotate(1turn); }} }}
         </style>
         """)
         _totp_enabled = bool(_account and _account.get('totp_secret'))
@@ -781,17 +809,6 @@ def _render_2fa_card(_email):
                                  alt="Two-factor authentication QR code"
                                  style="position:absolute;top:0;left:0;width:176px;height:176px;">
                         </div>
-                        <style>
-                        .sf-qr-reveal-loader {{
-                            width: 32px; padding: 5px; aspect-ratio: 1; border-radius: 50%;
-                            background: {ui.TEAL};
-                            --_m: conic-gradient(#0000 10%,#000), linear-gradient(#000 0 0) content-box;
-                            -webkit-mask: var(--_m); mask: var(--_m);
-                            -webkit-mask-composite: source-out; mask-composite: subtract;
-                            animation: sf-qr-reveal-spin 1s infinite linear;
-                        }}
-                        @keyframes sf-qr-reveal-spin {{ to {{ transform: rotate(1turn); }} }}
-                        </style>
                         """)
                         st.caption('Scan this with your authenticator app, or enter the key '
                                    f'manually: `{st.session_state.totp_setup_secret}`')
