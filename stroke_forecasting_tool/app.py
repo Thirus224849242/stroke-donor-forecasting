@@ -519,7 +519,39 @@ def _render_2fa_card(_email):
     file) is what keeps those follow-up reruns local too.
     """
     _account = get_local_account(_email)
-    with card(title='Two-factor authentication'):
+    # Keyed (not just for CSS scoping generally -- specifically so the
+    # st.spinner() re-skin CSS a few lines below can target ONLY this
+    # card's spinners via .st-key-profile_2fa_card, not every st.spinner
+    # anywhere else in the app that happens to render while this is up).
+    with card(title='Two-factor authentication', key='profile_2fa_card'):
+        # Re-skins st.spinner()'s own icon into the same conic-gradient
+        # ring used everywhere else (sign-in/out, page navigation) --
+        # st.spinner() itself has to stay (not a custom placeholder):
+        # this is the one Streamlit primitive proven to actually render
+        # DURING the blocking pyotp/qrcode work below rather than only
+        # after it finishes (see that block's own comment history), so
+        # getting the new look here means re-styling ITS icon in place
+        # rather than swapping the element out. Streamlit's spinner icon
+        # is a plain <span data-testid="stSpinnerIcon"> sized via the
+        # icon-font system (confirmed by reading Streamlit 1.61's own
+        # Spinner.*.js source) -- font-size:0 hides its glyph, and the
+        # same background+mask+animation trio from the ring elsewhere
+        # turns that same span into the ring shape directly, no extra
+        # element needed.
+        st.html(f"""
+        <style>
+        .st-key-profile_2fa_card [data-testid="stSpinnerIcon"] {{
+            font-size: 0 !important; box-sizing: border-box !important;
+            width: 20px !important; height: 20px !important; padding: 3px !important;
+            border-radius: 50% !important; background: {ui.TEAL} !important;
+            --_m: conic-gradient(#0000 10%,#000), linear-gradient(#000 0 0) content-box;
+            -webkit-mask: var(--_m); mask: var(--_m);
+            -webkit-mask-composite: source-out; mask-composite: subtract;
+            animation: sf-qr-spin 1s infinite linear !important;
+        }}
+        @keyframes sf-qr-spin {{ to {{ transform: rotate(1turn); }} }}
+        </style>
+        """)
         _totp_enabled = bool(_account and _account.get('totp_secret'))
         if _totp_enabled:
             st.success('Two-factor authentication is enabled.', icon=':material/check_circle:')
@@ -694,8 +726,69 @@ def _render_2fa_card(_email):
                     # straight into the same placeholder replaces its content
                     # in one step, so the box never passes through an
                     # empty/collapsed state at all.
+                    #
+                    # A raw <img> plus a small <script>, not a bare
+                    # st.image() -- by the time this line runs, the PNG
+                    # bytes are already sitting in memory server-side, but
+                    # the browser still has to receive, decode, and paint
+                    # them, and st.image() gives no hook into that moment.
+                    # Per the explicit ask that the loader "stay visible
+                    # until the QR is loaded in the DOM": the ring spinner
+                    # renders first, underneath the image (img starts at
+                    # opacity:0), and the image's own load event -- fired
+                    # once the browser has actually decoded it, not merely
+                    # inserted the tag -- fades it in and removes the
+                    # spinner. An inline onload="..." ATTRIBUTE was tried
+                    # first here and silently failed: confirmed live
+                    # (hasAttribute('onload') was false on the rendered
+                    # element) that st.html() strips inline on* attributes
+                    # during sanitization even with unsafe_allow_javascript
+                    # =True -- that flag only permits <script> tags to run,
+                    # not raw event-handler attributes. addEventListener
+                    # from an actual <script> block is the form that
+                    # survives, same as every other JS in this app (ui.py's
+                    # nav overlays). img.complete is checked too, not just
+                    # the load event, since a data URI can finish decoding
+                    # before this script even runs -- the load event never
+                    # fires for an image that was already complete by the
+                    # time a listener gets attached to it.
+                    import base64
+                    _qr_b64 = base64.b64encode(st.session_state.totp_qr_cache).decode('ascii')
                     with _qr_ph.container():
-                        st.image(st.session_state.totp_qr_cache, width=176)
+                        st.html(f"""
+                        <div style="position:relative;width:176px;height:176px;margin:0 auto;">
+                            <div id="sf-qr-loader-wrap" style="position:absolute;inset:0;display:flex;
+                                align-items:center;justify-content:center;">
+                                <div class="sf-qr-reveal-loader"></div>
+                            </div>
+                            <img id="sf-qr-img" src="data:image/png;base64,{_qr_b64}"
+                                 alt="Two-factor authentication QR code"
+                                 style="position:absolute;top:0;left:0;width:176px;height:176px;
+                                        opacity:0;transition:opacity .2s ease-in-out;">
+                        </div>
+                        <style>
+                        .sf-qr-reveal-loader {{
+                            width: 32px; padding: 5px; aspect-ratio: 1; border-radius: 50%;
+                            background: {ui.TEAL};
+                            --_m: conic-gradient(#0000 10%,#000), linear-gradient(#000 0 0) content-box;
+                            -webkit-mask: var(--_m); mask: var(--_m);
+                            -webkit-mask-composite: source-out; mask-composite: subtract;
+                            animation: sf-qr-reveal-spin 1s infinite linear;
+                        }}
+                        @keyframes sf-qr-reveal-spin {{ to {{ transform: rotate(1turn); }} }}
+                        </style>
+                        <script>
+                        (function() {{
+                            var img = document.getElementById('sf-qr-img');
+                            var reveal = function() {{
+                                img.style.opacity = '1';
+                                var wrap = document.getElementById('sf-qr-loader-wrap');
+                                if (wrap) wrap.style.display = 'none';
+                            }};
+                            if (img.complete) {{ reveal(); }} else {{ img.addEventListener('load', reveal); }}
+                        }})();
+                        </script>
+                        """, unsafe_allow_javascript=True)
                         st.caption('Scan this with your authenticator app, or enter the key '
                                    f'manually: `{st.session_state.totp_setup_secret}`')
 

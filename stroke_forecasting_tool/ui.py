@@ -1148,57 +1148,42 @@ def inject_global_css():
     # window.__sfHideInstantOverlay() (called by clear_nav_overlay()
     # below) well before 15s in every case that's ever been observed.
     st.html(f"""
+    <style>
+    /* Same conic-gradient-masked-into-a-ring design as auth.py's
+    render_transition_spinner() -- replaced the earlier cycling
+    stroke-symptom illustrations per feedback asking for one consistent
+    loader across sign-in/out, page navigation, and the QR setup step,
+    rather than three different visual languages. A single CSS
+    @keyframes is enough here (unlike the old image cycling, which
+    needed JS since "next frame" was state living in an array index) --
+    this is what let the JS below drop all the frame/interval logic. */
+    .sf-nav-loader {{
+        width: 56px; padding: 8px; aspect-ratio: 1; border-radius: 50%;
+        background: {TEAL};
+        --_m: conic-gradient(#0000 10%,#000), linear-gradient(#000 0 0) content-box;
+        -webkit-mask: var(--_m); mask: var(--_m);
+        -webkit-mask-composite: source-out; mask-composite: subtract;
+        animation: sf-nav-spin 1s infinite linear;
+    }}
+    @keyframes sf-nav-spin {{ to {{ transform: rotate(1turn); }} }}
+    </style>
     <script>
     (function() {{
         var el = document.getElementById('sf-instant-nav-overlay');
         if (!el) {{
-            // The 7 F.A.S.T.-style stroke-symptom illustrations (static/
-            // stroke-loader-1..7.webp, resized+recompressed from the
-            // originals in assets/files/ -- ~927KB total down to ~84KB)
-            // shown one after another instead of the old single pulsing
-            // heart image -- doubles as symptom awareness while the user
-            // waits. Cycled by plain setInterval/setTimeout below, not
-            // CSS @keyframes, since which frame is "next" is JS-driven
-            // state (an index into this array), not something a single
-            // declarative animation can express across 7 different
-            // source images the way the old scale-pulse could for one.
-            var frames = [
-                'app/static/stroke-loader-1.webp?v=1', 'app/static/stroke-loader-2.webp?v=1',
-                'app/static/stroke-loader-3.webp?v=1', 'app/static/stroke-loader-4.webp?v=1',
-                'app/static/stroke-loader-5.webp?v=1', 'app/static/stroke-loader-6.webp?v=1',
-                'app/static/stroke-loader-7.webp?v=1'
-            ];
             el = document.createElement('div');
             el.id = 'sf-instant-nav-overlay';
             el.style.cssText = 'position:fixed;top:56px;bottom:0;'
                 + 'left:var(--sf-sidebar-w, 64px);'
                 + 'width:calc(100% - var(--sf-sidebar-w, 64px));'
                 + 'z-index:999999999;display:none;align-items:center;justify-content:center;';
-            var img = document.createElement('img');
-            img.id = 'sf-instant-nav-overlay-img';
-            img.alt = 'Loading';
-            img.style.cssText = 'width:76px;height:76px;object-fit:contain;'
-                + 'transition:opacity .15s ease-in-out;opacity:1;';
-            img.src = frames[0];
-            el.appendChild(img);
+            var spinner = document.createElement('div');
+            spinner.className = 'sf-nav-loader';
+            el.appendChild(spinner);
             document.body.appendChild(el);
-
-            var frameIdx = 0;
-            setInterval(function() {{
-                if (el.style.display === 'none') return;
-                img.style.opacity = '0';
-                setTimeout(function() {{
-                    frameIdx = (frameIdx + 1) % frames.length;
-                    img.src = frames[frameIdx];
-                    img.style.opacity = '1';
-                }}, 150);
-            }}, 700);
 
             var hideTimer = null;
             window.__sfShowInstantOverlay = function() {{
-                frameIdx = 0;
-                img.src = frames[0];
-                img.style.opacity = '1';
                 el.style.display = 'flex';
                 if (hideTimer) clearTimeout(hideTimer);
                 hideTimer = setTimeout(function() {{ el.style.display = 'none'; }}, 15000);
@@ -2189,18 +2174,17 @@ def render_nav_transition_overlay():
     ever reach -- visible at once alongside the new page's content,
     until the run finished).
 
-    The loading indicator cycles through the 7 F.A.S.T.-style
-    stroke-symptom illustrations (static/stroke-loader-1..7.webp, ~84KB
-    total -- served via enableStaticServing so they're fetched/cached
-    once, not re-sent inline every rerun), one after another, on the
-    same plain setInterval/setTimeout cadence as the instant client-side
-    overlay in inject_global_css() (see that function's own comment for
-    why this needed JS rather than a single declarative CSS animation
-    once there was more than one source image to cycle through) --
-    replaced the single pulsing anatomical-heart image this used to
-    show, centred on an opaque {BG} cover. st.html(), not st.markdown()
-    as this used to be, since the cycling now needs an actual <script>
-    tag alongside the markup, not just a CSS @keyframes block.
+    The loading indicator is the same conic-gradient-masked teal ring
+    used by auth.py's render_transition_spinner() (sign-in/out) and the
+    instant client-side overlay just above in this file -- one
+    consistent loader across sign-in/out, page navigation, and the QR
+    setup step, rather than the three different visual treatments this
+    used to be (a pulsing heart, then a cycling set of stroke-symptom
+    illustrations, before landing here). A plain CSS @keyframes is
+    enough for a single shape, unlike the old image cycling which
+    needed JS to track "which frame is next" -- st.html() is kept over
+    st.markdown() only because render_transition_spinner() already set
+    that precedent, not because this still needs a <script> tag itself.
 
     A single self-contained st.html() block, not st.container(key=...)
     plus a separate CSS rule targeting its generated class (an earlier
@@ -2246,45 +2230,23 @@ def render_nav_transition_overlay():
     which the spec does honour.
     """
     st.html(f"""
+    <style>
+    .sf-nav-loader {{
+        width: 56px; padding: 8px; aspect-ratio: 1; border-radius: 50%;
+        background: {TEAL};
+        --_m: conic-gradient(#0000 10%,#000), linear-gradient(#000 0 0) content-box;
+        -webkit-mask: var(--_m); mask: var(--_m);
+        -webkit-mask-composite: source-out; mask-composite: subtract;
+        animation: sf-nav-spin 1s infinite linear;
+    }}
+    @keyframes sf-nav-spin {{ to {{ transform: rotate(1turn); }} }}
+    </style>
     <div style="position:fixed;top:56px;bottom:0;left:var(--sf-sidebar-w, 64px);
         width:calc(100% - var(--sf-sidebar-w, 64px));z-index:999999999;background:{BG};
         display:flex;align-items:center;justify-content:center;">
-        <img id="sf-nav-overlay-img" src="app/static/stroke-loader-1.webp?v=1" alt="Loading"
-             style="width:76px;height:76px;object-fit:contain;
-                    transition:opacity .15s ease-in-out;opacity:1;">
+        <div class="sf-nav-loader"></div>
     </div>
-    <script>
-    (function() {{
-        var img = document.getElementById('sf-nav-overlay-img');
-        var frames = [
-            'app/static/stroke-loader-1.webp?v=1', 'app/static/stroke-loader-2.webp?v=1',
-            'app/static/stroke-loader-3.webp?v=1', 'app/static/stroke-loader-4.webp?v=1',
-            'app/static/stroke-loader-5.webp?v=1', 'app/static/stroke-loader-6.webp?v=1',
-            'app/static/stroke-loader-7.webp?v=1'
-        ];
-        var frameIdx = 0;
-        // Self-clearing, not a fire-and-forget setInterval -- this whole
-        // block re-runs fresh on every page navigation (one new img#sf-
-        // nav-overlay-img each time), so without checking isConnected
-        // and stopping itself once THIS PARTICULAR img has been removed
-        // from the DOM (the placeholder holding this overlay open gets
-        // .empty()'d once the destination page finishes rendering --
-        // see clear_nav_overlay()), every past navigation's interval
-        // would keep ticking forever in the background, accumulating
-        // one permanent leaked timer per page change for the life of
-        // the session.
-        var iv = setInterval(function() {{
-            if (!img.isConnected) {{ clearInterval(iv); return; }}
-            img.style.opacity = '0';
-            setTimeout(function() {{
-                frameIdx = (frameIdx + 1) % frames.length;
-                img.src = frames[frameIdx];
-                img.style.opacity = '1';
-            }}, 150);
-        }}, 700);
-    }})();
-    </script>
-    """, unsafe_allow_javascript=True)
+    """)
 
 
 def clear_nav_overlay():
