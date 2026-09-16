@@ -408,9 +408,11 @@ def inject_global_css():
     }}
 
     /* Icon-only nav buttons: label hidden, icon centred, left-border
-    accent for the active page. Icon at 24px (was the browser/Streamlit
-    default of 14px for an st.button icon) -- reported live as too
-    small for a rail this size. */
+    accent for the active page. Icon at 18px -- went to 24px first, then
+    the thinned-outline 24px version, both reported live as still not
+    landing right; settled back on 18px (up from the original 14px
+    default) with a SOLID fill instead of chasing the outline weight
+    further. */
     [data-testid="stSidebar"] .stButton > button {{
         width: 100% !important; background: transparent !important; color: rgba(255,255,255,0.68) !important;
         border: none !important; border-left: 3px solid transparent !important; border-radius: 0 !important;
@@ -419,17 +421,15 @@ def inject_global_css():
         position: relative; overflow: visible;
     }}
     [data-testid="stSidebar"] .stButton > button [data-testid="stIconMaterial"] {{
-        font-size: 24px !important;
-        /* Material Symbols is a variable font -- Streamlit leaves
-        font-variation-settings at its default (confirmed live via
-        getComputedStyle: "normal", i.e. the 400 weight axis never gets
-        adjusted for size), so simply scaling font-size up to 24px blew
-        the stroke up right along with the glyph -- reported live as
-        looking thick/unprofessional. Dropping the weight axis to 300
-        (default is 400) is what actually thins the stroke back down at
-        this size; 'opsz' 24 matches the optical-size axis to the real
-        display size instead of leaving it to the font's own default. */
-        font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24 !important;
+        font-size: 18px !important;
+        /* FILL 1 -- solid glyphs -- reads cleaner at rail size than an
+        outline ever did, and sidesteps the outline-thickness problem
+        entirely rather than continuing to tune 'wght' against it.
+        'opsz' matched to the real 18px display size, same reasoning as
+        before: Streamlit never sets font-variation-settings itself, so
+        this axis is left at whatever the font's own default is unless
+        pinned explicitly. */
+        font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 18 !important;
     }}
     [data-testid="stSidebar"] .stButton > button > div {{ justify-content: center !important; gap: 0 !important; }}
     [data-testid="stSidebar"] .stButton > button p {{ display: none !important; }}
