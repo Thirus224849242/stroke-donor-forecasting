@@ -1705,6 +1705,59 @@ def render_topbar():
                     sign_out()
 
 
+def render_favicon_status_dot(running: bool):
+    """Badges the browser tab's favicon with a small status dot -- grey
+    while a pipeline run is in progress, green once it's idle/done. Same
+    idea as HubSpot's own tab-icon dot (what this was asked to match).
+
+    Called once per script run (app.py, right after render_topbar()) with
+    the CURRENT st.session_state.pipeline_running, so the dot flips the
+    instant a run starts/finishes, same as everything else keyed off that
+    flag (the sidebar's disabled nav buttons, the topbar's disabled log-
+    out button, etc).
+
+    Always redraws from the ORIGINAL favicon image, cached in
+    window.__sfOriginalFavicon on the first call, never from the
+    current <link>'s href -- reading back the current href and drawing a
+    NEW dot on top of it would compound a second, bigger dot onto the
+    first one on every subsequent rerun, since by then the href already
+    points at a previously-badged data: URL rather than the clean source
+    image.
+
+    A canvas round-trip (draw the source image, then a white ring plus
+    the coloured dot on top, then .toDataURL() back into the <link>) is
+    the only way to modify a favicon at all -- browsers have no API to
+    tint/badge one directly, only to replace the <link>'s href wholesale.
+    """
+    color = SLATE if running else GREEN
+    st.html(f"""
+    <script>
+    (function() {{
+        var link = document.querySelector('link[rel="shortcut icon"]')
+            || document.querySelector('link[rel~="icon"]');
+        if (!link) return;
+        if (!window.__sfOriginalFavicon) {{ window.__sfOriginalFavicon = link.href; }}
+        var img = new Image();
+        img.onload = function() {{
+            var canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth || 32;
+            canvas.height = img.naturalHeight || 32;
+            var ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            var r = canvas.width * 0.24;
+            var cx = canvas.width - r, cy = canvas.height - r;
+            ctx.beginPath(); ctx.arc(cx, cy, r * 1.3, 0, 2 * Math.PI);
+            ctx.fillStyle = '#FFFFFF'; ctx.fill();
+            ctx.beginPath(); ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+            ctx.fillStyle = '{color}'; ctx.fill();
+            link.href = canvas.toDataURL('image/png');
+        }};
+        img.src = window.__sfOriginalFavicon;
+    }})();
+    </script>
+    """, unsafe_allow_javascript=True)
+
+
 def page_header(eyebrow, title, sub='', meta='', info=None):
     """Renders the page's own title block on the left, and a slim actions
     column on the right (the page's Export CSV button, then the optional

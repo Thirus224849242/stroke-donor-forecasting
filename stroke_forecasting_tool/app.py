@@ -87,8 +87,8 @@ import ui
 from ui import (
     CACHED_RUN_BANNER_PAGES, card, chart, clear_nav_overlay, empty_state, inject_global_css,
     kpi, new_execution_log, overall_progress, page_header, pill, render_action_button_css,
-    render_cached_run_banner, render_nav_transition_overlay, render_sidebar, render_startup_progress,
-    render_topbar, render_upload_progress_tracker, stage_row, upload_slot,
+    render_cached_run_banner, render_favicon_status_dot, render_nav_transition_overlay, render_sidebar,
+    render_startup_progress, render_topbar, render_upload_progress_tracker, stage_row, upload_slot,
 )
 
 
@@ -1168,6 +1168,12 @@ render_sidebar()
 # page_header()'s right column. `page` is already resolved above, so the
 # popover's per-page key suffix works from here.
 render_topbar()
+
+# Grey while a pipeline run is in progress, green once it's idle/done --
+# same st.session_state.pipeline_running flag everything else reacts to
+# (the sidebar's disabled nav buttons, the topbar's disabled log-out
+# button), so the tab icon flips in step with those.
+render_favicon_status_dot(st.session_state.pipeline_running)
 
 # CACHED_RUN_BANNER_PAGES, not every page -- reported live, this used to
 # show (and could auto-reveal, via the nav_loading flag "My profile" now
