@@ -169,6 +169,15 @@ def inject_global_css():
     outright rather than replaced, since those purpose-built loaders
     already cover every case worth signalling. */
     [data-testid="stStatusWidget"] {{ display: none !important; }}
+    /* Streamlit fades any element to partial opacity (with a 1s transition)
+    the instant it's "stale" -- i.e. anywhere downstream, in script order, of
+    whatever widget triggered the current rerun -- until that rerun finishes
+    redrawing it. That's a built-in loading cue, not something this app
+    turns on, and it fires on every rerun app-wide (e.g. the whole Source
+    files section visibly dims any time ANY upload widget on that page
+    changes). Reported as unwanted -- overridden globally rather than
+    per-page since the same rerun model applies to every page. */
+    [data-testid="stElementContainer"][data-stale="true"] {{ opacity: 1 !important; transition: none !important; }}
     /* pointer-events:none so this invisible native bar can never again
     swallow real clicks meant for whatever sits under/behind it (this is
     exactly what broke the topbar's popover before) -- every button it
@@ -2375,15 +2384,30 @@ def clear_nav_overlay():
 def _peek_columns(f):
     """Read just the header row of an uploaded CSV without consuming it
     UploadedFile.getbuffer()/getvalue() ignore the read cursor, so a cheap
-    nrows=0 peek here doesn't affect the full read done later for the pipeline."""
+    nrows=0 peek here doesn't affect the full read done later for the pipeline.
+
+    Cached per file_id in session_state: Streamlit reruns this whole page on
+    ANY widget event (e.g. a different slot's upload finishing), and without
+    this cache every large already-uploaded file (a 500MB+ Payments.csv) gets
+    its header re-parsed on every single one of those unrelated reruns --
+    slow enough on a big file to show as a stuck/faded source-files section
+    for several seconds each time, even though nothing about that file
+    actually changed."""
+    cache = st.session_state.setdefault('_peek_columns_cache', {})
+    cache_key = getattr(f, 'file_id', None)
+    if cache_key is not None and cache_key in cache:
+        f.seek(0)
+        return cache[cache_key]
     try:
         f.seek(0)
         columns = list(pd.read_csv(f, nrows=0).columns)
         f.seek(0)
-        return columns
     except Exception:
         f.seek(0)
-        return None
+        columns = None
+    if cache_key is not None:
+        cache[cache_key] = columns
+    return columns
 
 
 def upload_slot(title, desc, icon_path, icon_cls, key, required_columns=None, disabled=False):
