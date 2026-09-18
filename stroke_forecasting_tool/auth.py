@@ -3,32 +3,20 @@
 from branding import logo_data_uri
 from db import (
     LOCAL_SESSION_DAYS, create_local_session, db_configured, delete_local_session, get_local_account,
-    get_local_session, get_user, request_access, upsert_approved_user, verify_password,
+    get_local_session, verify_password,
 )
 
 # Local (email+password) login credentials used to live here as a plaintext
 # USERS dict -- the Critical finding from the security review. Moved to a
-# new local_accounts table in the same Supabase database db.py already
-# uses (hashed via db.py's hash_password()/verify_password()), alongside
-# Google sign-in, not replacing it -- see render_login()'s local-form
-# handler below, which now calls get_local_account() + verify_password()
-# instead of checking a dict. Same two accounts, same passwords, seeded
-# automatically by db.py's _seed_local_accounts() on first connect.
-
-# Google sign-in: only these domains may complete login (this is an
-# internal tool, not a public one) -- the org's real domain plus the dev
-# team's own (Deakin), since there's no separate staging environment.
-# Only these specific addresses get promoted to Administrator -- everyone
-# else on an allowed domain lands as Analyst. There's no user database
-# backing OAuth logins, so this allow-list is the only thing standing in
-# for one.
-ALLOWED_GOOGLE_DOMAINS = {'strokefoundation.org.au', 'deakin.edu.au'}
-GOOGLE_ADMIN_EMAILS = {'admin@strokefoundation.org.au', 'thirumalreddyenugu@gmail.com'}
-# Individual exceptions to the domain restriction -- for dev/demo access
-# from an account that isn't on either allowed domain (e.g. a personal
-# Gmail used for testing). Remove before this app is shared beyond the dev
-# team.
-GOOGLE_EXTRA_ALLOWED_EMAILS = {'thirumalreddyenugu@gmail.com'}
+# local_accounts table in the same Supabase database db.py already uses
+# (hashed via db.py's hash_password()/verify_password()) -- see
+# render_login()'s local-form handler below, which now calls
+# get_local_account() + verify_password() instead of checking a dict. Same
+# two accounts, same passwords, seeded automatically by db.py's
+# _seed_local_accounts() on first connect.
+#
+# Google sign-in has been removed entirely -- every account is a local
+# (email+password) one, created and managed from the Users page.
 
 # Browser cookie name for a local account's persistent session (see
 # create_local_session() below and db.py's create_local_session()). Not
@@ -74,148 +62,15 @@ def init_session_state():
         st.session_state.pipeline_running = False
 
 
-def google_auth_configured() -> bool:
-    """True once secrets.toml's [auth] section has real Google credentials
-    (not the placeholder scaffold) -- lets the login page skip the Google
-    button entirely until it's actually set up, rather than erroring."""
-    try:
-        auth = st.secrets.get('auth')
-        if not auth:
-            return False
-        client_id = auth.get('client_id', '')
-        return bool(client_id) and not client_id.startswith('REPLACE_WITH_')
-    except Exception:
-        return False
-
-
-def handle_google_redirect():
-    """Call once, early, on every run -- before the render_login() gate.
-    Streamlit's own OIDC cookie (st.user) is separate from our
-    session_state; this is what bridges the two right after a user comes
-    back from Google's redirect. Rejects anyone outside the allowed
-    domain immediately, same as before.
-
-    For everyone else, being on an allowed domain is necessary but no
-    longer SUFFICIENT on its own for a non-admin: they also need an
-    'approved' row in the `users` DB table (db.py) -- requested via
-    render_request_access() below and granted by a Super Admin on the
-    Access Requests page (app.py).
-
-    Three roles now, not two -- 'Super Admin' > 'Administrator' >
-    'Analyst'. Only Super Admin can create/delete accounts, approve/deny/
-    revoke Google access, and promote/demote anyone's role (Local
-    Accounts + Access Requests pages, app.py). Administrator keeps
-    everything else it always had (Data Pipeline, CSV exports, deleting a
-    run) but no account-management power at all -- back to how it worked
-    before those two pages existed. Every role can change their own
-    password from the account menu if they're signed in locally.
-
-    GOOGLE_ADMIN_EMAILS is a ONE-TIME BOOTSTRAP SEED, not a standing
-    override -- it's only ever consulted the very first time an email
-    signs in (record is None below), to create their initial 'users' row
-    as an auto-approved Super Admin (the highest tier, not just
-    Administrator -- someone has to be able to set everyone else up),
-    skipping the request queue (they're the ones who'd review it; gating
-    them behind their own approval would be circular). From then on the
-    database is the sole source of truth: a Super Admin can promote,
-    demote, or remove that person's access entirely through the app's own
-    UI, and it takes effect on their very next login -- editing this list
-    again has no further effect on them.
-    """
-    if not google_auth_configured():
-        return
-    if st.session_state.authenticated or not st.user.is_logged_in:
-        return
-
-    email = (st.user.email or '').strip().lower()
-    domain = email.rsplit('@', 1)[-1] if '@' in email else ''
-    name = st.user.get('name') or (email.split('@')[0].replace('.', ' ').title() if email else 'User')
-
-    allowed = domain in ALLOWED_GOOGLE_DOMAINS or email in GOOGLE_EXTRA_ALLOWED_EMAILS
-    if not email or not allowed:
-        allowed_list = ' or '.join(f'@{d}' for d in sorted(ALLOWED_GOOGLE_DOMAINS))
-        st.html("""
-        <style>[data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] { display: none !important; }</style>
-        """)
-        st.error(
-            f'{email or "This account"} is not a {allowed_list} account. '
-            f'Access is restricted to Stroke Foundation staff and the dev team.',
-            icon=':material/block:',
-        )
-        if st.button('Back to sign in'):
-            st.logout()
-        st.stop()
-
-    # No DB configured means there's nowhere to persist a request queue OR
-    # to check for an existing record at all -- GOOGLE_ADMIN_EMAILS is the
-    # only signal available in that case, same "fails soft" pattern every
-    # other DB-backed feature in this app follows (see db.py's own module
-    # docstring).
-    if not db_configured():
-        role = 'Super Admin' if email in GOOGLE_ADMIN_EMAILS else 'Analyst'
-        st.session_state.authenticated = True
-        st.session_state.auth_method = 'google'
-        st.session_state.user = {'email': email, 'name': name, 'role': role}
-        return
-
-    # THE DATABASE IS THE SOURCE OF TRUTH ONCE A RECORD EXISTS. GOOGLE_ADMIN_EMAILS
-    # is checked ONLY in the record-is-None branch below -- a one-time bootstrap
-    # seed for a brand-new email that's never signed in before, not a standing
-    # override. Previously this list was checked FIRST and re-applied
-    # role='Administrator' on every single login for these emails, permanently
-    # overwriting whatever an admin had set for them in the `users` table via
-    # the Local/Access management UIs -- a real bug (reported live), not just a
-    # style issue: it meant an email on this list could never actually be
-    # demoted, and meant this hardcoded list was a permanent, undocumented
-    # backdoor with no way to revoke it short of editing this file and
-    # redeploying. Checking the database FIRST fixes both: once a row exists
-    # for an email (created either by this bootstrap path or by the ordinary
-    # request-access flow), every later login reads its role/status from
-    # there -- an admin can promote, demote, or remove that access entirely
-    # through the UI, and it takes effect on that person's very next login,
-    # with zero code change and zero redeploy, regardless of what this list
-    # still says.
-    record = get_user(email)
-
-    if record is None:
-        if email in GOOGLE_ADMIN_EMAILS:
-            upsert_approved_user(email, name, role='Super Admin', decided_by=email)
-            st.session_state.authenticated = True
-            st.session_state.auth_method = 'google'
-            st.session_state.user = {'email': email, 'name': name, 'role': 'Super Admin'}
-            return
-        render_request_access(email, name)
-        return
-    if record['status'] == 'pending':
-        render_pending_access(email)
-        return
-    if record['status'] == 'denied':
-        render_denied_access(email, name)
-        return
-
-    # approved -- role comes from the database, full stop, even for an
-    # email that's also in GOOGLE_ADMIN_EMAILS.
-    st.session_state.authenticated = True
-    st.session_state.auth_method = 'google'
-    st.session_state.user = {
-        'email': email,
-        'name': record.get('name') or name,
-        'role': record.get('role') or 'Analyst',
-    }
-
-
 def restore_local_session():
-    """Call once, early, on every run -- same spot as handle_google_redirect()
-    (app.py calls both, right after complete_sign_out()). Google sign-in
-    survives a server process restart for free: Streamlit's own signed
-    cookie backs st.user, and handle_google_redirect() above re-derives
-    session_state from it on the very next run. A local (email+password)
-    login has no such backing -- authenticated/user live only in this
-    session's server-memory session_state -- so a restart (e.g. triggered
-    by a long pipeline run's memory pressure) just logs that user out with
-    no way back except signing in again. This closes that gap: if this
-    run doesn't already have an authenticated session, check the browser
-    for the persistent-session cookie render_login() sets on a successful
+    """Call once, early, on every run (app.py, right after
+    complete_sign_out()). A local (email+password) login's
+    authenticated/user state lives only in this session's server-memory
+    session_state -- so a process restart (e.g. triggered by a long
+    pipeline run's memory pressure) just logs that user out with no way
+    back except signing in again. This closes that gap: if this run
+    doesn't already have an authenticated session, check the browser for
+    the persistent-session cookie render_login() sets on a successful
     local sign-in, and restore from it via db.py's get_local_session() if
     it's still valid. Only ever fills in a MISSING session -- never runs
     at all once one already exists, so it can't override a genuinely fresh
@@ -364,17 +219,14 @@ def complete_sign_out():
     """Call once, at the very top of app.py, before anything else renders
     -- checks the flag sign_out() sets above and, only if it's set, shows
     a brief branded loading screen and then actually clears session state
-    and completes the sign-out. Google needs st.logout() specifically to
-    clear Streamlit's own identity cookie (a plain rerun wouldn't); local
-    sign-in just needs the plain rerun -- either one raises internally
-    and aborts the rest of THIS script run on its own (same as every
-    other st.rerun()/st.stop() call in this file), so there's no
-    trailing st.stop() needed here the way render_login() and its
-    siblings below need one (they're blocking on user input, not
-    triggering an immediate transition)."""
+    and completes the sign-out. st.rerun() raises internally and aborts
+    the rest of THIS script run on its own (same as every other
+    st.rerun()/st.stop() call in this file), so there's no trailing
+    st.stop() needed here the way render_login() and its siblings below
+    need one (they're blocking on user input, not triggering an
+    immediate transition)."""
     if not st.session_state.get('_signing_out'):
         return
-    method = st.session_state.auth_method
     st.html("""
     <style>
     [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"],
@@ -408,19 +260,18 @@ def complete_sign_out():
     time.sleep(0.6)
 
     # Revoke the persistent session server-side (not just clear the
-    # cookie below) so a local sign-out actually ends it -- otherwise the
-    # token in local_sessions would stay valid, and anyone who'd got hold
-    # of the cookie could keep using it, until it expired on its own.
-    # Read BEFORE the SESSION_KEYS wipe just below, which would otherwise
+    # cookie below) so sign-out actually ends it -- otherwise the token
+    # in local_sessions would stay valid, and anyone who'd got hold of
+    # the cookie could keep using it, until it expired on its own. Read
+    # BEFORE the SESSION_KEYS wipe just below, which would otherwise
     # clear local_session_token first (it's one of those keys) and leave
     # nothing here to revoke.
-    if method == 'password':
-        delete_local_session(st.session_state.get('local_session_token'))
-        st.html(f"""
-        <script>
-        document.cookie = "{LOCAL_SESSION_COOKIE}=; path=/; max-age=0; SameSite=Lax";
-        </script>
-        """, unsafe_allow_javascript=True)
+    delete_local_session(st.session_state.get('local_session_token'))
+    st.html(f"""
+    <script>
+    document.cookie = "{LOCAL_SESSION_COOKIE}=; path=/; max-age=0; SameSite=Lax";
+    </script>
+    """, unsafe_allow_javascript=True)
 
     for k in SESSION_KEYS:
         st.session_state[k] = None
@@ -437,10 +288,7 @@ def complete_sign_out():
     # it once the login form itself is actually the thing being rendered,
     # not merely once this function is done clearing state.
     st.session_state.is_signing_out = True
-    if method == 'google':
-        st.logout()  # clears Streamlit's identity cookie and reruns itself
-    else:
-        st.rerun()
+    st.rerun()
 
 
 def _render_auth_shell():
@@ -498,21 +346,6 @@ def _render_auth_shell():
         font-family: 'Inter', system-ui, sans-serif; }
     .st-key-login_card [data-testid="stForm"] { border: none; padding: 0; }
     .st-key-login_card button[kind="primary"] { width: 100%; margin-top: 6px; }
-    .st-key-google_login_btn button {
-        width: 100%; background: white !important; color: #3C4043 !important;
-        border: 1px solid #DADCE0 !important; font-weight: 500 !important;
-        display: flex !important; align-items: center !important; justify-content: center !important;
-        gap: 10px !important;
-    }
-    .st-key-google_login_btn button:hover { background: #F8F9FA !important; border-color: #C6C9CE !important; }
-    .st-key-google_login_btn button p::before {
-        content: ''; display: inline-block; width: 18px; height: 18px; margin-right: 2px;
-        vertical-align: middle; background-size: contain; background-repeat: no-repeat;
-        background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0OCA0OCI+PHBhdGggZmlsbD0iI0ZGQzEwNyIgZD0iTTQzLjYxMSwyMC4wODNINDJWMjBIMjR2OGgxMS4zMDNjLTEuNjQ5LDQuNjU3LTYuMDgsOC0xMS4zMDMsOGMtNi42MjcsMC0xMi01LjM3My0xMi0xMmMwLTYuNjI3LDUuMzczLTEyLDEyLTEyYzMuMDU5LDAsNS44NDIsMS4xNTQsNy45NjEsMy4wMzlsNS42NTctNS42NTdDMzQuMDQ2LDYuMDUzLDI5LjI2OCw0LDI0LDRDMTIuOTU1LDQsNCwxMi45NTUsNCwyNGMwLDExLjA0NSw4Ljk1NSwyMCwyMCwyMGMxMS4wNDUsMCwyMC04Ljk1NSwyMC0yMEM0NCwyMi42NTksNDMuODYyLDIxLjM1LDQzLjYxMSwyMC4wODN6Ii8+PHBhdGggZmlsbD0iI0ZGM0QwMCIgZD0iTTYuMzA2LDE0LjY5MWw2LjU3MSw0LjgxOUMxNC42NTUsMTUuMTA4LDE4Ljk2MSwxMiwyNCwxMmMzLjA1OSwwLDUuODQyLDEuMTU0LDcuOTYxLDMuMDM5bDUuNjU3LTUuNjU3QzM0LjA0Niw2LjA1MywyOS4yNjgsNCwyNCw0QzE2LjMxOCw0LDkuNjU2LDguMzM3LDYuMzA2LDE0LjY5MXoiLz48cGF0aCBmaWxsPSIjNENBRjUwIiBkPSJNMjQsNDRjNS4xNjYsMCw5Ljg2LTEuOTc3LDEzLjQwOS01LjE5MmwtNi4xOS01LjIzOEMyOS4yMTEsMzUuMDkxLDI2LjcxNSwzNiwyNCwzNmMtNS4yMDIsMC05LjYxOS0zLjMxNy0xMS4yODMtNy45NDZsLTYuNTIyLDUuMDI1QzkuNTA1LDM5LjU1NiwxNi4yMjcsNDQsMjQsNDR6Ii8+PHBhdGggZmlsbD0iIzE5NzZEMiIgZD0iTTQzLjYxMSwyMC4wODNINDJWMjBIMjR2OGgxMS4zMDNjLTAuNzkyLDIuMjM3LTIuMjMxLDQuMTY2LTQuMDg3LDUuNTcxYzAuMDAxLTAuMDAxLDAuMDAyLTAuMDAxLDAuMDAzLTAuMDAybDYuMTksNS4yMzhDMzYuOTcxLDM5LjIwNSw0NCwzNCw0NCwyNEM0NCwyMi42NTksNDMuODYyLDIxLjM1LDQzLjYxMSwyMC4wODN6Ii8+PC9zdmc+");
-    }
-    .sf-login-divider { display: flex; align-items: center; gap: 12px; margin: 18px 0;
-        font-size: 10px; font-weight: 500; color: #64748B; text-transform: uppercase; letter-spacing: 0.18em; }
-    .sf-login-divider::before, .sf-login-divider::after { content: ''; flex: 1; height: 1px; background: #E2E8F0; }
     </style>
     """)
 
@@ -657,12 +490,6 @@ def render_login():
                 st.markdown("**Sign in to your account**")
                 st.caption('Enter your credentials to access Cadence.')
 
-                if google_auth_configured():
-                    with st.container(key='google_login_btn'):
-                        if st.button('Continue with Google', width='stretch'):
-                            st.login()
-                    st.markdown('<div class="sf-login-divider">or</div>', unsafe_allow_html=True)
-
                 with st.form('login_form', border=False):
                     email = st.text_input(
                         'Work email', placeholder='name@strokefoundation.org.au',
@@ -692,8 +519,8 @@ def render_login():
                         # same Supabase database as everything else in db.py), not
                         # that this particular attempt failed.
                         st.session_state.is_signing_in = False
-                        st.error('Local sign-in is unavailable right now (no database configured). '
-                                  'Try Google sign-in instead, or contact an administrator.',
+                        st.error('Sign-in is unavailable right now (no database configured). '
+                                  'Contact an administrator.',
                                   icon=':material/error:')
                     else:
                         # get_local_account() below is the FIRST database call of
@@ -718,20 +545,7 @@ def render_login():
                         render_startup_progress(_login_bar, label='Signing in')
                         account = get_local_account(clean_email)
                         if account and verify_password(password, account['password_hash']):
-                            # Same domain restriction Google sign-in enforces
-                            # (handle_google_redirect() below) -- applied here too
-                            # per explicit request, as a defense-in-depth check.
-                            # Local accounts are admin-provisioned (there's no
-                            # self-service sign-up for this login path), so this
-                            # should never actually trip in normal use; it's a
-                            # safety net, not the primary gate.
-                            domain = clean_email.rsplit('@', 1)[-1] if '@' in clean_email else ''
-                            if domain not in ALLOWED_GOOGLE_DOMAINS and clean_email not in GOOGLE_EXTRA_ALLOWED_EMAILS:
-                                _login_bar.empty()
-                                st.session_state.is_signing_in = False
-                                st.error('This account is not on an authorised domain. Contact an administrator.',
-                                          icon=':material/block:')
-                            elif account.get('totp_secret'):
+                            if account.get('totp_secret'):
                                 # Password's right, but this account has 2FA on --
                                 # not authenticated yet. Cleared rather than left
                                 # showing: the wait from here is on the USER typing
@@ -774,11 +588,9 @@ def render_login():
         _render_auth_footer()
 
     if just_signed_in:
-        # Local accounts only reach here (Google's "Continue with Google"
-        # button hands off to st.login()/handle_google_redirect() instead,
-        # never setting just_signed_in) -- so this is exactly the point to
-        # start a persistent session (see restore_local_session()'s
-        # docstring for why local accounts need one at all). A missing
+        # This is exactly the point to start a persistent session (see
+        # restore_local_session()'s docstring for why local accounts need
+        # one at all). A missing
         # token (create_local_session() returned None -- DB unreachable)
         # just means this login won't survive a restart; it's still a
         # perfectly valid signed-in session for as long as this server
@@ -796,66 +608,4 @@ def render_login():
         render_transition_spinner('Signing in')
         page.empty()
         st.rerun()
-    st.stop()
-
-
-def render_request_access(email: str, name: str):
-    """Shown when a Google sign-in is from an allowed domain but has no
-    `users` DB row at all yet -- offers to submit an access request,
-    which shows up on the Administrator-only Access Requests page
-    (app.py) for someone to approve or deny. Renders and stops the
-    script, same as render_login()."""
-    _render_auth_shell()
-
-    with st.container(key='login_card'):
-        st.markdown("**Request access**")
-        st.caption(f'{email} isn\'t set up yet. Submit a request below and an '
-                   f'administrator will review it; you\'ll be able to sign in as '
-                   f'soon as it\'s approved.')
-        if st.button('Request access', type='primary', icon=':material/send:', width='stretch'):
-            request_access(email, name)
-            st.rerun()
-        if st.button('Back to sign in', width='stretch'):
-            st.logout()
-
-    _render_auth_footer()
-    st.stop()
-
-
-def render_pending_access(email: str):
-    """Shown on every sign-in attempt while a request is still awaiting
-    an administrator's decision -- no action to take here but wait, or
-    back out. Renders and stops the script, same as render_login()."""
-    _render_auth_shell()
-
-    with st.container(key='login_card'):
-        st.markdown("**Request pending**")
-        st.caption(f'Your access request for {email} is waiting on an administrator '
-                   f'to review it. You\'ll be able to sign in as soon as it\'s approved '
-                   f'-- check back soon.')
-        if st.button('Back to sign in', width='stretch'):
-            st.logout()
-
-    _render_auth_footer()
-    st.stop()
-
-
-def render_denied_access(email: str, name: str):
-    """Shown when an administrator has declined the request -- offers to
-    submit a fresh one (request_access() resets a 'denied' row back to
-    'pending', see its own docstring in db.py). Renders and stops the
-    script, same as render_login()."""
-    _render_auth_shell()
-
-    with st.container(key='login_card'):
-        st.markdown("**Access denied**")
-        st.caption(f'Your access request for {email} was declined by an administrator. '
-                   f'If you believe this was a mistake, you can submit a new request.')
-        if st.button('Request access again', icon=':material/send:', width='stretch'):
-            request_access(email, name)
-            st.rerun()
-        if st.button('Back to sign in', width='stretch'):
-            st.logout()
-
-    _render_auth_footer()
     st.stop()

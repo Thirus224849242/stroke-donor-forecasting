@@ -5,30 +5,21 @@ from pathlib import Path
 
 def _bootstrap_secrets_from_env():
     """Streamlit Cloud and local dev provide secrets via a .streamlit/
-    secrets.toml file; hosts like Hugging Face Spaces provide them as plain
-    environment variables (Repository secrets) instead, and st.login()/
-    st.secrets only ever read from the TOML file -- there's no built-in way
-    to point them at env vars directly. If a real secrets.toml already
-    exists, this does nothing. Otherwise, if the expected env vars are
-    present, it writes one -- regenerated fresh on every container start,
-    never committed to git, so real secrets never touch the repo either way.
-    """
+    secrets.toml file; hosts like Azure App Service or Hugging Face Spaces
+    provide them as plain environment variables instead, and st.secrets only
+    ever reads from the TOML file -- there's no built-in way to point it at
+    env vars directly. If a real secrets.toml already exists, this does
+    nothing. Otherwise, if DATABASE_URL is present, it writes one --
+    regenerated fresh on every container start, never committed to git, so
+    the real value never touches the repo either way."""
     secrets_path = Path(__file__).parent / '.streamlit' / 'secrets.toml'
     if secrets_path.exists():
         return
-    client_id = os.environ.get('GOOGLE_CLIENT_ID', '')
     database_url = os.environ.get('DATABASE_URL', '')
-    if not client_id and not database_url:
-        return  # nothing to bootstrap; app runs with those features disabled
+    if not database_url:
+        return  # nothing to bootstrap; app runs with that feature disabled
     secrets_path.parent.mkdir(parents=True, exist_ok=True)
     secrets_path.write_text(
-        '[auth]\n'
-        f'redirect_uri = "{os.environ.get("GOOGLE_REDIRECT_URI", "")}"\n'
-        f'cookie_secret = "{os.environ.get("GOOGLE_COOKIE_SECRET", "")}"\n'
-        f'client_id = "{client_id}"\n'
-        f'client_secret = "{os.environ.get("GOOGLE_CLIENT_SECRET", "")}"\n'
-        'server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"\n'
-        '\n'
         '[database]\n'
         f'url = "{database_url}"\n'
     )
@@ -49,16 +40,15 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from auth import (
-    GOOGLE_ADMIN_EMAILS, complete_sign_out, handle_google_redirect, init_session_state, initials, render_login,
-    render_transition_spinner, restore_local_session,
+    complete_sign_out, init_session_state, initials, render_login, render_transition_spinner,
+    restore_local_session,
 )
 from branding import TITLE_LOGO_PATH
 from db import (
-    clear_totp_secret, create_local_account, db_configured, decide_access_request, delete_all_dashboard_runs,
-    delete_dashboard_run, delete_local_account, delete_user, get_local_account, list_approved_users,
-    list_dashboard_runs, list_denied_users, list_local_accounts, list_pending_requests, load_dashboard_run,
-    mark_runs_seen, revoke_user_access, save_dashboard_run, set_totp_secret, update_local_account_password,
-    update_local_account_profile, update_local_account_role, update_user_role, verify_password,
+    clear_totp_secret, create_local_account, db_configured, delete_all_dashboard_runs, delete_dashboard_run,
+    delete_local_account, get_local_account, list_dashboard_runs, list_local_accounts, load_dashboard_run,
+    mark_runs_seen, save_dashboard_run, set_totp_secret, update_local_account_password,
+    update_local_account_profile, update_local_account_role, verify_password,
 )
 # pipeline.* modules are deliberately NOT imported here at module level --
 # measured directly, importing them (they pull in scikit-learn, statsmodels,
@@ -851,8 +841,8 @@ def _render_profile_details_card(_email):
     above: toggling Edit/Cancel is a widget interaction, and without
     fragment isolation that fades the whole page the same way clicking
     Set up 2FA used to. Collapsed (read-only name/email) by default,
-    matching how the read-only Analyst/Administrator/Google branches
-    below already look -- Edit swaps in the same form this used to show
+    matching how the read-only Analyst/Administrator branch below already
+    looks -- Edit swaps in the same form this used to show
     unconditionally.
 
     _email is threaded in the same way _render_2fa_card's is; _user and
@@ -986,13 +976,11 @@ st.set_page_config(
 )
 
 # Checked (and, if set, handled -- rendering a loading screen and
-# stopping this run) before handle_google_redirect() or render_login()
-# get any chance to render dashboard-adjacent content -- see
-# complete_sign_out()'s own docstring in auth.py for why this needs to
-# run this early.
+# stopping this run) before render_login() gets any chance to render
+# dashboard-adjacent content -- see complete_sign_out()'s own docstring
+# in auth.py for why this needs to run this early.
 complete_sign_out()
 
-handle_google_redirect()
 restore_local_session()
 
 if not st.session_state.authenticated:
@@ -1103,8 +1091,8 @@ st.session_state.nav_loading = False
 # structural per-page difference) before the loader ever appeared.
 # Root-caused via a live DOM probe: render_sidebar() runs its own DB
 # reads on every single render, not just when navigating to the pages
-# they back -- count_new_runs()/count_pending_requests() for the Run
-# History/Users nav badges -- cached, but with a short TTL specifically
+# they back -- count_new_runs() for the Run History nav badge -- cached,
+# but with a short TTL specifically
 # because they run on every page's sidebar; a cache miss (typically
 # after the user's been reading a page for a while, letting that TTL
 # lapse -- exactly the pattern of pausing to read a dashboard before
@@ -3263,32 +3251,25 @@ elif page == 'Run History':
 # ══════════════════════════════════════════════════════════════════════════════
 # USERS
 # ══════════════════════════════════════════════════════════════════════════════
-# One unified account-management page -- used to be two separate pages
-# (Access Requests for Google sign-in, Local Accounts for email+password),
-# split by which table each login method's account lived in. Merged per
-# explicit request: a Super Admin manages every account from one place
-# regardless of how that person signs in, with full revoke/promote/demote
-# power over both, including restoring a Google user's access after
-# revoking it (see list_denied_users() in db.py -- previously a revoked
-# Google user simply vanished from every admin view with no way back
-# except the affected person re-requesting themselves).
+# Local (email+password) account management -- create, change role, reset
+# password, or delete. Google sign-in was removed from this app entirely;
+# every account is a local one now.
 elif page == 'Users':
     render_action_button_css()
     page_header('Administration', 'Users',
-                'Create and manage every sign-in account; Google and email+password alike. '
-                'Approve or deny new Google requests, change anyone\'s role, and revoke or '
-                'restore access. A signed-in user manages their own password and two-factor '
-                'authentication from their Profile page (account menu in the page header).',
+                'Create and manage every local (email+password) sign-in account, change '
+                'anyone\'s role, reset a password, or delete an account. A signed-in user '
+                'manages their own password and two-factor authentication from their Profile '
+                'page (account menu in the page header).',
                 meta=page_meta)
 
-    # Super-Admin-only -- grants/revokes/promotes account access for
-    # BOTH login methods. Not just Administrator any more: this page can
-    # hand out Administrator (and Super Admin) itself, so an ordinary
-    # Administrator having access to it would let them promote themselves
-    # or anyone else. The sidebar already hides this page's nav entry
-    # accordingly (see render_sidebar()'s is_super_admin filter); this is
-    # the defense-in-depth backstop in case session_state.page ever ends
-    # up here some other way.
+    # Super-Admin-only -- this page can hand out Administrator (and Super
+    # Admin) itself, so an ordinary Administrator having access to it
+    # would let them promote themselves or anyone else. The sidebar
+    # already hides this page's nav entry accordingly (see
+    # render_sidebar()'s is_super_admin filter); this is the
+    # defense-in-depth backstop in case session_state.page ever ends up
+    # here some other way.
     if (st.session_state.user or {}).get('role') != 'Super Admin':
         with card():
             st.markdown(f"""
@@ -3313,8 +3294,6 @@ elif page == 'Users':
                 </div>
                 <div style="font-size:12.5px;color:{ui.MIST};max-width:480px;margin:0 auto;">
                     No database connection is configured, so there's no account store to manage.
-                    Anyone on an allowed Google domain can sign in directly until one is set up
-                    (see handle_google_redirect() in auth.py).
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -3323,94 +3302,10 @@ elif page == 'Users':
 
     current_email = (st.session_state.user or {}).get('email', '')
 
-    # ── Pending Google requests ──
-    pending = list_pending_requests()
-
-    if pending.empty:
-        with card():
-            st.markdown(f"""
-            <div style="text-align:center;padding:28px;">
-                <div style="font-size:14px;font-weight:700;color:{ui.TEXT};margin-bottom:6px;">
-                    No pending requests
-                </div>
-                <div style="font-size:12.5px;color:{ui.MIST};max-width:480px;margin:0 auto;">
-                    New Google sign-in requests from allowed domains will show up here.
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        pending['requested_at'] = pd.to_datetime(pending['requested_at']).dt.tz_localize('UTC').dt.tz_convert(APP_TIMEZONE)
-        with card(f'{len(pending)} pending', 'Google sign-in requests; oldest first'):
-            for i, row in pending.iterrows():
-                rc1, rc2, rc3 = st.columns([3, 2, 2], vertical_alignment='center')
-                with rc1:
-                    st.markdown(f"**{row['name'] or row['email']}**")
-                    st.caption(row['email'])
-                with rc2:
-                    st.caption(f"Requested {row['requested_at'].strftime('%d %b %Y, %H:%M')}")
-                with rc3:
-                    ac1, ac2 = st.columns(2)
-                    with ac1:
-                        if st.button('Approve', key=f"approve_{row['email']}", icon=':material/check:',
-                                     type='primary', width='stretch'):
-                            decide_access_request(
-                                row['email'], approve=True,
-                                decided_by=(st.session_state.user or {}).get('email', ''),
-                            )
-                            st.rerun()
-                    with ac2:
-                        if st.button('Deny', key=f"deny_{row['email']}", icon=':material/close:',
-                                     width='stretch'):
-                            decide_access_request(
-                                row['email'], approve=False,
-                                decided_by=(st.session_state.user or {}).get('email', ''),
-                            )
-                            st.rerun()
-                if i != pending.index[-1]:
-                    st.markdown(f'<div style="height:1px;background:{ui.LINE};margin:10px 0;"></div>',
-                                unsafe_allow_html=True)
-
-    st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
-
-    # ── All accounts -- Google and local, one combined list, per explicit
-    # request (used to be two separate cards split by login method).
-    # Sorted by most recent activity (decided_at for Google, created_at
-    # for local) so the newest change to anyone's access sits at the top
-    # regardless of which table it actually lives in -- the split is
-    # invisible here, surfaced only via the small type pill next to each
-    # row's role, and in which action buttons that row gets (Role/Revoke
-    # for Google, Manage/Delete for local -- the two tables support
-    # different operations, so the actions can't be identical, only the
-    # listing is unified). ──
-    approved = list_approved_users()
+    # ── All local accounts ──
     accounts = list_local_accounts()
 
-    # Built as plain dicts rather than a pandas assign()/concat() -- both
-    # list_approved_users() and list_local_accounts() fall back to a bare,
-    # columnless pd.DataFrame() on a query error (see their own docstrings
-    # in db.py), and indexing a specific column out of THAT would raise,
-    # not just render an empty state. A plain Python list sidesteps that
-    # entirely: iterrows() over a genuinely columnless DataFrame just
-    # yields nothing, same as an ordinary empty result.
-    combined_rows = []
-    for _, r in approved.iterrows():
-        combined_rows.append({
-            'email': r['email'], 'name': r['name'], 'role': r['role'], 'kind': 'Google',
-            'date': to_local(r['decided_at']) if pd.notna(r['decided_at']) else None,
-        })
-    for _, r in accounts.iterrows():
-        combined_rows.append({
-            'email': r['email'], 'name': r['name'], 'role': r['role'], 'kind': 'Local',
-            'date': to_local(r['created_at']) if pd.notna(r['created_at']) else None,
-        })
-    # Fallback is tz-aware, same reasoning as _min_at above -- these 'date'
-    # values are now tz-aware (via to_local()), and sorting a bare (naive)
-    # pd.Timestamp.min alongside them would raise.
-    combined_rows.sort(key=lambda x: x['date'] or pd.Timestamp.min.tz_localize(APP_TIMEZONE), reverse=True)
-    all_accounts = pd.DataFrame(combined_rows, columns=['email', 'name', 'role', 'kind', 'date'])
-    all_accounts = all_accounts.rename(columns={'kind': '_kind', 'date': '_date'})
-
-    if all_accounts.empty:
+    if accounts.empty:
         with card():
             st.markdown(f"""
             <div style="text-align:center;padding:28px;">
@@ -3418,18 +3313,15 @@ elif page == 'Users':
                     No accounts yet
                 </div>
                 <div style="font-size:12.5px;color:{ui.MIST};max-width:480px;margin:0 auto;">
-                    Approved Google sign-ins and local accounts you create below will show
-                    up here together, with controls to change role, reset password, revoke,
-                    or delete.
+                    Local accounts you create below will show up here, with controls to
+                    change role, reset password, or delete.
                 </div>
             </div>
             """, unsafe_allow_html=True)
     else:
-        with card(f'{len(all_accounts)} accounts',
-                   'Google and local sign-ins; change role, reset password, revoke, or delete'):
-            last_idx = len(all_accounts) - 1
-            for i, row in all_accounts.iterrows():
-                is_google = row['_kind'] == 'Google'
+        with card(f'{len(accounts)} accounts', 'Change role, reset password, or delete'):
+            last_idx = len(accounts) - 1
+            for i, row in accounts.iterrows():
                 is_self = row['email'] == current_email
                 uc1, uc2, uc3 = st.columns([3, 2, 3], vertical_alignment='center')
                 with uc1:
@@ -3439,154 +3331,103 @@ elif page == 'Users':
                     st.markdown(f"**{label}**")
                     st.caption(row['email'])
                 with uc2:
-                    pill_class = 'sf-pill-blue' if is_google else 'sf-pill-gray'
-                    st.markdown(f'<span class="sf-pill {pill_class}">{row["_kind"]}</span>',
-                                unsafe_allow_html=True)
-                    verb = 'since' if is_google else 'created'
-                    detail = (f"{row['role']} · {verb} {row['_date'].strftime('%d %b %Y')}"
-                              if pd.notna(row['_date']) else row['role'])
+                    _created = to_local(row['created_at']) if pd.notna(row['created_at']) else None
+                    detail = (f"{row['role']} · created {_created.strftime('%d %b %Y')}"
+                              if _created else row['role'])
                     st.caption(detail)
                 with uc3:
                     vc1, vc2 = st.columns(2)
-                    if is_google:
-                        with vc1:
-                            with st.popover('Role', icon=':material/settings:', width='stretch',
-                                              disabled=is_self):
-                                role_options = ['Analyst', 'Administrator', 'Super Admin']
-                                new_role_pick = st.selectbox(
-                                    'Role', role_options,
-                                    index=role_options.index(row['role']) if row['role'] in role_options else 0,
-                                    key=f"user_role_pick_{row['email']}",
+                    with vc1:
+                        # Manage (password reset + role change) is disabled
+                        # for your own row -- role change is the risk (a
+                        # Super Admin could demote or delete their own
+                        # only-Super-Admin account and lock everyone out,
+                        # self included); password reset is bundled into
+                        # the same popover, so it's disabled along with it,
+                        # not because it's risky, but a self-service
+                        # "Change password" already exists in the account
+                        # menu (page header) for exactly that case.
+                        with st.popover('Manage', icon=':material/settings:', width='stretch',
+                                          disabled=is_self):
+                            with st.form(f"reset_pw_form_{row['email']}", border=False):
+                                reset_pw = st.text_input(
+                                    'New password', type='password', key=f"reset_pw_input_{row['email']}",
                                 )
-                                if new_role_pick != row['role']:
-                                    if st.button('Update role', key=f"user_role_update_{row['email']}",
-                                                 icon=':material/check:', width='stretch'):
-                                        if update_user_role(row['email'], new_role_pick):
-                                            st.success('Role updated.', icon=':material/check_circle:')
-                                            st.rerun()
-                                        else:
-                                            st.error('Could not update that role.', icon=':material/error:')
-                        with vc2:
-                            # Two-step confirm -- revoking access is
-                            # destructive (see revoke_user_access()'s own
-                            # docstring for why this sets status='denied'
-                            # rather than deleting the row), not a single
-                            # misclick away. Can't revoke your own access
-                            # from here -- same reasoning as not being
-                            # able to change your own role, avoids locking
-                            # yourself out by accident.
-                            confirm_key = f"confirm_revoke_{row['email']}"
-                            if is_self:
-                                st.button('Revoke', key=f"revoke_btn_{row['email']}",
-                                          icon=':material/block:', width='stretch', disabled=True)
-                            elif st.session_state.get(confirm_key):
-                                if st.button('Confirm', key=f"confirm_revoke_btn_{row['email']}",
-                                             icon=':material/block:', width='stretch'):
-                                    revoke_user_access(row['email'], decided_by=current_email)
-                                    st.session_state.pop(confirm_key, None)
-                                    st.rerun()
-                            else:
-                                if st.button('Revoke', key=f"revoke_btn_{row['email']}",
-                                             icon=':material/block:', width='stretch'):
-                                    st.session_state[confirm_key] = True
-                                    st.rerun()
-                    else:
-                        with vc1:
-                            # Manage (password reset + role change) is
-                            # disabled for your own row, same as Google's
-                            # Role popover above -- role change is the
-                            # risk (a Super Admin could demote or delete
-                            # their own only-Super-Admin account and lock
-                            # everyone out, self included); password reset
-                            # is bundled into the same popover, so it's
-                            # disabled along with it, not because it's
-                            # risky, but a self-service "Change password"
-                            # already exists in the account menu (page
-                            # header) for exactly that case.
-                            with st.popover('Manage', icon=':material/settings:', width='stretch',
-                                              disabled=is_self):
-                                with st.form(f"reset_pw_form_{row['email']}", border=False):
-                                    reset_pw = st.text_input(
-                                        'New password', type='password', key=f"reset_pw_input_{row['email']}",
-                                    )
-                                    reset_submitted = st.form_submit_button('Set new password',
-                                                                              icon=':material/check:', width='stretch')
-                                if reset_submitted:
-                                    if len(reset_pw) < 8:
-                                        st.error('Password must be at least 8 characters.', icon=':material/error:')
-                                    elif update_local_account_password(row['email'], reset_pw):
-                                        st.success('Password reset.', icon=':material/check_circle:')
-                                    else:
-                                        st.error('Could not reset that password.', icon=':material/error:')
+                                reset_submitted = st.form_submit_button('Set new password',
+                                                                          icon=':material/check:', width='stretch')
+                            if reset_submitted:
+                                if len(reset_pw) < 8:
+                                    st.error('Password must be at least 8 characters.', icon=':material/error:')
+                                elif update_local_account_password(row['email'], reset_pw):
+                                    st.success('Password reset.', icon=':material/check_circle:')
+                                else:
+                                    st.error('Could not reset that password.', icon=':material/error:')
 
+                            st.markdown(f'<div style="height:1px;background:{ui.LINE};margin:10px 0;"></div>',
+                                        unsafe_allow_html=True)
+
+                            role_options = ['Analyst', 'Administrator', 'Super Admin']
+                            new_role_pick = st.selectbox(
+                                'Role', role_options, index=role_options.index(row['role'])
+                                if row['role'] in role_options else 0,
+                                key=f"role_pick_{row['email']}",
+                            )
+                            if new_role_pick != row['role']:
+                                if st.button('Update role', key=f"role_update_{row['email']}",
+                                             icon=':material/check:', width='stretch'):
+                                    if update_local_account_role(row['email'], new_role_pick):
+                                        st.success('Role updated.', icon=':material/check_circle:')
+                                        st.rerun()
+                                    else:
+                                        st.error('Could not update that role.', icon=':material/error:')
+
+                            # Recovery path for someone locked out after
+                            # losing their authenticator device -- a TOTP
+                            # secret is never displayed or exported once
+                            # set (see db.py's set_totp_secret()), so
+                            # there's no way for them to get back in
+                            # without either this or a whole new account.
+                            # Only shown at all when totp_enabled is
+                            # actually true for this row -- no button to
+                            # click for the (default) case where 2FA was
+                            # never turned on.
+                            if row.get('totp_enabled'):
                                 st.markdown(f'<div style="height:1px;background:{ui.LINE};margin:10px 0;"></div>',
                                             unsafe_allow_html=True)
-
-                                role_options = ['Analyst', 'Administrator', 'Super Admin']
-                                new_role_pick = st.selectbox(
-                                    'Role', role_options, index=role_options.index(row['role'])
-                                    if row['role'] in role_options else 0,
-                                    key=f"role_pick_{row['email']}",
-                                )
-                                if new_role_pick != row['role']:
-                                    if st.button('Update role', key=f"role_update_{row['email']}",
-                                                 icon=':material/check:', width='stretch'):
-                                        if update_local_account_role(row['email'], new_role_pick):
-                                            st.success('Role updated.', icon=':material/check_circle:')
-                                            st.rerun()
-                                        else:
-                                            st.error('Could not update that role.', icon=':material/error:')
-
-                                # Recovery path for someone locked out after
-                                # losing their authenticator device -- a TOTP
-                                # secret is never displayed or exported once
-                                # set (see db.py's set_totp_secret()), so
-                                # there's no way for them to get back in
-                                # without either this or a whole new account.
-                                # Only shown at all when totp_enabled is
-                                # actually true for this row -- no button to
-                                # click for the (default) case where 2FA was
-                                # never turned on.
-                                if row.get('totp_enabled'):
-                                    st.markdown(f'<div style="height:1px;background:{ui.LINE};margin:10px 0;"></div>',
-                                                unsafe_allow_html=True)
-                                    st.caption('Two-factor authentication is enabled for this account.')
-                                    if st.button('Disable their two-factor authentication',
-                                                 key=f"totp_admin_disable_{row['email']}",
-                                                 icon=':material/remove_moderator:', width='stretch'):
-                                        if clear_totp_secret(row['email']):
-                                            st.success('Two-factor authentication disabled.',
-                                                       icon=':material/check_circle:')
-                                            st.rerun()
-                                        else:
-                                            st.error('Could not disable two-factor authentication right now.',
-                                                      icon=':material/error:')
-                        with vc2:
-                            # Same two-step confirm pattern as Run
-                            # History's delete-run action -- a destructive
-                            # action, not a single misclick away. Can't
-                            # delete your own account from here -- same
-                            # reasoning as Google's Revoke being disabled
-                            # for self above: deleting the account you're
-                            # currently signed in as would sign you out
-                            # mid-session with no way back in as that
-                            # identity, and if it were the only Super
-                            # Admin account, no one left could undo it.
-                            confirm_key = f"confirm_delete_local_{row['email']}"
-                            if is_self:
-                                st.button('Delete', key=f"delete_btn_{row['email']}",
-                                          icon=':material/delete:', width='stretch', disabled=True)
-                            elif st.session_state.get(confirm_key):
-                                if st.button('Confirm', key=f"confirm_delete_btn_{row['email']}",
-                                             icon=':material/delete_forever:', width='stretch'):
-                                    delete_local_account(row['email'])
-                                    st.session_state.pop(confirm_key, None)
-                                    st.rerun()
-                            else:
-                                if st.button('Delete', key=f"delete_btn_{row['email']}",
-                                             icon=':material/delete:', width='stretch'):
-                                    st.session_state[confirm_key] = True
-                                    st.rerun()
+                                st.caption('Two-factor authentication is enabled for this account.')
+                                if st.button('Disable their two-factor authentication',
+                                             key=f"totp_admin_disable_{row['email']}",
+                                             icon=':material/remove_moderator:', width='stretch'):
+                                    if clear_totp_secret(row['email']):
+                                        st.success('Two-factor authentication disabled.',
+                                                   icon=':material/check_circle:')
+                                        st.rerun()
+                                    else:
+                                        st.error('Could not disable two-factor authentication right now.',
+                                                  icon=':material/error:')
+                    with vc2:
+                        # Two-step confirm -- deleting is destructive, not
+                        # a single misclick away. Can't delete your own
+                        # account from here -- deleting the account you're
+                        # currently signed in as would sign you out
+                        # mid-session with no way back in as that
+                        # identity, and if it were the only Super Admin
+                        # account, no one left could undo it.
+                        confirm_key = f"confirm_delete_local_{row['email']}"
+                        if is_self:
+                            st.button('Delete', key=f"delete_btn_{row['email']}",
+                                      icon=':material/delete:', width='stretch', disabled=True)
+                        elif st.session_state.get(confirm_key):
+                            if st.button('Confirm', key=f"confirm_delete_btn_{row['email']}",
+                                         icon=':material/delete_forever:', width='stretch'):
+                                delete_local_account(row['email'])
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+                        else:
+                            if st.button('Delete', key=f"delete_btn_{row['email']}",
+                                         icon=':material/delete:', width='stretch'):
+                                st.session_state[confirm_key] = True
+                                st.rerun()
                 if i != last_idx:
                     st.markdown(f'<div style="height:1px;background:{ui.LINE};margin:10px 0;"></div>',
                                 unsafe_allow_html=True)
@@ -3631,72 +3472,6 @@ elif page == 'Users':
                 st.error('Could not create that account; that email may already have one.',
                           icon=':material/error:')
 
-    st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
-
-    # ── Revoked Google access -- restore directly, no dependency on the
-    # revoked person re-requesting themselves (see list_denied_users()'s
-    # own docstring in db.py for why this section exists at all). Kept
-    # separate from the unified list above rather than shown inline with
-    # a "revoked" tag, so a Super Admin skimming "who currently has
-    # access" isn't scanning past accounts that don't. ──
-    denied = list_denied_users()
-    if not denied.empty:
-        with card(f'{len(denied)} revoked', 'Google sign-ins with revoked access; restore if needed'):
-            for i, row in denied.iterrows():
-                dc1, dc2, dc3, dc4 = st.columns([3, 2, 1.4, 1.4], vertical_alignment='center')
-                with dc1:
-                    st.markdown(f"**{row['name'] or row['email']}**")
-                    st.caption(row['email'])
-                with dc2:
-                    decided = to_local(row['decided_at']) if pd.notna(row['decided_at']) else None
-                    detail = f"Was {row['role']} · revoked {decided.strftime('%d %b %Y')}" if decided else f"Was {row['role']}"
-                    st.caption(detail)
-                with dc3:
-                    # Not destructive (unlike Revoke above) -- restoring
-                    # someone's access is easy to undo again with another
-                    # click, so this skips the two-step confirm pattern.
-                    # Restores at whatever role they held before being
-                    # revoked (decide_access_request() only ever touches
-                    # status, never role -- see its own docstring).
-                    if st.button('Restore access', key=f"restore_{row['email']}",
-                                 icon=':material/how_to_reg:', width='stretch'):
-                        decide_access_request(row['email'], approve=True, decided_by=current_email)
-                        st.rerun()
-                with dc4:
-                    # Hard delete, unlike Restore -- permanently removes
-                    # this row rather than just toggling status. Refused
-                    # outright for anyone still in GOOGLE_ADMIN_EMAILS: see
-                    # delete_user()'s own docstring in db.py -- deleting
-                    # that row makes handle_google_redirect() treat them as
-                    # brand-new on their next Google sign-in and silently
-                    # re-grant them Super Admin from that bootstrap list,
-                    # undoing the revocation entirely. Click-to-arm confirm
-                    # (same pattern as "Delete this run" on Run History),
-                    # not a typed phrase -- this is a single row, not the
-                    # bulk action that warrants that stricter bar.
-                    _is_admin_seed = row['email'] in GOOGLE_ADMIN_EMAILS
-                    _del_key = f"confirm_delete_user_{row['email']}"
-                    if _is_admin_seed:
-                        st.button('Delete', key=f"delete_{row['email']}", icon=':material/delete_forever:',
-                                  width='stretch', disabled=True,
-                                  help='This email is in GOOGLE_ADMIN_EMAILS (auth.py) -- deleting it would '
-                                       'let them silently regain Super Admin on their next Google sign-in. '
-                                       'Remove it from that list first if you really want to delete this row.')
-                    elif st.session_state.get(_del_key):
-                        if st.button('Confirm', key=f"confirm_delete_{row['email']}",
-                                      icon=':material/delete_forever:', width='stretch'):
-                            delete_user(row['email'])
-                            st.session_state.pop(_del_key, None)
-                            st.rerun()
-                    else:
-                        if st.button('Delete', key=f"delete_{row['email']}", icon=':material/delete_forever:',
-                                      width='stretch'):
-                            st.session_state[_del_key] = True
-                            st.rerun()
-                if i != denied.index[-1]:
-                    st.markdown(f'<div style="height:1px;background:{ui.LINE};margin:10px 0;"></div>',
-                                unsafe_allow_html=True)
-
 
 elif page == 'Profile':
     # Reached only from the account menu (page_header(), ui.py) -- deliberately
@@ -3712,10 +3487,8 @@ elif page == 'Profile':
     # all. See ui.py's page_header() docstring/comments for that history.
     render_action_button_css()
     _user = st.session_state.user or {}
-    _auth_method = st.session_state.get('auth_method')
-    _is_local = _auth_method == 'password'
     _email = _user.get('email', '')
-    _account = get_local_account(_email) if _is_local else None
+    _account = get_local_account(_email)
 
     page_header('Account', 'Profile', 'Your account details, sign-in security, and password.')
 
@@ -3735,7 +3508,7 @@ elif page == 'Profile':
         st.markdown('<div style="height:1px;background:{0};margin:14px 0 10px;"></div>'.format(ui.LINE),
                     unsafe_allow_html=True)
         role_color = {'Super Admin': 'amber', 'Administrator': 'blue', 'Analyst': 'gray'}.get(_user.get('role'), 'gray')
-        method_pill = pill('Local sign-in', 'green') if _is_local else pill('Google sign-in', 'blue')
+        method_pill = pill('Local sign-in', 'green')
         member_since = (
             f" · Member since {to_local(_account['created_at']):%d %b %Y}"
             if _account and _account.get('created_at') else ''
@@ -3746,14 +3519,11 @@ elif page == 'Profile':
             unsafe_allow_html=True,
         )
 
-    # Profile-details editing (name/email) -- Super Admin, local sign-in
-    # only. Google's own name/email is Google's identity, not this app's
-    # to change (see auth.py's handle_google_redirect() -- it's re-read
-    # from the OAuth payload on every sign-in, there's nothing here that
-    # editing it would even persist against); Analyst/Administrator local
-    # accounts are admin-provisioned the same way passwords are, per the
-    # user's own explicit spec for this page -- only a Super Admin edits
-    # their own name/email, everyone else just sees it.
+    # Profile-details editing (name/email) -- Super Admin only.
+    # Analyst/Administrator local accounts are admin-provisioned the same
+    # way passwords are, per the user's own explicit spec for this page --
+    # only a Super Admin edits their own name/email, everyone else just
+    # sees it.
     #
     # Side by side, not stacked -- these three (Profile details, Change
     # password, Two-factor authentication) used to be full-width cards
@@ -3761,9 +3531,7 @@ elif page == 'Profile':
     # Set up 2FA, all width='stretch') stretched the full page width for
     # no reason -- reported live as looking wrong. st.columns() narrows
     # each card to a third of the page, so the buttons inside stretch to
-    # something sane instead. Two columns, not three, on the Google branch
-    # below -- there's no separate password/2FA card to give a third
-    # column to there, just the one combined "Sign-in security" notice.
+    # something sane instead.
     #
     # Equal height AT REST, not tied together while expanding -- reported
     # live, twice now: a first attempt stretched every card to match its
@@ -3816,7 +3584,7 @@ elif page == 'Profile':
         soaks up all the leftover space above it, flush against the
         bottom every time. Scoped to ":has(.stButton)" so it only grabs
         cards whose last element actually IS a button -- the read-only
-        Profile details variant (Analyst/Administrator/Google) ends on a
+        Profile details variant (Analyst/Administrator) ends on a
         plain text block instead, and that one is left in its natural
         top-packed flow. */
         .st-key-profile_settings_row [data-testid="stVerticalBlock"][overflow="visible"]
@@ -3825,45 +3593,24 @@ elif page == 'Profile':
         }
         </style>
         """)
-        if _is_local:
-            col_profile, col_pw, col_2fa = st.columns(3)
-            with col_profile:
-                if _user.get('role') == 'Super Admin':
-                    _render_profile_details_card(_email)
-                else:
-                    with card(title='Profile details'):
-                        st.caption('Only a Super Admin can change your name or email. Contact one if these '
-                                   'need updating.')
-                        st.markdown(f"""
-                        <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
-                            <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
-                        <div style="margin-top:10px;"><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
-                            <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
-                        """, unsafe_allow_html=True)
-            # Password and two-factor auth are both local-sign-in-only -- a
-            # Google account has no password in this app at all, and its own
-            # 2FA (if any) is Google's, not ours (same reasoning as the
-            # docstring history above).
-            with col_pw:
-                _render_change_password_card(_email)
-            with col_2fa:
-                _render_2fa_card(_email)
-        else:
-            col_profile, col_sec = st.columns(2)
-            with col_profile:
+        col_profile, col_pw, col_2fa = st.columns(3)
+        with col_profile:
+            if _user.get('role') == 'Super Admin':
+                _render_profile_details_card(_email)
+            else:
                 with card(title='Profile details'):
-                    st.caption('Your name and email come from Google and are managed in your Google '
-                               'account, not here.')
+                    st.caption('Only a Super Admin can change your name or email. Contact one if these '
+                               'need updating.')
                     st.markdown(f"""
                     <div><div class="sf-eyebrow" style="margin-bottom:2px;">Name</div>
                         <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_user.get('name', '')}</div></div>
                     <div style="margin-top:10px;"><div class="sf-eyebrow" style="margin-bottom:2px;">Email</div>
                         <div style="font-size:13px;font-weight:600;color:{ui.TEXT};">{_email}</div></div>
                     """, unsafe_allow_html=True)
-            with col_sec:
-                with card(title='Sign-in security'):
-                    st.caption('Password and two-factor authentication are managed in your Google account, '
-                               'not here; your access to this app is tied to your Google sign-in.')
+        with col_pw:
+            _render_change_password_card(_email)
+        with col_2fa:
+            _render_2fa_card(_email)
 
 
 # Matches the placeholder opened above (search _signing_in_overlay_ph) --
