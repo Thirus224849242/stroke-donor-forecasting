@@ -1683,19 +1683,13 @@ def render_topbar():
                 </style>""")
             with st.popover('Notifications', icon=':material/notifications:', key='sf_notif_pop'):
                 st.markdown('<div class="sf-notif-head">Notifications</div>', unsafe_allow_html=True)
-                if new_runs:
-                    _lbl = f"{new_runs} new pipeline run" + ('s' if new_runs != 1 else '')
+                if notif_total:
+                    _lbl = f"{notif_total} new pipeline run" + ('s' if notif_total != 1 else '')
                     if st.button(_lbl, key='sf_notif_runs', icon=':material/history:', width='stretch'):
                         st.session_state.page = 'Run History'
                         st.session_state.nav_loading = True
                         st.rerun()
-                if pending:
-                    _lbl = f"{pending} pending access request" + ('s' if pending != 1 else '')
-                    if st.button(_lbl, key='sf_notif_req', icon=':material/person_add:', width='stretch'):
-                        st.session_state.page = 'Users'
-                        st.session_state.nav_loading = True
-                        st.rerun()
-                if not notif_total:
+                else:
                     st.markdown('<div class="sf-notif-empty">Nothing new</div>', unsafe_allow_html=True)
 
             # The round avatar is a ::before pseudo-element carrying the
