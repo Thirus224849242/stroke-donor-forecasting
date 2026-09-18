@@ -1021,6 +1021,35 @@ def revoke_user_access(email: str, decided_by: str) -> bool:
         return False
 
 
+def delete_user(email: str) -> bool:
+    """Permanently removes a Google-sign-in user's row from `users`.
+    Distinct from revoke_user_access() above on purpose: that one is a
+    soft delete (status='denied') specifically BECAUSE a hard delete has a
+    sharp edge -- handle_google_redirect() (auth.py) only ever checks
+    GOOGLE_ADMIN_EMAILS when a row is entirely ABSENT, so deleting a row
+    for an email still on that bootstrap list would make them look
+    brand-new again and silently re-grant them Super Admin on their very
+    next Google sign-in. app.py only offers this button for an already-
+    revoked user, and refuses it outright for anyone still in
+    GOOGLE_ADMIN_EMAILS -- this function itself doesn't re-check that (it
+    has no import of auth.py's list), so it trusts the caller to have
+    already gated it. Returns True on success."""
+    engine = get_engine()
+    if engine is None:
+        return False
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text('DELETE FROM users WHERE email = :email'), {'email': email})
+        list_approved_users.clear()
+        list_denied_users.clear()
+        list_pending_requests.clear()
+        return result.rowcount > 0
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return False
+
+
 def upsert_approved_user(email: str, name: str, role: str, decided_by: str) -> bool:
     """Used for admin logins, which skip the request-access queue
     entirely -- keeps `users` a complete record of everyone with access,

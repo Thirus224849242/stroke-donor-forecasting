@@ -49,15 +49,15 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from auth import (
-    complete_sign_out, handle_google_redirect, init_session_state, initials, render_login,
+    GOOGLE_ADMIN_EMAILS, complete_sign_out, handle_google_redirect, init_session_state, initials, render_login,
     render_transition_spinner, restore_local_session,
 )
 from branding import TITLE_LOGO_PATH
 from db import (
     clear_totp_secret, create_local_account, db_configured, decide_access_request, delete_all_dashboard_runs,
-    delete_dashboard_run, delete_local_account, get_local_account, list_approved_users, list_dashboard_runs,
-    list_denied_users, list_local_accounts, list_pending_requests, load_dashboard_run, mark_runs_seen,
-    revoke_user_access, save_dashboard_run, set_totp_secret, update_local_account_password,
+    delete_dashboard_run, delete_local_account, delete_user, get_local_account, list_approved_users,
+    list_dashboard_runs, list_denied_users, list_local_accounts, list_pending_requests, load_dashboard_run,
+    mark_runs_seen, revoke_user_access, save_dashboard_run, set_totp_secret, update_local_account_password,
     update_local_account_profile, update_local_account_role, update_user_role, verify_password,
 )
 # pipeline.* modules are deliberately NOT imported here at module level --
@@ -3643,7 +3643,7 @@ elif page == 'Users':
     if not denied.empty:
         with card(f'{len(denied)} revoked', 'Google sign-ins with revoked access; restore if needed'):
             for i, row in denied.iterrows():
-                dc1, dc2, dc3 = st.columns([3, 2, 2], vertical_alignment='center')
+                dc1, dc2, dc3, dc4 = st.columns([3, 2, 1.4, 1.4], vertical_alignment='center')
                 with dc1:
                     st.markdown(f"**{row['name'] or row['email']}**")
                     st.caption(row['email'])
@@ -3662,6 +3662,37 @@ elif page == 'Users':
                                  icon=':material/how_to_reg:', width='stretch'):
                         decide_access_request(row['email'], approve=True, decided_by=current_email)
                         st.rerun()
+                with dc4:
+                    # Hard delete, unlike Restore -- permanently removes
+                    # this row rather than just toggling status. Refused
+                    # outright for anyone still in GOOGLE_ADMIN_EMAILS: see
+                    # delete_user()'s own docstring in db.py -- deleting
+                    # that row makes handle_google_redirect() treat them as
+                    # brand-new on their next Google sign-in and silently
+                    # re-grant them Super Admin from that bootstrap list,
+                    # undoing the revocation entirely. Click-to-arm confirm
+                    # (same pattern as "Delete this run" on Run History),
+                    # not a typed phrase -- this is a single row, not the
+                    # bulk action that warrants that stricter bar.
+                    _is_admin_seed = row['email'] in GOOGLE_ADMIN_EMAILS
+                    _del_key = f"confirm_delete_user_{row['email']}"
+                    if _is_admin_seed:
+                        st.button('Delete', key=f"delete_{row['email']}", icon=':material/delete_forever:',
+                                  width='stretch', disabled=True,
+                                  help='This email is in GOOGLE_ADMIN_EMAILS (auth.py) -- deleting it would '
+                                       'let them silently regain Super Admin on their next Google sign-in. '
+                                       'Remove it from that list first if you really want to delete this row.')
+                    elif st.session_state.get(_del_key):
+                        if st.button('Confirm', key=f"confirm_delete_{row['email']}",
+                                      icon=':material/delete_forever:', width='stretch'):
+                            delete_user(row['email'])
+                            st.session_state.pop(_del_key, None)
+                            st.rerun()
+                    else:
+                        if st.button('Delete', key=f"delete_{row['email']}", icon=':material/delete_forever:',
+                                      width='stretch'):
+                            st.session_state[_del_key] = True
+                            st.rerun()
                 if i != denied.index[-1]:
                     st.markdown(f'<div style="height:1px;background:{ui.LINE};margin:10px 0;"></div>',
                                 unsafe_allow_html=True)
