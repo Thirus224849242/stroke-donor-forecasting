@@ -50,7 +50,7 @@ import streamlit as st
 
 from auth import (
     complete_sign_out, handle_google_redirect, init_session_state, initials, render_login,
-    render_transition_spinner,
+    render_transition_spinner, restore_local_session,
 )
 from branding import TITLE_LOGO_PATH
 from db import (
@@ -993,6 +993,7 @@ st.set_page_config(
 complete_sign_out()
 
 handle_google_redirect()
+restore_local_session()
 
 if not st.session_state.authenticated:
     render_login()

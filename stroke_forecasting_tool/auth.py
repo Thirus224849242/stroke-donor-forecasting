@@ -1,7 +1,10 @@
 ﻿import streamlit as st
 
 from branding import logo_data_uri
-from db import db_configured, get_local_account, get_user, request_access, upsert_approved_user, verify_password
+from db import (
+    LOCAL_SESSION_DAYS, create_local_session, db_configured, delete_local_session, get_local_account,
+    get_local_session, get_user, request_access, upsert_approved_user, verify_password,
+)
 
 # Local (email+password) login credentials used to live here as a plaintext
 # USERS dict -- the Critical finding from the security review. Moved to a
@@ -27,9 +30,20 @@ GOOGLE_ADMIN_EMAILS = {'admin@strokefoundation.org.au', 'thirumalreddyenugu@gmai
 # team.
 GOOGLE_EXTRA_ALLOWED_EMAILS = {'thirumalreddyenugu@gmail.com'}
 
+# Browser cookie name for a local account's persistent session (see
+# create_local_session() below and db.py's create_local_session()). Not
+# HttpOnly -- it's written via document.cookie from a plain <script>, since
+# Streamlit gives app code no way to attach a Set-Cookie response header --
+# so it's readable by any JS on this page. Holds only a random opaque
+# token (meaningless without the matching, server-only-visible row in
+# local_sessions), never a password or anything else sensitive, which is
+# the same trade every "remember me" cookie set client-side makes.
+LOCAL_SESSION_COOKIE = 'sf_local_session'
+
 SESSION_KEYS = [
     'master', 'forecast_df', 'monthly', 'mape',
-    'pipeline_run', 'page', 'authenticated', 'user', 'auth_method', 'pending_2fa', 'totp_setup_secret',
+    'pipeline_run', 'page', 'authenticated', 'user', 'auth_method', 'local_session_token',
+    'pending_2fa', 'totp_setup_secret',
     'totp_qr_cache', 'profile_details_editing', 'change_password_editing',
     'is_signing_in', 'is_signing_out',
     'ml_importances', 'ml_trend_slope',
@@ -188,6 +202,36 @@ def handle_google_redirect():
         'name': record.get('name') or name,
         'role': record.get('role') or 'Analyst',
     }
+
+
+def restore_local_session():
+    """Call once, early, on every run -- same spot as handle_google_redirect()
+    (app.py calls both, right after complete_sign_out()). Google sign-in
+    survives a server process restart for free: Streamlit's own signed
+    cookie backs st.user, and handle_google_redirect() above re-derives
+    session_state from it on the very next run. A local (email+password)
+    login has no such backing -- authenticated/user live only in this
+    session's server-memory session_state -- so a restart (e.g. triggered
+    by a long pipeline run's memory pressure) just logs that user out with
+    no way back except signing in again. This closes that gap: if this
+    run doesn't already have an authenticated session, check the browser
+    for the persistent-session cookie render_login() sets on a successful
+    local sign-in, and restore from it via db.py's get_local_session() if
+    it's still valid. Only ever fills in a MISSING session -- never runs
+    at all once one already exists, so it can't override a genuinely fresh
+    login or a deliberate sign-out."""
+    if st.session_state.authenticated:
+        return
+    token = st.context.cookies.get(LOCAL_SESSION_COOKIE)
+    if not token:
+        return
+    account = get_local_session(token)
+    if not account:
+        return
+    st.session_state.authenticated = True
+    st.session_state.auth_method = 'password'
+    st.session_state.user = account
+    st.session_state.local_session_token = token
 
 
 def initials(name: str) -> str:
@@ -362,6 +406,21 @@ def complete_sign_out():
     # app.py's _render_2fa_card().
     import time
     time.sleep(0.6)
+
+    # Revoke the persistent session server-side (not just clear the
+    # cookie below) so a local sign-out actually ends it -- otherwise the
+    # token in local_sessions would stay valid, and anyone who'd got hold
+    # of the cookie could keep using it, until it expired on its own.
+    # Read BEFORE the SESSION_KEYS wipe just below, which would otherwise
+    # clear local_session_token first (it's one of those keys) and leave
+    # nothing here to revoke.
+    if method == 'password':
+        delete_local_session(st.session_state.get('local_session_token'))
+        st.html(f"""
+        <script>
+        document.cookie = "{LOCAL_SESSION_COOKIE}=; path=/; max-age=0; SameSite=Lax";
+        </script>
+        """, unsafe_allow_javascript=True)
 
     for k in SESSION_KEYS:
         st.session_state[k] = None
@@ -715,6 +774,25 @@ def render_login():
         _render_auth_footer()
 
     if just_signed_in:
+        # Local accounts only reach here (Google's "Continue with Google"
+        # button hands off to st.login()/handle_google_redirect() instead,
+        # never setting just_signed_in) -- so this is exactly the point to
+        # start a persistent session (see restore_local_session()'s
+        # docstring for why local accounts need one at all). A missing
+        # token (create_local_session() returned None -- DB unreachable)
+        # just means this login won't survive a restart; it's still a
+        # perfectly valid signed-in session for as long as this server
+        # process keeps running, so nothing here blocks on it.
+        token = create_local_session(st.session_state.user['email'])
+        if token:
+            st.session_state.local_session_token = token
+            max_age = LOCAL_SESSION_DAYS * 24 * 60 * 60
+            st.html(f"""
+            <script>
+            document.cookie = "{LOCAL_SESSION_COOKIE}={token}; path=/; max-age={max_age}; SameSite=Lax"
+                + (location.protocol === "https:" ? "; Secure" : "");
+            </script>
+            """, unsafe_allow_javascript=True)
         render_transition_spinner('Signing in')
         page.empty()
         st.rerun()
