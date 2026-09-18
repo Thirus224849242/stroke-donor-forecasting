@@ -54,9 +54,9 @@ from auth import (
 )
 from branding import TITLE_LOGO_PATH
 from db import (
-    clear_totp_secret, create_local_account, db_configured, decide_access_request, delete_dashboard_run,
-    delete_local_account, get_local_account, list_approved_users, list_dashboard_runs, list_denied_users,
-    list_local_accounts, list_pending_requests, load_dashboard_run, mark_runs_seen,
+    clear_totp_secret, create_local_account, db_configured, decide_access_request, delete_all_dashboard_runs,
+    delete_dashboard_run, delete_local_account, get_local_account, list_approved_users, list_dashboard_runs,
+    list_denied_users, list_local_accounts, list_pending_requests, load_dashboard_run, mark_runs_seen,
     revoke_user_access, save_dashboard_run, set_totp_secret, update_local_account_password,
     update_local_account_profile, update_local_account_role, update_user_role, verify_password,
 )
@@ -85,10 +85,10 @@ from db import (
 # current module attribute at the moment it's actually used.
 import ui
 from ui import (
-    CACHED_RUN_BANNER_PAGES, card, chart, clear_nav_overlay, empty_state, inject_global_css,
+    APP_TIMEZONE, CACHED_RUN_BANNER_PAGES, card, chart, clear_nav_overlay, empty_state, inject_global_css,
     kpi, new_execution_log, overall_progress, page_header, pill, render_action_button_css,
     render_cached_run_banner, render_favicon_status_dot, render_nav_transition_overlay, render_sidebar,
-    render_startup_progress, render_topbar, render_upload_progress_tracker, stage_row, upload_slot,
+    render_startup_progress, render_topbar, render_upload_progress_tracker, stage_row, to_local, upload_slot,
 )
 
 
@@ -1184,7 +1184,7 @@ render_favicon_status_dot(st.session_state.pipeline_running)
 # isn't built to accommodate a fixed top strip the way the dashboard
 # pages' is, that read as the banner "not filling" properly.
 if st.session_state.data_source == 'cached' and page in CACHED_RUN_BANNER_PAGES:
-    loaded_str = (pd.to_datetime(st.session_state.data_loaded_at).strftime('%d %b %Y, %H:%M')
+    loaded_str = (to_local(st.session_state.data_loaded_at).strftime('%d %b %Y, %H:%M')
                   if st.session_state.data_loaded_at else 'a previous run')
     render_cached_run_banner(loaded_str, nav_triggered=_nav_just_happened)
 
@@ -1218,7 +1218,7 @@ if page == 'Data Pipeline':
     page_header('Data pipeline', 'Upload Salesforce exports',
                 'Upload all four CSV files below. The pipeline runs automatically once all '
                 'four are received and validated.',
-                meta=f'SESSION {datetime.now().strftime("%d %b %Y").upper()}')
+                meta=f'SESSION {datetime.now(APP_TIMEZONE).strftime("%d %b %Y").upper()}')
 
     # Administrator-only -- running the pipeline mutates the shared
     # dashboard state every viewer sees next, so this is gated the same
@@ -1741,7 +1741,7 @@ elif page == 'Overview':
         _recent_runs = list_dashboard_runs().head(3)
         if not _recent_runs.empty:
             _recent_runs = _recent_runs.copy()
-            _recent_runs['run_at'] = pd.to_datetime(_recent_runs['run_at'])
+            _recent_runs['run_at'] = pd.to_datetime(_recent_runs['run_at']).dt.tz_localize('UTC').dt.tz_convert(APP_TIMEZONE)
             with card('Latest pipeline runs', 'Most recent completed runs, see Run History for the full list',
                       tag='Completed', tag_color='green', info=(
                           'Each row is one completed pipeline run, most recent first. Click Run History '
@@ -2652,7 +2652,7 @@ elif page == 'Forecast Verification':
                    'pipeline again from the Data Pipeline page, then come back here.')
 
     fv_all = fv_runs.copy()
-    fv_all['run_at'] = pd.to_datetime(fv_all['run_at'])
+    fv_all['run_at'] = pd.to_datetime(fv_all['run_at']).dt.tz_localize('UTC').dt.tz_convert(APP_TIMEZONE)
     fv_labels = {
         r['run_id']: f"{r['run_id']}   ·   {r['run_at']:%d %b %Y, %H:%M}   ·   {r['run_by'] or 'unknown'}"
         for _, r in fv_all.iterrows()
@@ -2790,11 +2790,18 @@ elif page == 'Forecast Verification':
     # recorded actual in another. For any shared month the value from the
     # most recently executed run wins.
     fv_newest_id = fv_all.iloc[0]['run_id']
-    _actual_srcs = [(_run_at.get(fv_a_id, pd.Timestamp.min), cur_actuals),
-                    (_run_at.get(fv_b_id, pd.Timestamp.min), cmp_actuals)]
+    # Fallback is tz-aware (not a bare pd.Timestamp.min) so it can never be
+    # sorted alongside the real, now tz-aware, run_at values below without
+    # pandas raising "Cannot compare tz-naive and tz-aware timestamps" --
+    # in practice every id here always has a real run_at, so this is only
+    # ever a defensive default, but it has to match the real values' dtype
+    # regardless.
+    _min_at = pd.Timestamp.min.tz_localize(APP_TIMEZONE)
+    _actual_srcs = [(_run_at.get(fv_a_id, _min_at), cur_actuals),
+                    (_run_at.get(fv_b_id, _min_at), cmp_actuals)]
     if fv_newest_id not in (fv_a_id, fv_b_id):
         _ns, _ = load_dashboard_run(fv_newest_id)
-        _actual_srcs.append((_run_at.get(fv_newest_id, pd.Timestamp.min),
+        _actual_srcs.append((_run_at.get(fv_newest_id, _min_at),
                              pd.DataFrame((_ns or {}).get('monthly', []))))
     _act_frames = [df.assign(_pri=at) for at, df in _actual_srcs
                    if df is not None and not getattr(df, 'empty', True) and 'donor_month' in df.columns]
@@ -3025,7 +3032,7 @@ elif page == 'Run History':
         clear_nav_overlay()
         st.stop()
 
-    runs['run_at'] = pd.to_datetime(runs['run_at'])
+    runs['run_at'] = pd.to_datetime(runs['run_at']).dt.tz_localize('UTC').dt.tz_convert(APP_TIMEZONE)
     total_run_count = len(runs)
     runs = runs.head(10)  # only the 10 most recent runs are shown/searchable
     latest = runs.iloc[0]
@@ -3207,6 +3214,51 @@ elif page == 'Run History':
                             st.session_state[confirm_key] = True
                             st.rerun()
 
+    # Super-Admin-only, and gated behind a TYPED confirmation, not just a
+    # second click -- this is the one bulk, unrecoverable action in the
+    # whole app (every other delete here is scoped to a single run). The
+    # single-run delete above already uses a click-to-arm confirm button;
+    # requiring the exact phrase "delete all runs" is a deliberately
+    # higher bar on top of that, same principle as GitHub's "type the repo
+    # name to confirm" on a repository delete.
+    with card('Delete all runs', 'Permanently removes every saved pipeline run',
+              tag='Super Admin', tag_color='red'):
+        if (st.session_state.user or {}).get('role') != 'Super Admin':
+            st.caption('Only a Super Admin can delete all runs.')
+        else:
+            st.caption(
+                f'This permanently deletes all {total_run_count} saved run(s). There is no undo -- '
+                'every dashboard resets to a fresh, empty state exactly as if the pipeline had never run.'
+            )
+            if st.session_state.get('confirm_delete_all_runs'):
+                st.warning('This cannot be undone.', icon=':material/warning:')
+                typed = st.text_input(
+                    'Type "delete all runs" to confirm', placeholder='delete all runs',
+                    key='delete_all_runs_confirm_text',
+                )
+                dc1, dc2 = st.columns(2)
+                with dc1:
+                    if st.button('Confirm delete all runs', icon=':material/delete_forever:',
+                                 type='primary', width='stretch',
+                                 disabled=typed.strip().lower() != 'delete all runs'):
+                        delete_all_dashboard_runs()
+                        st.session_state.pop('confirm_delete_all_runs', None)
+                        st.session_state.pop('delete_all_runs_confirm_text', None)
+                        st.session_state.pipeline_run = False
+                        st.session_state.viewing_run_id = None
+                        st.session_state.data_source = None
+                        st.success('All runs deleted.', icon=':material/check_circle:')
+                        st.rerun()
+                with dc2:
+                    if st.button('Cancel', width='stretch', key='cancel_delete_all_runs'):
+                        st.session_state.pop('confirm_delete_all_runs', None)
+                        st.session_state.pop('delete_all_runs_confirm_text', None)
+                        st.rerun()
+            else:
+                if st.button('Delete all runs', icon=':material/delete_forever:', width='stretch'):
+                    st.session_state['confirm_delete_all_runs'] = True
+                    st.rerun()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # USERS
@@ -3287,7 +3339,7 @@ elif page == 'Users':
             </div>
             """, unsafe_allow_html=True)
     else:
-        pending['requested_at'] = pd.to_datetime(pending['requested_at'])
+        pending['requested_at'] = pd.to_datetime(pending['requested_at']).dt.tz_localize('UTC').dt.tz_convert(APP_TIMEZONE)
         with card(f'{len(pending)} pending', 'Google sign-in requests; oldest first'):
             for i, row in pending.iterrows():
                 rc1, rc2, rc3 = st.columns([3, 2, 2], vertical_alignment='center')
@@ -3344,14 +3396,17 @@ elif page == 'Users':
     for _, r in approved.iterrows():
         combined_rows.append({
             'email': r['email'], 'name': r['name'], 'role': r['role'], 'kind': 'Google',
-            'date': pd.to_datetime(r['decided_at']) if pd.notna(r['decided_at']) else None,
+            'date': to_local(r['decided_at']) if pd.notna(r['decided_at']) else None,
         })
     for _, r in accounts.iterrows():
         combined_rows.append({
             'email': r['email'], 'name': r['name'], 'role': r['role'], 'kind': 'Local',
-            'date': pd.to_datetime(r['created_at']) if pd.notna(r['created_at']) else None,
+            'date': to_local(r['created_at']) if pd.notna(r['created_at']) else None,
         })
-    combined_rows.sort(key=lambda x: x['date'] or pd.Timestamp.min, reverse=True)
+    # Fallback is tz-aware, same reasoning as _min_at above -- these 'date'
+    # values are now tz-aware (via to_local()), and sorting a bare (naive)
+    # pd.Timestamp.min alongside them would raise.
+    combined_rows.sort(key=lambda x: x['date'] or pd.Timestamp.min.tz_localize(APP_TIMEZONE), reverse=True)
     all_accounts = pd.DataFrame(combined_rows, columns=['email', 'name', 'role', 'kind', 'date'])
     all_accounts = all_accounts.rename(columns={'kind': '_kind', 'date': '_date'})
 
@@ -3593,7 +3648,7 @@ elif page == 'Users':
                     st.markdown(f"**{row['name'] or row['email']}**")
                     st.caption(row['email'])
                 with dc2:
-                    decided = pd.to_datetime(row['decided_at']) if pd.notna(row['decided_at']) else None
+                    decided = to_local(row['decided_at']) if pd.notna(row['decided_at']) else None
                     detail = f"Was {row['role']} · revoked {decided.strftime('%d %b %Y')}" if decided else f"Was {row['role']}"
                     st.caption(detail)
                 with dc3:
@@ -3651,7 +3706,7 @@ elif page == 'Profile':
         role_color = {'Super Admin': 'amber', 'Administrator': 'blue', 'Analyst': 'gray'}.get(_user.get('role'), 'gray')
         method_pill = pill('Local sign-in', 'green') if _is_local else pill('Google sign-in', 'blue')
         member_since = (
-            f" · Member since {_account['created_at']:%d %b %Y}"
+            f" · Member since {to_local(_account['created_at']):%d %b %Y}"
             if _account and _account.get('created_at') else ''
         )
         st.markdown(

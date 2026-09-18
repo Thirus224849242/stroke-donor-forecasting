@@ -448,6 +448,28 @@ def delete_dashboard_run(run_id: str) -> bool:
         return False
 
 
+def delete_all_dashboard_runs() -> bool:
+    """Wipes every saved pipeline run. Super-Admin-only, gated in app.py
+    behind a typed 'delete all runs' confirmation (not just a click) --
+    this is the one bulk, unrecoverable action in the whole app, so it
+    gets a stricter confirmation than the single-run delete above.
+    Returns True on success."""
+    engine = get_engine()
+    if engine is None:
+        return False
+    try:
+        with engine.begin() as conn:
+            conn.execute(text('DELETE FROM dashboard_runs'))
+        count_new_runs.clear()
+        list_dashboard_runs.clear()
+        load_dashboard_run.clear()
+        return True
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return False
+
+
 # ── Access control (Google sign-in request/approve queue) ──────────────────
 
 @st.cache_data(show_spinner=False, ttl=15)
