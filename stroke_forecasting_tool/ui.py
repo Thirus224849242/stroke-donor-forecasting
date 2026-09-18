@@ -1,5 +1,6 @@
 import re
 from contextlib import contextmanager
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -1502,6 +1503,31 @@ def render_upload_progress_tracker():
 
 
 # ── LAYOUT COMPONENTS ─────────────────────────────────────────────────────────
+APP_TIMEZONE = ZoneInfo('Australia/Sydney')
+
+
+def to_local(dt):
+    """Converts a timestamp read back from the database (run_at, created_at,
+    requested_at, decided_at, ...) to Stroke Foundation's home timezone for
+    display. Every one of those columns is a naive value that actually holds
+    UTC -- not because anything here sets it explicitly, but because it's
+    written via plain datetime.now() (db.py), and on Azure App Service Linux
+    the container's own clock is UTC regardless of the app's configured
+    region. Reported live as the Run History page's "Latest run" time
+    looking hours off the wall clock -- every display site was formatting
+    that raw UTC value with no conversion or timezone label at all. None of
+    the arithmetic elsewhere (e.g. _relative_time() above) needed this fix --
+    subtracting two naive-UTC values for a duration is correct regardless of
+    which absolute timezone they're read in; only an ABSOLUTE display like
+    '5:41 PM' needs the conversion this function does."""
+    if dt is None:
+        return None
+    ts = pd.Timestamp(dt)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize('UTC')
+    return ts.tz_convert(APP_TIMEZONE)
+
+
 def _relative_time(dt) -> str:
     """'Loaded 3m ago' / '2h ago' style relative time for the sidebar's
     active-run box -- matches the Base44 prototype's session-age display."""
@@ -2106,7 +2132,7 @@ def new_execution_log(placeholder):
     def log(msg: str):
         for token, repl in _LOG_ICON_SUB.items():
             msg = msg.replace(token, repl)
-        ts = pd.Timestamp.now().strftime('%H:%M:%S')
+        ts = pd.Timestamp.now(APP_TIMEZONE).strftime('%H:%M:%S')
         lines.append((ts, msg))
         rows = ''.join(
             f'<div class="sf-exec-log-line"><span class="sf-exec-log-time">{t}</span>{m}</div>'
