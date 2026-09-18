@@ -2783,8 +2783,13 @@ elif page == 'Forecast Verification':
     # pandas raising "Cannot compare tz-naive and tz-aware timestamps" --
     # in practice every id here always has a real run_at, so this is only
     # ever a defensive default, but it has to match the real values' dtype
-    # regardless.
-    _min_at = pd.Timestamp.min.tz_localize(APP_TIMEZONE)
+    # regardless. An arbitrary safely-old date, not pd.Timestamp.min itself
+    # -- confirmed live, tz_localize()'ing the actual minimum representable
+    # Timestamp raises OutOfBoundsDatetime the moment the timezone's UTC
+    # offset would shift it earlier than the minimum, which broke this
+    # page outright on every load (this line runs unconditionally,
+    # whether or not the fallback ends up actually being used).
+    _min_at = pd.Timestamp('1900-01-01', tz=APP_TIMEZONE)
     _actual_srcs = [(_run_at.get(fv_a_id, _min_at), cur_actuals),
                     (_run_at.get(fv_b_id, _min_at), cmp_actuals)]
     if fv_newest_id not in (fv_a_id, fv_b_id):
