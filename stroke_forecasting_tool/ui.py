@@ -7,7 +7,7 @@ import streamlit as st
 
 from auth import initials, sign_out
 from branding import logo_data_uri
-from db import count_new_runs, count_pending_requests
+from db import count_new_runs
 
 # ── BRAND PALETTE ────────────────────────────────────────────────────────────
 # Swiss financial / data-dense analytics: white card surfaces on a light grey
@@ -107,13 +107,10 @@ NAV_ITEMS = [item for _, items in NAV_SECTIONS for item in items]
 # Hidden from the sidebar (and blocked with their own page-level guard in
 # app.py, defense in depth) for an Analyst -- see render_sidebar()'s
 # is_admin filter below. Data Pipeline mutates the shared dashboard state
-# everyone sees next; Users grants account access, for both Google
-# sign-in and local email+password login (one unified page -- used to be
-# two separate pages, Access Requests and Local Accounts, merged so a
-# Super Admin manages every account from one place regardless of how
-# that person signs in). Both are sensitive enough to gate, unlike
-# everything else in NAV_SECTIONS, which is read-only for any signed-in
-# user.
+# everyone sees next; Users grants local (email+password) account access
+# -- creating accounts, changing roles, resetting passwords, deleting.
+# Both are sensitive enough to gate, unlike everything else in
+# NAV_SECTIONS, which is read-only for any signed-in user.
 ADMIN_ONLY_NAV_ITEMS = {'Data Pipeline', 'Users'}
 
 # A second, narrower gate on top of the above: Users is an account-
@@ -1549,16 +1546,15 @@ def _relative_time(dt) -> str:
 def render_sidebar():
     user = st.session_state.user or {'name': 'User', 'role': 'Analyst'}
     # Administrator-or-above: ADMIN_ONLY_NAV_ITEMS (Data Pipeline mutates
-    # the shared dashboard state everyone sees next; Access Requests/Local
-    # Accounts grant account access) are hidden from nav for an Analyst --
-    # same role check as app.py's own guard on each of those page bodies
-    # (defense in depth, in case session_state.page is ever set to one
-    # some other way), and as the delete-run/export-CSV gates elsewhere.
-    # Super-Admin-only: on top of that, Access Requests/Local Accounts are
-    # further hidden from a regular Administrator -- account MANAGEMENT
-    # (create/delete/promote/demote/revoke) is Super Admin's alone; an
-    # ordinary Administrator keeps Data Pipeline and everything else it
-    # always had.
+    # the shared dashboard state everyone sees next; Users grants account
+    # access) are hidden from nav for an Analyst -- same role check as
+    # app.py's own guard on each of those page bodies (defense in depth,
+    # in case session_state.page is ever set to one some other way), and
+    # as the delete-run/export-CSV gates elsewhere. Super-Admin-only: on
+    # top of that, Users is further hidden from a regular Administrator --
+    # account MANAGEMENT (create/delete/promote/demote) is Super Admin's
+    # alone; an ordinary Administrator keeps Data Pipeline and everything
+    # else it always had.
     is_admin = user['role'] in ('Administrator', 'Super Admin')
     is_super_admin = user['role'] == 'Super Admin'
     running = bool(st.session_state.get('pipeline_running'))
@@ -1647,15 +1643,10 @@ def render_topbar():
     running = bool(st.session_state.get('pipeline_running'))
     page = st.session_state.get('page') or 'Overview'
     email = user.get('email') or ''
-    is_admin = user['role'] in ('Administrator', 'Super Admin')
 
-    # Same two signals the sidebar nav badges used to show, now behind one
-    # bell. count_new_runs() is 0 for a user with no `users` row (local
-    # accounts); pending requests only matter to an admin (the Users page
-    # is admin-only anyway).
-    new_runs = count_new_runs(email) if email else 0
-    pending = count_pending_requests() if is_admin else 0
-    notif_total = new_runs + pending
+    # Same signal the sidebar nav badge used to show, now behind the
+    # topbar bell.
+    notif_total = count_new_runs(email) if email else 0
 
     _logo = logo_data_uri()
     _logo_html = (f'<img class="sf-topbar-logo" src="{_logo}" alt="Stroke Foundation">'

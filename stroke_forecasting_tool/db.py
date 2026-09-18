@@ -22,7 +22,7 @@ goes into a run's JSON blob and how it's mapped back to session_state.
 
 Fails soft everywhere: no secrets configured, or a connection error, just
 means state isn't saved/available -- the app falls back to the normal
-upload flow. Same pattern as auth.py's google_auth_configured().
+upload flow. Same pattern as db_configured()/get_engine() below.
 """
 
 import gzip
@@ -38,8 +38,9 @@ import streamlit as st
 from sqlalchemy import create_engine, text
 
 # ── Local (email+password) account credentials ──────────────────────────────
-# Used only by auth.py's local-login form -- Google sign-in never touches
-# this. Two accounts (admin@/analyst@strokefoundation.org.au) originally
+# Used by auth.py's local-login form -- the only sign-in method this app
+# has (Google sign-in was removed entirely). Two accounts
+# (admin@/analyst@strokefoundation.org.au) originally
 # lived as plaintext passwords directly in auth.py's source (the Critical
 # finding from the first security review). A later pass moved them into
 # this table, hashed -- but the ACTUAL password value used to seed that
@@ -95,16 +96,12 @@ ALTER TABLE dashboard_runs ADD COLUMN IF NOT EXISTS mape_ltv DOUBLE PRECISION;
 ALTER TABLE dashboard_runs ADD COLUMN IF NOT EXISTS mape_gw DOUBLE PRECISION;
 ALTER TABLE dashboard_runs ADD COLUMN IF NOT EXISTS duration_seconds DOUBLE PRECISION;
 
--- Google sign-in access control -- being on an allowed domain (see
--- auth.py's ALLOWED_GOOGLE_DOMAINS) is necessary but no longer
--- sufficient on its own for a non-admin: they also need a row here with
--- status='approved'. status is one of 'pending' (just requested, not
--- yet reviewed), 'approved', or 'denied' (can re-request -- see
--- request_access() below). Admins skip the request-access flow entirely
--- (handle_google_redirect() lets GOOGLE_ADMIN_EMAILS straight in) but
--- still get upserted here via upsert_approved_user(), so this table
--- stays a complete record of everyone with access, not just the
--- analysts who went through the request queue.
+-- Legacy access-control table from the now-removed Google sign-in
+-- feature. Nothing writes a new row into it any more -- kept only
+-- because count_new_runs()/mark_runs_seen() below still read/update
+-- last_seen_runs_at for the sidebar's "new run" badge. Safe to leave as
+-- dead weight on a fresh database (it just stays empty); not dropped
+-- here since this file never issues destructive DDL.
 CREATE TABLE IF NOT EXISTS users (
     email        TEXT PRIMARY KEY,
     name         TEXT,
@@ -122,13 +119,14 @@ CREATE TABLE IF NOT EXISTS users (
 -- not the app's entire run history.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_runs_at TIMESTAMP;
 
--- Local (email+password) login accounts, alongside Google sign-in -- see
--- hash_password()/verify_password() above and get_local_account() below.
--- Seeded/rotated from secrets.toml's [local_accounts] section by
--- _seed_local_accounts() right after this schema runs, on every connect
--- (needs Python to compute each password's hash, which plain DDL can't do
--- inline) -- opt-in per account, and re-syncing the hash on every connect
--- is what makes a secrets.toml password change an actual rotation.
+-- Local (email+password) login accounts -- the only sign-in method this
+-- app has. See hash_password()/verify_password() above and
+-- get_local_account() below. Seeded/rotated from secrets.toml's
+-- [local_accounts] section by _seed_local_accounts() right after this
+-- schema runs, on every connect (needs Python to compute each password's
+-- hash, which plain DDL can't do inline) -- opt-in per account, and
+-- re-syncing the hash on every connect is what makes a secrets.toml
+-- password change an actual rotation.
 CREATE TABLE IF NOT EXISTS local_accounts (
     email         TEXT PRIMARY KEY,
     name          TEXT NOT NULL,
@@ -142,22 +140,17 @@ CREATE TABLE IF NOT EXISTS local_accounts (
 -- QR code and confirms it with a real code from their app (see
 -- set_totp_secret() below) -- never written from an unverified value, so
 -- a row with this column populated is a real, working authenticator, not
--- just "the user started setup". Google sign-in accounts don't use this
--- at all -- their 2FA (if any) is Google's own, managed on their account,
--- not this app's.
+-- just "the user started setup".
 ALTER TABLE local_accounts ADD COLUMN IF NOT EXISTS totp_secret TEXT;
 
--- Persistent local-account sessions. Google sign-in survives a server
--- process restart for free (Streamlit's own signed cookie backs st.user,
--- re-derived by auth.py's handle_google_redirect() on the next run) --
--- a local (email+password) login has no equivalent: authenticated/user
--- live only in server-memory session_state, so a restart (e.g. triggered
--- by a long pipeline run's memory pressure on a constrained host) just
--- logs that user out with no way back except signing in again. This
--- table plus auth.py's create_local_session()/restore_local_session()
--- close that gap the same way -- a random opaque token, stored as a
--- browser cookie, only its hash kept here (never the raw token, same
--- reasoning as password_hash above).
+-- Persistent local-account sessions -- authenticated/user otherwise live
+-- only in server-memory session_state, so a process restart (e.g.
+-- triggered by a long pipeline run's memory pressure on a constrained
+-- host) would just log that user out with no way back except signing in
+-- again. This table plus auth.py's
+-- create_local_session()/restore_local_session() close that gap: a
+-- random opaque token, stored as a browser cookie, only its hash kept
+-- here (never the raw token, same reasoning as password_hash above).
 CREATE TABLE IF NOT EXISTS local_sessions (
     token_hash TEXT PRIMARY KEY,
     email      TEXT NOT NULL,
@@ -174,10 +167,8 @@ LOCAL_SESSION_DAYS = 30
 # section at seed time (see _seed_local_accounts()). Splitting it this way
 # means this list can stay in source safely: an email address and a role
 # name are not secrets. admin@ seeds as Super Admin, not just
-# Administrator -- the local-login bootstrap path needs to land someone
-# with enough power to actually set everyone else up (Local Accounts +
-# Access Requests are Super-Admin-only, see app.py), same reasoning as
-# GOOGLE_ADMIN_EMAILS bootstrapping Super Admin in auth.py.
+# Administrator -- someone has to land with enough power to actually set
+# everyone else up (the Users page is Super-Admin-only, see app.py).
 _DEMO_ACCOUNTS = [
     {'email': 'admin@strokefoundation.org.au', 'secret_key': 'admin_password',
      'name': 'Admin User', 'role': 'Super Admin'},
@@ -197,16 +188,13 @@ def _seed_local_accounts(conn) -> None:
     on next connect, any database that was already seeded by the earlier,
     hardcoded-password version of this function).
 
-    role is deliberately NOT in that UPDATE SET list -- same reasoning as
-    the GOOGLE_ADMIN_EMAILS fix in auth.py's handle_google_redirect():
-    this list is only the role's source of truth for the very first
-    INSERT (a brand-new email, which the VALUES clause below still
-    handles normally). Re-syncing role on every reconnect would silently
-    re-promote/re-demote an account back to whatever's hardcoded here
-    every time the app restarts, undoing anything a Super Admin set
-    through the Local Accounts page -- the exact same standing-override
-    bug, just for local accounts instead of Google ones. Once a row
-    exists, its role is the database's alone to manage."""
+    role is deliberately NOT in that UPDATE SET list -- this list is only
+    the role's source of truth for the very first INSERT (a brand-new
+    email, which the VALUES clause below still handles normally).
+    Re-syncing role on every reconnect would silently re-promote/re-demote
+    an account back to whatever's hardcoded here every time the app
+    restarts, undoing anything a Super Admin set through the Users page.
+    Once a row exists, its role is the database's alone to manage."""
     configured = st.secrets.get('local_accounts', {})
     for acct in _DEMO_ACCOUNTS:
         password = configured.get(acct['secret_key'])
@@ -318,12 +306,14 @@ def count_new_runs(email: str) -> int:
     sidebar's notification badge (render_sidebar() in ui.py). Cached with
     a short ttl (unlike every other read in this file) specifically
     because, unlike those, this one runs on EVERY page's sidebar on EVERY
-    rerun, not just while actually on Run History/Access Requests --
-    an uncached query there would mean two extra DB round trips per
-    rerun, app-wide. 0 (no badge) if the user has no row at all (DB
-    unreachable, or a locally hardcoded dev/demo login that never went
-    through the Google request/approve flow and so was never upserted
-    into `users`) -- same fail-soft convention as the rest of this file."""
+    rerun, not just while actually on Run History -- an uncached query
+    there would mean two extra DB round trips per rerun, app-wide.
+    0 (no badge) if the user has no row at all in `users` -- which, now
+    that Google sign-in (the only thing that ever wrote a row there) has
+    been removed, is every local-account user, always. Left as-is rather
+    than reworked to key off local_accounts instead -- out of scope for
+    that removal; this badge is effectively inert until/unless it's
+    repointed at a table local accounts actually populate."""
     engine = get_engine()
     if engine is None:
         return 0
@@ -368,7 +358,7 @@ def list_dashboard_runs() -> pd.DataFrame:
     below) -- this was an uncached query hit on every single Overview
     load (the default landing page) plus twice more per rerun on Run
     History, same "runs on every page, not just its own" reasoning as
-    count_new_runs()/count_pending_requests() above."""
+    count_new_runs() above."""
     engine = get_engine()
     if engine is None:
         return pd.DataFrame()
@@ -470,7 +460,7 @@ def delete_all_dashboard_runs() -> bool:
         return False
 
 
-# ── Access control (Google sign-in request/approve queue) ──────────────────
+# ── Local account management ────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False, ttl=15)
 def get_local_account(email: str) -> dict | None:
@@ -771,11 +761,8 @@ def update_local_account_role(email: str, role: str) -> bool:
 
 
 def delete_local_account(email: str) -> bool:
-    """Removes a local account entirely -- the Local Accounts page's
-    'Delete' action. Does not touch that email's Google-sign-in access
-    (the separate `users` table, if they also have a row there) -- the
-    two login paths are independent, deleting one doesn't affect the
-    other."""
+    """Removes a local account entirely -- the Users page's 'Delete'
+    action."""
     engine = get_engine()
     if engine is None:
         return False
@@ -784,289 +771,6 @@ def delete_local_account(email: str) -> bool:
             conn.execute(text('DELETE FROM local_accounts WHERE email = :email'), {'email': email})
         list_local_accounts.clear()  # so the deleted account disappears from the Users page immediately
         get_local_account.clear()  # so a deleted account can't log in on a stale cached row
-        return True
-    except Exception as exc:
-        print('db.py error:', traceback.format_exc())  # shows up in server logs
-        st.session_state.db_error = str(exc)
-        return False
-
-
-def get_user(email: str) -> dict | None:
-    """One user's access record, or None if they've never requested (or
-    been granted) access at all. `status` is 'pending', 'approved', or
-    'denied' -- see handle_google_redirect() in auth.py for how each is
-    handled."""
-    engine = get_engine()
-    if engine is None:
-        return None
-    try:
-        with engine.connect() as conn:
-            row = conn.execute(text("""
-                SELECT email, name, role, status, requested_at, decided_at, decided_by
-                FROM users WHERE email = :email
-            """), {'email': email}).mappings().fetchone()
-        return dict(row) if row else None
-    except Exception as exc:
-        print('db.py error:', traceback.format_exc())  # shows up in server logs
-        st.session_state.db_error = str(exc)
-        return None
-
-
-def request_access(email: str, name: str) -> bool:
-    """Creates a pending access request for a brand-new email, or resets
-    an existing DENIED one back to pending (a re-request) -- the WHERE
-    clause on the conflict update means this is a no-op for anyone
-    already 'pending' or 'approved', so it's safe to call unconditionally
-    from the request-access screen's button without checking get_user()
-    again first."""
-    engine = get_engine()
-    if engine is None:
-        return False
-    try:
-        with engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO users (email, name, role, status, requested_at)
-                VALUES (:email, :name, 'Analyst', 'pending', :requested_at)
-                ON CONFLICT (email) DO UPDATE SET
-                    status = 'pending', requested_at = EXCLUDED.requested_at,
-                    decided_at = NULL, decided_by = NULL
-                WHERE users.status = 'denied'
-            """), {'email': email, 'name': name, 'requested_at': datetime.now()})
-        count_pending_requests.clear()  # so the sidebar badge picks this up immediately, not after its 30s ttl
-        list_pending_requests.clear()  # so the new request shows up on the Users page immediately
-        return True
-    except Exception as exc:
-        print('db.py error:', traceback.format_exc())  # shows up in server logs
-        st.session_state.db_error = str(exc)
-        return False
-
-
-@st.cache_data(show_spinner=False, ttl=30)
-def count_pending_requests() -> int:
-    """Count of requests awaiting a decision -- backs the sidebar's
-    notification badge (render_sidebar() in ui.py). No "seen" tracking
-    the way count_new_runs() has: unlike a run, a pending request is
-    inherently an open item needing action, so the badge is just the
-    live pending count, and naturally drops as decide_access_request()
-    resolves each one -- no separate mark-seen step. Cached (short ttl)
-    for the same reason count_new_runs() is: this runs on every page's
-    sidebar, not just Access Requests itself."""
-    engine = get_engine()
-    if engine is None:
-        return 0
-    try:
-        with engine.connect() as conn:
-            row = conn.execute(text("SELECT COUNT(*) FROM users WHERE status = 'pending'")).fetchone()
-        return int(row[0]) if row else 0
-    except Exception:
-        print('db.py error:', traceback.format_exc())  # shows up in server logs
-        return 0
-
-
-@st.cache_data(show_spinner=False, ttl=15)
-def list_pending_requests() -> pd.DataFrame:
-    """All pending access requests, oldest first -- for the Administrator-
-    only Access Requests page. Empty DataFrame if unavailable. Cached
-    (short ttl, cleared immediately by request_access()/
-    decide_access_request() below) -- same reasoning as
-    list_local_accounts() above: uncached, this ran on every render of
-    the Users page and every admin action taken there."""
-    engine = get_engine()
-    if engine is None:
-        return pd.DataFrame()
-    try:
-        with engine.connect() as conn:
-            return pd.read_sql(text("""
-                SELECT email, name, requested_at FROM users
-                WHERE status = 'pending' ORDER BY requested_at
-            """), conn)
-    except Exception as exc:
-        print('db.py error:', traceback.format_exc())  # shows up in server logs
-        st.session_state.db_error = str(exc)
-        return pd.DataFrame()
-
-
-def decide_access_request(email: str, approve: bool, decided_by: str) -> bool:
-    """Approves or denies one pending request. New accounts are always
-    approved as Analyst -- promoting someone to Administrator is a code
-    change (GOOGLE_ADMIN_EMAILS in auth.py), not something this queue
-    grants, so `role` is untouched here."""
-    engine = get_engine()
-    if engine is None:
-        return False
-    try:
-        with engine.begin() as conn:
-            conn.execute(text("""
-                UPDATE users SET status = :status, decided_at = :decided_at, decided_by = :decided_by
-                WHERE email = :email
-            """), {
-                'status': 'approved' if approve else 'denied',
-                'decided_at': datetime.now(), 'decided_by': decided_by, 'email': email,
-            })
-        count_pending_requests.clear()  # so the sidebar badge drops immediately, not after its 30s ttl
-        # Approve moves the row from pending to approved; deny moves it from
-        # pending to denied -- clearing all three unconditionally is simpler
-        # and just as cheap as branching on `approve` to clear only the two
-        # actually affected.
-        list_pending_requests.clear()
-        list_approved_users.clear()
-        list_denied_users.clear()
-        return True
-    except Exception as exc:
-        print('db.py error:', traceback.format_exc())  # shows up in server logs
-        st.session_state.db_error = str(exc)
-        return False
-
-
-@st.cache_data(show_spinner=False, ttl=15)
-def list_approved_users() -> pd.DataFrame:
-    """Every currently-approved Google-sign-in user (both people who went
-    through the request queue and the GOOGLE_ADMIN_EMAILS bootstrap seed --
-    see handle_google_redirect() in auth.py) -- for the Administrator-only
-    user-management view, where their role can be changed or their access
-    revoked. Local (email+password) accounts are a completely separate
-    table/page (local_accounts / Local Accounts) -- this is Google
-    sign-in access only. Cached (short ttl, cleared immediately by
-    decide_access_request()/update_user_role()/revoke_user_access() --
-    same reasoning as list_pending_requests() above."""
-    engine = get_engine()
-    if engine is None:
-        return pd.DataFrame()
-    try:
-        with engine.connect() as conn:
-            return pd.read_sql(text("""
-                SELECT email, name, role, decided_at FROM users
-                WHERE status = 'approved' ORDER BY decided_at DESC NULLS LAST
-            """), conn)
-    except Exception as exc:
-        print('db.py error:', traceback.format_exc())  # shows up in server logs
-        st.session_state.db_error = str(exc)
-        return pd.DataFrame()
-
-
-@st.cache_data(show_spinner=False, ttl=15)
-def list_denied_users() -> pd.DataFrame:
-    """Every Google sign-in user whose access is currently revoked/denied --
-    the counterpart to list_approved_users(). Without this, a revoked user
-    simply vanished from every admin view once decided (list_pending_requests
-    only shows 'pending', list_approved_users only shows 'approved') -- a
-    Super Admin could revoke someone but had no way to see or reverse that
-    decision afterward; only the affected user, from their own "Access
-    denied" screen, could submit a fresh request to get back on the pending
-    queue. This lets a Super Admin restore access directly instead, with no
-    dependency on the revoked person doing anything first."""
-    engine = get_engine()
-    if engine is None:
-        return pd.DataFrame()
-    try:
-        with engine.connect() as conn:
-            return pd.read_sql(text("""
-                SELECT email, name, role, decided_at FROM users
-                WHERE status = 'denied' ORDER BY decided_at DESC NULLS LAST
-            """), conn)
-    except Exception as exc:
-        print('db.py error:', traceback.format_exc())  # shows up in server logs
-        st.session_state.db_error = str(exc)
-        return pd.DataFrame()
-
-
-def update_user_role(email: str, role: str) -> bool:
-    """Promotes/demotes an approved Google-sign-in user -- this is what
-    makes GOOGLE_ADMIN_EMAILS a one-time bootstrap seed rather than a
-    standing override (see handle_google_redirect()'s docstring in
-    auth.py): once a `users` row exists, this is the only thing that can
-    change its role, and it takes effect on that person's very next
-    login regardless of what GOOGLE_ADMIN_EMAILS still says."""
-    engine = get_engine()
-    if engine is None:
-        return False
-    try:
-        with engine.begin() as conn:
-            result = conn.execute(text("""
-                UPDATE users SET role = :role WHERE email = :email AND status = 'approved'
-            """), {'email': email, 'role': role})
-        list_approved_users.clear()  # so the new role shows up on the Users page immediately
-        return result.rowcount > 0
-    except Exception as exc:
-        print('db.py error:', traceback.format_exc())  # shows up in server logs
-        st.session_state.db_error = str(exc)
-        return False
-
-
-def revoke_user_access(email: str, decided_by: str) -> bool:
-    """Revokes an approved user's Google-sign-in access. Sets status back
-    to 'denied' -- deliberately NOT a hard delete: handle_google_redirect()
-    only ever consults GOOGLE_ADMIN_EMAILS when a `users` row is entirely
-    absent (record is None), so deleting a bootstrap admin's row would
-    make them look brand-new again and silently RE-GRANT them Administrator
-    on their next login if their email is still in that list -- keeping
-    the row present with status='denied' is what actually, permanently
-    blocks them (same mechanism decide_access_request()'s deny path
-    already relies on for the ordinary request-queue case)."""
-    engine = get_engine()
-    if engine is None:
-        return False
-    try:
-        with engine.begin() as conn:
-            result = conn.execute(text("""
-                UPDATE users SET status = 'denied', decided_at = :now, decided_by = :decided_by
-                WHERE email = :email AND status = 'approved'
-            """), {'email': email, 'now': datetime.now(), 'decided_by': decided_by})
-        list_approved_users.clear()  # so the revoked user disappears from the approved list immediately
-        list_denied_users.clear()  # ...and appears on the revoked list immediately
-        return result.rowcount > 0
-    except Exception as exc:
-        print('db.py error:', traceback.format_exc())  # shows up in server logs
-        st.session_state.db_error = str(exc)
-        return False
-
-
-def delete_user(email: str) -> bool:
-    """Permanently removes a Google-sign-in user's row from `users`.
-    Distinct from revoke_user_access() above on purpose: that one is a
-    soft delete (status='denied') specifically BECAUSE a hard delete has a
-    sharp edge -- handle_google_redirect() (auth.py) only ever checks
-    GOOGLE_ADMIN_EMAILS when a row is entirely ABSENT, so deleting a row
-    for an email still on that bootstrap list would make them look
-    brand-new again and silently re-grant them Super Admin on their very
-    next Google sign-in. app.py only offers this button for an already-
-    revoked user, and refuses it outright for anyone still in
-    GOOGLE_ADMIN_EMAILS -- this function itself doesn't re-check that (it
-    has no import of auth.py's list), so it trusts the caller to have
-    already gated it. Returns True on success."""
-    engine = get_engine()
-    if engine is None:
-        return False
-    try:
-        with engine.begin() as conn:
-            result = conn.execute(text('DELETE FROM users WHERE email = :email'), {'email': email})
-        list_approved_users.clear()
-        list_denied_users.clear()
-        list_pending_requests.clear()
-        return result.rowcount > 0
-    except Exception as exc:
-        print('db.py error:', traceback.format_exc())  # shows up in server logs
-        st.session_state.db_error = str(exc)
-        return False
-
-
-def upsert_approved_user(email: str, name: str, role: str, decided_by: str) -> bool:
-    """Used for admin logins, which skip the request-access queue
-    entirely -- keeps `users` a complete record of everyone with access,
-    not just the analysts who went through it. Safe to call on every
-    admin login (idempotent update, not a fresh insert each time)."""
-    engine = get_engine()
-    if engine is None:
-        return False
-    try:
-        with engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO users (email, name, role, status, requested_at, decided_at, decided_by)
-                VALUES (:email, :name, :role, 'approved', :now, :now, :decided_by)
-                ON CONFLICT (email) DO UPDATE SET
-                    name = EXCLUDED.name, role = EXCLUDED.role, status = 'approved'
-            """), {'email': email, 'name': name, 'role': role, 'now': datetime.now(), 'decided_by': decided_by})
-        list_approved_users.clear()  # in case this changed an existing row's name/role
         return True
     except Exception as exc:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
