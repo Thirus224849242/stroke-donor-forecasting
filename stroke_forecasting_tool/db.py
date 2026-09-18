@@ -31,7 +31,7 @@ import hmac
 import json
 import secrets
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -146,7 +146,28 @@ CREATE TABLE IF NOT EXISTS local_accounts (
 -- at all -- their 2FA (if any) is Google's own, managed on their account,
 -- not this app's.
 ALTER TABLE local_accounts ADD COLUMN IF NOT EXISTS totp_secret TEXT;
+
+-- Persistent local-account sessions. Google sign-in survives a server
+-- process restart for free (Streamlit's own signed cookie backs st.user,
+-- re-derived by auth.py's handle_google_redirect() on the next run) --
+-- a local (email+password) login has no equivalent: authenticated/user
+-- live only in server-memory session_state, so a restart (e.g. triggered
+-- by a long pipeline run's memory pressure on a constrained host) just
+-- logs that user out with no way back except signing in again. This
+-- table plus auth.py's create_local_session()/restore_local_session()
+-- close that gap the same way -- a random opaque token, stored as a
+-- browser cookie, only its hash kept here (never the raw token, same
+-- reasoning as password_hash above).
+CREATE TABLE IF NOT EXISTS local_sessions (
+    token_hash TEXT PRIMARY KEY,
+    email      TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT now(),
+    expires_at TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS local_sessions_expires_at_idx ON local_sessions (expires_at);
 """
+
+LOCAL_SESSION_DAYS = 30
 
 # Static metadata (email/name/role) for the two accounts -- NOT the
 # password, which now comes only from secrets.toml's [local_accounts]
@@ -466,6 +487,92 @@ def get_local_account(email: str) -> dict | None:
         print('db.py error:', traceback.format_exc())  # shows up in server logs
         st.session_state.db_error = str(exc)
         return None
+
+
+def _hash_session_token(token: str) -> str:
+    """Plain sha256, not PBKDF2 -- this hashes a high-entropy random token
+    (32 bytes from secrets.token_urlsafe), not a human-chosen password, so
+    there's nothing to brute-force; a fast hash just keeps a leaked DB dump
+    from handing out live session tokens directly, same reasoning as never
+    storing a raw password."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def create_local_session(email: str) -> str | None:
+    """Issues a new persistent session for a local-account login and stores
+    only its hash. Returns the raw token -- only ever available this once,
+    same as a password -- for auth.py to write into a browser cookie right
+    after a successful local sign-in; None if unavailable, which auth.py
+    treats as "this login just won't survive a restart", not a failed
+    login (the login itself already succeeded by the time this is called)."""
+    engine = get_engine()
+    if engine is None:
+        return None
+    token = secrets.token_urlsafe(32)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO local_sessions (token_hash, email, expires_at)
+                VALUES (:token_hash, :email, :expires_at)
+            """), {
+                'token_hash': _hash_session_token(token), 'email': email,
+                'expires_at': datetime.now() + timedelta(days=LOCAL_SESSION_DAYS),
+            })
+        return token
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return None
+
+
+def get_local_session(token: str) -> dict | None:
+    """Validates a persistent session token (from the browser cookie)
+    against local_sessions, then re-fetches that email's CURRENT account
+    row -- not anything baked into the token -- so a role change or an
+    account deletion takes effect immediately, same as a fresh login
+    already gets via get_local_account(). Returns None for a missing,
+    expired, or orphaned (account since deleted) token -- auth.py treats
+    all of those identically to "no persistent session", never a distinct
+    error."""
+    if not token:
+        return None
+    engine = get_engine()
+    if engine is None:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT email FROM local_sessions
+                WHERE token_hash = :token_hash AND expires_at > now()
+            """), {'token_hash': _hash_session_token(token)}).mappings().fetchone()
+    except Exception as exc:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
+        st.session_state.db_error = str(exc)
+        return None
+    if not row:
+        return None
+    account = get_local_account(row['email'])
+    if not account:
+        return None
+    return {'email': account['email'], 'name': account['name'], 'role': account['role']}
+
+
+def delete_local_session(token: str) -> None:
+    """Revokes one persistent session server-side -- called at sign-out so
+    logging out actually ends that session rather than merely clearing the
+    browser's cookie, which alone would leave the token valid (until it
+    expired on its own) for anyone who'd already got hold of it."""
+    if not token:
+        return
+    engine = get_engine()
+    if engine is None:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM local_sessions WHERE token_hash = :token_hash"),
+                         {'token_hash': _hash_session_token(token)})
+    except Exception:
+        print('db.py error:', traceback.format_exc())  # shows up in server logs
 
 
 @st.cache_data(show_spinner=False, ttl=15)
